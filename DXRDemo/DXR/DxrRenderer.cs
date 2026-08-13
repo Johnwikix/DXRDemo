@@ -20,9 +20,11 @@ public sealed class DxrRenderer : IDisposable
 
     private ID3D12Resource _outputTexture = null!;
     private ID3D12Resource _prevFrameTexture = null!;
-    private ID3D12Resource _constantBuffer = null!;
-    private ID3D12DescriptorHeap _descriptorHeap = null!;
+    private ID3D12Resource[] _constantBuffers = new ID3D12Resource[DxrDevice.FrameCount];
+    private ID3D12DescriptorHeap[] _descriptorHeaps = new ID3D12DescriptorHeap[DxrDevice.FrameCount];
+    private readonly ulong[] _slotFenceValues = new ulong[DxrDevice.FrameCount];
     private uint _descriptorIncrementSize;
+    private int _frameIndex;
     private uint _width;
     private uint _height;
 
@@ -77,7 +79,7 @@ public sealed class DxrRenderer : IDisposable
         // Flush AS build to GPU before creating pipeline state (which depends on DXR support)
         Step("Flush AS GPU",       () => _device.SignalAndWait());
         Step("Pipeline state",     () => _pipelineState.Build(_device.Device, _rootSig.RootSignature, dxilBytes!,
-            new[]{"RayGen","ClosestHit","ShadowClosestHit","Miss","ShadowMiss","IntersectionSphere"}));
+            new[]{"RayGen","ClosestHit","Miss","IntersectionSphere"}));
         Step("Shader table",       () => _shaderTable.Build(_device.Device, _pipelineState.Properties));
         Step("Frame resources",    () => CreateFrameResources());
         Step("Swap chain",         () => _swapChain.Initialize(_device.DxgiFactory, _device.CommandQueue, panel, _width, _height));
@@ -113,15 +115,19 @@ public sealed class DxrRenderer : IDisposable
             _device.Device, _width, _height, Format.R8G8B8A8_UNorm,
             ResourceStates.UnorderedAccess, "PrevFrame");
 
-        _constantBuffer = DxrResources.CreateUploadBuffer(
-            _device.Device, (ulong)Marshal.SizeOf<SceneConstantsGpu>(), "SceneCB");
-
-        _descriptorHeap = _device.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(
-            new DescriptorHeapDescription(
-                DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-                2, DescriptorHeapFlags.ShaderVisible, 0));
         _descriptorIncrementSize = _device.Device.GetDescriptorHandleIncrementSize(
             DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
+
+        for (int i = 0; i < DxrDevice.FrameCount; i++)
+        {
+            _constantBuffers[i] = DxrResources.CreateUploadBuffer(
+                _device.Device, (ulong)Marshal.SizeOf<SceneConstantsGpu>(), $"SceneCB{i}");
+
+            _descriptorHeaps[i] = _device.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(
+                new DescriptorHeapDescription(
+                    DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
+                    2, DescriptorHeapFlags.ShaderVisible, 0));
+        }
     }
 
     public void Resize(Microsoft.UI.Xaml.Controls.SwapChainPanel panel, uint width, uint height)
@@ -129,12 +135,22 @@ public sealed class DxrRenderer : IDisposable
         if (_width == width && _height == height)
             return;
 
+        // Make sure no frame is in flight before tearing resources down.
+        foreach (var v in _slotFenceValues)
+        {
+            if (v != 0) _device.WaitForFenceValue(v);
+        }
+
         _width  = Math.Max(1, width);
         _height = Math.Max(1, height);
 
         _swapChain.Resize(_device.DxgiFactory, _device.CommandQueue, panel, _width, _height);
 
-        _descriptorHeap?.Dispose();
+        for (int i = 0; i < DxrDevice.FrameCount; i++)
+        {
+            _descriptorHeaps[i]?.Dispose();
+            _constantBuffers[i]?.Dispose();
+        }
         _outputTexture?.Dispose();
         _prevFrameTexture?.Dispose();
         CreateFrameResources();
@@ -146,6 +162,16 @@ public sealed class DxrRenderer : IDisposable
     {
         if (_width == 0 || _height == 0) return;
 
+        int slot = _frameIndex % DxrDevice.FrameCount;
+
+        // Pace the CPU: wait until the previous frame that reused this slot is done.
+        if (_slotFenceValues[slot] != 0)
+            _device.WaitForFenceValue(_slotFenceValues[slot]);
+        _slotFenceValues[slot] = 0;
+
+        _device.FrameAllocators[slot].Reset();
+        _device.CommandList.Reset(_device.FrameAllocators[slot], null);
+
         var constants = new SceneConstantsGpu
         {
             Resolution     = new Vector2(_width, _height),
@@ -154,20 +180,18 @@ public sealed class DxrRenderer : IDisposable
             CameraDistance = cameraDist,
             Frame          = frame,
         };
-        UploadConstants(constants);
-
-        _device.CommandAllocator.Reset();
-        _device.CommandList.Reset(_device.CommandAllocator, null);
+        UploadConstants(constants, _constantBuffers[slot]);
 
         // Bind the shader-visible descriptor heap before any dispatch uses the descriptor table.
-        _device.CommandList.SetDescriptorHeaps(_descriptorHeap);
+        var heap = _descriptorHeaps[slot];
+        _device.CommandList.SetDescriptorHeaps(heap);
 
         // Recreate the typed-UAV descriptors (the two textures swap roles each frame).
-        var cpuHandle = _descriptorHeap.GetCPUDescriptorHandleForHeapStart();
+        var cpuHandle = heap.GetCPUDescriptorHandleForHeapStart();
         _device.Device.CreateUnorderedAccessView(_outputTexture, null, null, cpuHandle);
         _device.Device.CreateUnorderedAccessView(
             _prevFrameTexture, null, null, cpuHandle + (int)_descriptorIncrementSize);
-        var uavTableGpuHandle = _descriptorHeap.GetGPUDescriptorHandleForHeapStart();
+        var uavTableGpuHandle = heap.GetGPUDescriptorHandleForHeapStart();
 
         _device.CommandList.SetPipelineState1(_pipelineState.StateObject);
         _device.CommandList.SetComputeRootSignature(_rootSig.RootSignature);
@@ -176,7 +200,7 @@ public sealed class DxrRenderer : IDisposable
             0, _accelerationStructure.Tlas.GPUVirtualAddress);
         _device.CommandList.SetComputeRootDescriptorTable(1, uavTableGpuHandle);
         _device.CommandList.SetComputeRootConstantBufferView(
-            2, _constantBuffer.GPUVirtualAddress);
+            2, _constantBuffers[slot].GPUVirtualAddress);
         _device.CommandList.SetComputeRootShaderResourceView(
             3, _accelerationStructure.SphereBuffer.GPUVirtualAddress);
 
@@ -186,11 +210,11 @@ public sealed class DxrRenderer : IDisposable
                 DxrShaderTable.RecordSize),
             missShaderTable: new GpuVirtualAddressRangeAndStride(
                 _shaderTable.Buffer.GPUVirtualAddress + DxrShaderTable.MissOffset,
-                DxrShaderTable.RecordSize * 2,
+                DxrShaderTable.RecordSize,
                 DxrShaderTable.RecordSize),
             hitGroupTable: new GpuVirtualAddressRangeAndStride(
                 _shaderTable.Buffer.GPUVirtualAddress + DxrShaderTable.HitGroupOffset,
-                DxrShaderTable.RecordSize * 2,
+                DxrShaderTable.RecordSize,
                 DxrShaderTable.RecordSize),
             callableShaderTable: default,
             width: _width,
@@ -221,21 +245,27 @@ public sealed class DxrRenderer : IDisposable
         (_prevFrameTexture, _outputTexture) = (_outputTexture, _prevFrameTexture);
 
         _swapChain.Present();
-        _device.SignalAndWait();
+
+        // Track this slot's completion for reuse in FrameCount frames.
+        _slotFenceValues[slot] = _device.SignalFence();
+        _frameIndex++;
     }
 
-    private unsafe void UploadConstants(SceneConstantsGpu data)
+    private unsafe void UploadConstants(SceneConstantsGpu data, ID3D12Resource buffer)
     {
         void* mapped;
-        _constantBuffer.Map(0, null, &mapped).CheckError();
+        buffer.Map(0, null, &mapped).CheckError();
         Marshal.StructureToPtr(data, (IntPtr)mapped, false);
-        _constantBuffer.Unmap(0);
+        buffer.Unmap(0);
     }
 
     public void Dispose()
     {
-        _constantBuffer?.Dispose();
-        _descriptorHeap?.Dispose();
+        for (int i = 0; i < DxrDevice.FrameCount; i++)
+        {
+            _constantBuffers[i]?.Dispose();
+            _descriptorHeaps[i]?.Dispose();
+        }
         _prevFrameTexture?.Dispose();
         _outputTexture?.Dispose();
         _swapChain?.Dispose();

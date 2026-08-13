@@ -9,17 +9,25 @@ namespace DXRDemo.DXR;
 
 public sealed class DxrDevice : IDisposable
 {
+    /// <summary>Number of frames in flight for CPU/GPU pipelining.</summary>
+    public const int FrameCount = 2;
+
     public ID3D12Device5 Device { get; private set; } = null!;
     public ID3D12CommandQueue CommandQueue { get; private set; } = null!;
     public ID3D12CommandAllocator CommandAllocator { get; private set; } = null!;
+    public ID3D12CommandAllocator[] FrameAllocators { get; } = new ID3D12CommandAllocator[FrameCount];
     public ID3D12GraphicsCommandList4 CommandList { get; private set; } = null!;
     public IDXGIFactory7 DxgiFactory { get; private set; } = null!;
     public ID3D12Fence Fence { get; private set; } = null!;
 
+    private ulong _fenceValue;
     private bool _disposed;
 
     public void Initialize()
     {
+#if DEBUG
+        // Debug layer validates every command list - significant CPU cost per frame.
+        // Only enable in Debug builds.
         try
         {
             var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
@@ -28,6 +36,7 @@ public sealed class DxrDevice : IDisposable
         catch
         {
         }
+#endif
 
         DxgiFactory = global::Vortice.DXGI.DXGI.CreateDXGIFactory2<IDXGIFactory7>(false);
 
@@ -67,17 +76,32 @@ public sealed class DxrDevice : IDisposable
             CommandListType.Direct, CommandAllocator, null);
         CommandList.Close();
 
+        for (int i = 0; i < FrameCount; i++)
+            FrameAllocators[i] = Device.CreateCommandAllocator<ID3D12CommandAllocator>(CommandListType.Direct);
+
         Fence = Device.CreateFence<ID3D12Fence>(0);
     }
 
+    /// <summary>Queues a fence signal after the currently submitted work; returns the fence value.</summary>
+    public ulong SignalFence()
+    {
+        ulong value = ++_fenceValue;
+        CommandQueue.Signal(Fence, value);
+        return value;
+    }
+
+    /// <summary>Blocks the CPU until the GPU reaches the given fence value.</summary>
+    public void WaitForFenceValue(ulong value)
+    {
+        while (Fence.CompletedValue < value)
+            Thread.Sleep(0);
+    }
+
+    /// <summary>Full CPU/GPU sync (used for one-time init flushes).</summary>
     public ulong SignalAndWait()
     {
-        ulong value = Fence.CompletedValue + 1;
-        CommandQueue.Signal(Fence, value);
-        while (Fence.CompletedValue < value)
-        {
-            Thread.Sleep(0);
-        }
+        ulong value = SignalFence();
+        WaitForFenceValue(value);
         return value;
     }
 
@@ -95,6 +119,8 @@ public sealed class DxrDevice : IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        for (int i = 0; i < FrameCount; i++)
+            FrameAllocators[i]?.Dispose();
         Fence?.Dispose();
         CommandList?.Dispose();
         CommandAllocator?.Dispose();

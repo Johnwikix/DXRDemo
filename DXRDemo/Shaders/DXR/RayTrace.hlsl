@@ -1,7 +1,10 @@
 // RayTrace.hlsl - DXR Path Tracer (lib_6_5)
 // Ported 1:1 from ComputeSharpDemo Shaders/RayTrace/RayTraceShader.cs
 // (Monte Carlo path tracer with 5 spheres: Lambertian / Metal / Glass + ground)
-// Compile with: dxc -T lib_6_5 -Zi -Qembed_debug -Fo RayTrace.dxil RayTrace.hlsl
+// Compile with: dxc -T lib_6_5 -Fo RayTrace.dxil RayTrace.hlsl
+//
+// Perf notes: shadow rays are resolved analytically inline (like the ComputeSharp
+// original) instead of nested TraceRay calls - 1 TraceRay per bounce only.
 
 #include "SceneData.hlsli"
 
@@ -22,11 +25,6 @@ struct PathTracePayload
     int    remainingBounces;
     int    hasHit;
     int    _pad;
-};
-
-struct ShadowPayload
-{
-    bool hit;
 };
 
 // ─── Constants (mirror RayTraceShader.cs) ─────────────────
@@ -86,22 +84,46 @@ float3 RandomUnitVector(inout uint state)
     return v * sqrt(RandomFloat(state));
 }
 
-// One shadow ray: returns true when something occludes [ro, rd].
-bool Shadowed(float3 ro, float3 rd)
+// Analytic sphere intersection (mirror RayTraceShader.HitSphere).
+bool HitSphere(float3 ro, float3 rd, float3 center, float radius,
+               float tMin, float tMax, out float hitT, out float3 hitNormal)
 {
-    ShadowPayload payload;
-    payload.hit = false;
+    hitT = 0;
+    hitNormal = float3(0, 0, 0);
 
-    RayDesc ray;
-    ray.Origin    = ro;
-    ray.Direction = rd;
-    ray.TMin      = 0.001;
-    ray.TMax      = 5000.0;
+    float3 oc = ro - center;
+    float a = dot(rd, rd);
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float d = b * b - a * c;
 
-    // HitGroup index 1 (HitGroup_Shadow), Miss index 1 (ShadowMiss)
-    TraceRay(SceneBVH, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-             0xFF, 1, 0, 1, ray, payload);
-    return payload.hit;
+    if (d <= 0.0001)
+        return false;
+
+    float t = (-b - sqrt(d)) / a;
+    if (t < tMin)
+        t = (-b + sqrt(d)) / a;
+
+    if (t <= tMin || t >= tMax)
+        return false;
+
+    hitT = t;
+    float3 p = ro + rd * t;
+    hitNormal = (p - center) / radius;
+    return true;
+}
+
+// Analytic shadow test against all 5 spheres (mirror RayTraceShader.ShadowHit).
+bool ShadowHit(float3 ro, float3 rd, float tMin, float tMax)
+{
+    float t;
+    float3 n;
+    for (int i = 0; i < 5; i++)
+    {
+        if (HitSphere(ro, rd, Spheres[i].Center, Spheres[i].Radius, tMin, tMax, t, n))
+            return true;
+    }
+    return false;
 }
 
 // ─── Ray Generation ──────────────────────────────────────
@@ -254,9 +276,9 @@ void ClosestHit(inout PathTracePayload payload, Attributes attr)
     float  matParam = sphere.MaterialParam;
     float3 viewDir  = -normalize(WorldRayDirection());
 
-    // ── Direct lighting: sun ──
+    // ── Direct lighting: sun (analytic shadow) ──
     float ndotl = dot(normal, SunDir);
-    if (ndotl > 0.0 && !Shadowed(hitPos + normal * 0.001, SunDir))
+    if (ndotl > 0.0 && !ShadowHit(hitPos + normal * 0.001, SunDir, 0.001, 5000.0))
     {
         float3 halfVec = normalize(viewDir + SunDir);
         float  ndoth   = max(dot(normal, halfVec), 0.0);
@@ -281,7 +303,7 @@ void ClosestHit(inout PathTracePayload payload, Attributes attr)
         }
     }
 
-    // ── Environment light sampling (hemisphere + sky) ──
+    // ── Environment light sampling (hemisphere + sky, analytic shadow) ──
     {
         float theta = RandomFloat(payload.rngState) * PI2;
         float phi   = acos(RandomFloat(payload.rngState));
@@ -292,7 +314,7 @@ void ClosestHit(inout PathTracePayload payload, Attributes attr)
                       + normal * cos(phi)
                       + z * sin(phi) * sin(theta);
 
-        if (!Shadowed(hitPos + normal * 0.001, envDir))
+        if (!ShadowHit(hitPos + normal * 0.001, envDir, 0.001, 5000.0))
         {
             float3 envColor = pow(GetSkyColor(envDir), float3(Gamma, Gamma, Gamma));
             float  ndotenv  = cos(phi);
@@ -404,18 +426,4 @@ void Miss(inout PathTracePayload payload)
     payload.color += payload.throughput * sky;
     payload.hasHit = 0;
     payload.remainingBounces = 0;
-}
-
-// ─── Shadow Miss Shader ──────────────────────────────────
-[shader("miss")]
-void ShadowMiss(inout ShadowPayload payload)
-{
-    payload.hit = false;
-}
-
-// ─── Shadow Closest Hit ──────────────────────────────────
-[shader("closesthit")]
-void ShadowClosestHit(inout ShadowPayload payload, Attributes attr)
-{
-    payload.hit = true;
 }

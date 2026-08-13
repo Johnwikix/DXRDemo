@@ -7,12 +7,10 @@ namespace DXRDemo.DXR;
 public sealed unsafe class DxrShaderTable : IDisposable
 {
     public const int RecordSize = 64;
-    public const int RayGenOffset          = 0 * RecordSize;
-    public const int MissOffset            = 1 * RecordSize;
-    public const int ShadowMissOffset      = 2 * RecordSize;
-    public const int HitGroupOffset        = 3 * RecordSize;
-    public const int ShadowHitGroupOffset  = 4 * RecordSize;
-    public const int TotalSize             = 5 * RecordSize;
+    public const int RayGenOffset         = 0 * RecordSize;
+    public const int MissOffset           = 1 * RecordSize;
+    public const int HitGroupOffset       = 2 * RecordSize;
+    public const int TotalSize            = 3 * RecordSize;
 
     public ID3D12Resource Buffer { get; private set; } = null!;
 
@@ -28,11 +26,9 @@ public sealed unsafe class DxrShaderTable : IDisposable
             Buffer.Map(0, null, &mapped).CheckError();
             int si = (int)D3D12.ShaderIdentifierSizeInBytes;
 
-            WriteRecord(mapped, RayGenOffset,          properties.GetShaderIdentifier("RayGen"), si);
-            WriteRecord(mapped, MissOffset,            properties.GetShaderIdentifier("Miss"), si);
-            WriteRecord(mapped, ShadowMissOffset,      properties.GetShaderIdentifier("ShadowMiss"), si);
-            WriteRecord(mapped, HitGroupOffset,        properties.GetShaderIdentifier("HitGroup_Sphere"), si);
-            WriteRecord(mapped, ShadowHitGroupOffset,  properties.GetShaderIdentifier("HitGroup_Shadow"), si);
+            WriteRecord(mapped, RayGenOffset,   properties.GetShaderIdentifier("RayGen"), si);
+            WriteRecord(mapped, MissOffset,     properties.GetShaderIdentifier("Miss"), si);
+            WriteRecord(mapped, HitGroupOffset, properties.GetShaderIdentifier("HitGroup_Sphere"), si);
         }
         Buffer.Unmap(0);
     }

@@ -32,7 +32,7 @@ public sealed class DxrShaderCompiler : IDisposable
 
             var psi = new ProcessStartInfo(dxcPath)
             {
-                Arguments = $"\"-T\" \"lib_6_5\" \"-Zi\" \"-Qembed_debug\" \"-Zpr\" \"-Fo\" \"{outFile}\" \"-I\" \"{dir}\" \"{entryHlsl}\"",
+                Arguments = $"\"-T\" \"lib_6_5\" \"-Fo\" \"{outFile}\" \"-I\" \"{dir}\" \"{entryHlsl}\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true,

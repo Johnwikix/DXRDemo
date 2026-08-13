@@ -25,12 +25,8 @@ public sealed class DxrPipelineState : IDisposable
                 HitGroupType.ProceduralPrimitive,
                 closestHitShaderImport: "ClosestHit",
                 intersectionShaderImport: "IntersectionSphere")),
-            new(new HitGroupDescription("HitGroup_Shadow",
-                HitGroupType.ProceduralPrimitive,
-                closestHitShaderImport: "ShadowClosestHit",
-                intersectionShaderImport: "IntersectionSphere")),
             new(new GlobalRootSignature(globalRootSig)),
-            new(new RaytracingPipelineConfig(maxTraceRecursionDepth: 2)),
+            new(new RaytracingPipelineConfig(maxTraceRecursionDepth: 1)),
             new(new RaytracingShaderConfig(maxPayloadSizeInBytes: 64, maxAttributeSizeInBytes: 4)),
         };
 
