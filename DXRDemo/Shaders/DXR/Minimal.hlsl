@@ -1,0 +1,2 @@
+[shader("raygeneration")]
+void TestRayGen() { }

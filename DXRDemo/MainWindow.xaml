@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="DXRDemo.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:DXRDemo"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="DXR Demo — Monte Carlo Path Tracer"
+    mc:Ignorable="d">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,*">
+        <!--  Toolbar  -->
+        <Grid
+            Grid.Row="0"
+            Margin="12,8"
+            ColumnDefinitions="Auto,*,Auto">
+            <TextBlock
+                x:Name="TitleText"
+                Grid.Column="0"
+                VerticalAlignment="Center"
+                FontWeight="SemiBold"
+                Text="DXR Path Tracer" />
+            <TextBlock
+                x:Name="StatusText"
+                Grid.Column="1"
+                Margin="12,0,0,0"
+                VerticalAlignment="Center"
+                FontSize="13"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                IsTextSelectionEnabled="True" />
+            <TextBlock
+                x:Name="FpsText"
+                Grid.Column="2"
+                VerticalAlignment="Center"
+                FontSize="13"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </Grid>
+
+        <!--  GPU surface  -->
+        <SwapChainPanel
+            x:Name="RenderPanel"
+            Grid.Row="1"
+            SizeChanged="OnRenderPanelSizeChanged" />
+    </Grid>
+</Window>
