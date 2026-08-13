@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Direct3D.DXC" Version="1.9.2602.24" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
@@ -31,6 +32,20 @@
   <ItemGroup>
     <None Include="Shaders\DXR\**\*.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Shaders\DXR\**\*.hlsli" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <Microsoft_Direct3D_DXC_SkipLibraryCopy>true</Microsoft_Direct3D_DXC_SkipLibraryCopy>
+    <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">x86</_DxcSourceArch>
+    <_DxcSourceArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(RuntimeIdentifier)' == 'win-arm64'">arm64</_DxcSourceArch>
+    <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x64' Or '$(RuntimeIdentifier)' == 'win-x64'">x64</_DxcSourceArch>
+    <_DxcSourceDir Condition="'$(_DxcSourceArch)' != ''">$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.direct3d.dxc', '1.9.2602.24', 'build', 'native', 'bin', '$(_DxcSourceArch)'))</_DxcSourceDir>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_DxcSourceArch)' != ''">
+    <None Include="$(_DxcSourceDir)\dxc.exe" Link="dxc.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(_DxcSourceDir)\dxcompiler.dll" Link="dxcompiler.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(_DxcSourceDir)\dxil.dll" Link="dxil.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Publish Properties -->
