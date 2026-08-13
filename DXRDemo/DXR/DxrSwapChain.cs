@@ -10,6 +10,8 @@ public sealed class DxrSwapChain : IDisposable
 {
     public IDXGISwapChain1 SwapChain { get; private set; } = null!;
     private IDXGISwapChain3 SwapChain3 = null!;
+    private SwapChainPanel? _panel;
+    private ISwapChainPanelNative? _panelNative;
     public uint Width  { get; private set; }
     public uint Height { get; private set; }
 
@@ -42,6 +44,8 @@ public sealed class DxrSwapChain : IDisposable
 
     private void BindToPanel(SwapChainPanel panel)
     {
+        _panel = panel;
+
         // WinUI 3's Microsoft.UI.Xaml.Media.DxInterop.ISwapChainPanelNative IID.
         // (Distinct from the UWP Windows.UI.Xaml one, which is f92f19d2-3ade-45a6-a20c-f6f1ea90554b.)
         var iid = new Guid("63aad0b8-7c24-40ff-85a8-640d944cc325");
@@ -56,18 +60,38 @@ public sealed class DxrSwapChain : IDisposable
             throw new InvalidOperationException(
                 $"Failed to query ISwapChainPanelNative (hr=0x{hr:X8}).");
 
-        // GetTypedObjectForIUnknown hands the QI reference to the RCW, which releases it
-        // when finalized. Do NOT Marshal.Release(nativePtr) here - that would double-release.
-        var native = (ISwapChainPanelNative)Marshal.GetTypedObjectForIUnknown(
+        // GetTypedObjectForIUnknown hands the QI reference to the RCW. We keep the RCW in a
+        // field and release it deterministically in Dispose (NOT via GC finalizer, which could
+        // run after the panel is destroyed and release a dangling pointer).
+        _panelNative = (ISwapChainPanelNative)Marshal.GetTypedObjectForIUnknown(
             nativePtr, typeof(ISwapChainPanelNative));
-        int setHr = native.SetSwapChain(SwapChain.NativePointer);
+        int setHr = _panelNative.SetSwapChain(SwapChain.NativePointer);
         if (setHr != 0)
             throw new InvalidOperationException(
                 $"SetSwapChain failed (hr=0x{setHr:X8}).");
     }
 
+    /// <summary>
+    /// Releases the panel's reference to the swap chain. Must be called BEFORE the panel is
+    /// destroyed (i.e. before the window closes) and before disposing the swap chain, otherwise
+    /// the panel's teardown releases a dangling reference into the D3D12 device (DWM crash).
+    /// </summary>
+    private void UnbindFromPanel()
+    {
+        if (_panelNative != null)
+        {
+            _panelNative.SetSwapChain(IntPtr.Zero);
+            Marshal.FinalReleaseComObject(_panelNative);
+            _panelNative = null;
+        }
+        _panel = null;
+    }
+
     public void Resize(IDXGIFactory7 factory, ID3D12CommandQueue commandQueue, SwapChainPanel panel, uint width, uint height)
     {
+        // Unbind the old swap chain from the panel first, then release it, then bind the new one.
+        UnbindFromPanel();
+
         SwapChain?.Dispose();
         SwapChain3?.Dispose();
         Width = width;
@@ -102,6 +126,8 @@ public sealed class DxrSwapChain : IDisposable
 
     public void Dispose()
     {
+        // Unbind the swap chain from the panel BEFORE tearing down the swap chain and device.
+        UnbindFromPanel();
         SwapChain3?.Dispose();
         SwapChain?.Dispose();
     }

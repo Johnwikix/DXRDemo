@@ -261,6 +261,14 @@ public sealed class DxrRenderer : IDisposable
 
     public void Dispose()
     {
+        // The multi-buffered loop may have up to FrameCount frames still in flight on the GPU.
+        // Wait for them before tearing down resources, otherwise the GPU can fault on freed
+        // resources (TDR / DWM black screen).
+        foreach (var v in _slotFenceValues)
+        {
+            if (v != 0) _device.WaitForFenceValue(v);
+        }
+
         for (int i = 0; i < DxrDevice.FrameCount; i++)
         {
             _constantBuffers[i]?.Dispose();
@@ -268,7 +276,7 @@ public sealed class DxrRenderer : IDisposable
         }
         _prevFrameTexture?.Dispose();
         _outputTexture?.Dispose();
-        _swapChain?.Dispose();
+        _swapChain?.Dispose(); // unbinds the panel first (SetSwapChain(null))
         _shaderTable?.Dispose();
         _pipelineState?.Dispose();
         _accelerationStructure?.Dispose();
