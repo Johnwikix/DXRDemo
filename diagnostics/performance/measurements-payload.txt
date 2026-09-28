@@ -1,0 +1,8 @@
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=baseline.hlsl; size=1280x720
+GPU timestamp: median=3.0572 ms; mean=3.5952 ms; p10=2.4256; p90=5.3782; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=lean_payload.hlsl; size=1280x720
+GPU timestamp: median=3.1156 ms; mean=3.6638 ms; p10=2.6916; p90=5.4307; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=baseline.hlsl; size=1280x720
+GPU timestamp: median=3.0287 ms; mean=3.5579 ms; p10=2.4452; p90=5.3719; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=lean_payload.hlsl; size=1280x720
+GPU timestamp: median=3.1010 ms; mean=3.6485 ms; p10=2.6341; p90=5.4453; n=300

@@ -1,0 +1,1 @@
+ComputeSharp raw path tracer, 1280x720, 4 spp, 10 bounces, CPU wall time including submit/wait: median=0.4887 ms; mean=0.6936; p10=0.4628; p90=0.8304; n=300

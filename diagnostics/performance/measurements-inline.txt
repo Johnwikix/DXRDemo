@@ -1,0 +1,2 @@
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=inline_query.cs.hlsl; size=1280x720
+GPU timestamp: median=2.8879 ms; mean=3.3888 ms; p10=2.5248; p90=5.1015; n=300

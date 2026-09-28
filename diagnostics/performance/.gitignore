@@ -1,0 +1,10 @@
+bin/
+obj/
+.nuget-scratch/
+variants/
+models/*.gz
+models/*.ply
+models/*.mesh
+models/*.bvh
+mesh-output/
+__pycache__/

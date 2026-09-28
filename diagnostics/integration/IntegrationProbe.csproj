@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
+    <WindowsSdkPackageVersion>10.0.22621.57</WindowsSdkPackageVersion><NuGetAudit>false</NuGetAudit>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ComputeSharp" Version="3.2.0" />
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
+    <Compile Include="Probe.cs" />
+    <Compile Include="../../DXRDemo/DXR/*.cs" Exclude="../../DXRDemo/DXR/DxrRenderer.cs;../../DXRDemo/DXR/DxrSwapChain.cs" />
+    <Compile Include="../../DXRDemo/Shaders/RayTrace/*.cs" />
+    <Compile Include="../../DXRDemo/Shaders/IShaderPass.cs;../../DXRDemo/Shaders/ShaderAuthor.cs;../../DXRDemo/Shaders/ShaderCapabilities.cs" />
+    <Compile Include="../../DXRDemo/Hdr/IHdrShaderRunner.cs;../../DXRDemo/Hdr/IRenderDiagnostics.cs;../../DXRDemo/Hdr/GpuDiagnostics.cs" />
+    <Content Include="../../DXRDemo/Assets/Models/**" Link="Assets/Models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

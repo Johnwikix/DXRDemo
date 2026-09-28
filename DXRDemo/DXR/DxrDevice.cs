@@ -22,16 +22,20 @@ public sealed class DxrDevice : IDisposable
 
     private ulong _fenceValue;
     private bool _disposed;
+    private readonly AutoResetEvent _fenceEvent = new(false);
 
-    public void Initialize()
+    public void Initialize(ID3D12Device5? sharedDevice = null)
     {
 #if DEBUG
         // Debug layer validates every command list - significant CPU cost per frame.
         // Only enable in Debug builds.
         try
         {
-            var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
-            debug.EnableDebugLayer();
+            if (sharedDevice == null)
+            {
+                using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
+                debug.EnableDebugLayer();
+            }
         }
         catch
         {
@@ -41,7 +45,8 @@ public sealed class DxrDevice : IDisposable
         DxgiFactory = global::Vortice.DXGI.DXGI.CreateDXGIFactory2<IDXGIFactory7>(false);
 
         IDXGIAdapter1? adapter = null;
-        for (uint i = 0; DxgiFactory.EnumAdapters1(i, out adapter).Success; i++)
+        Device = sharedDevice!;
+        for (uint i = 0; sharedDevice == null && DxgiFactory.EnumAdapters1(i, out adapter).Success; i++)
         {
             var desc = adapter.Description1;
             if ((desc.Flags & AdapterFlags.Software) != 0)
@@ -86,15 +91,16 @@ public sealed class DxrDevice : IDisposable
     public ulong SignalFence()
     {
         ulong value = ++_fenceValue;
-        CommandQueue.Signal(Fence, value);
+        CommandQueue.Signal(Fence, value).CheckError();
         return value;
     }
 
     /// <summary>Blocks the CPU until the GPU reaches the given fence value.</summary>
     public void WaitForFenceValue(ulong value)
     {
-        while (Fence.CompletedValue < value)
-            Thread.Sleep(0);
+        if (Fence.CompletedValue >= value) return;
+        Fence.SetEventOnCompletion(value, _fenceEvent.SafeWaitHandle.DangerousGetHandle()).CheckError();
+        _fenceEvent.WaitOne();
     }
 
     /// <summary>Full CPU/GPU sync (used for one-time init flushes).</summary>
@@ -127,5 +133,6 @@ public sealed class DxrDevice : IDisposable
         CommandQueue?.Dispose();
         Device?.Dispose();
         DxgiFactory?.Dispose();
+        _fenceEvent.Dispose();
     }
 }

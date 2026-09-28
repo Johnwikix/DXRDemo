@@ -1,0 +1,8 @@
+{
+  "name": "Armadillo",
+  "triangles": 345944,
+  "nodes": 114181,
+  "max_depth": 19,
+  "leaf_limit": 8,
+  "build_seconds": 11.972222499999589
+}

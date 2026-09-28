@@ -1,0 +1,34 @@
+<winex:WindowEx
+    x:Class="DXRDemo.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:winex="using:WinUIEx">
+    <ScrollViewer Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <StackPanel Padding="24" Spacing="20">
+            <TextBlock Text="渲染设置" Style="{ThemeResource TitleTextBlockStyle}" />
+            <TextBlock Text="修改即时生效。拖动场景旋转，滚轮缩放。" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <ComboBox x:Name="ShaderSelector" x:FieldModifier="internal" Header="渲染程序" DisplayMemberPath="DisplayName" HorizontalAlignment="Stretch" AutomationProperties.AutomationId="ShaderSelector" />
+            <StackPanel x:Name="RayTraceParamBar" x:FieldModifier="internal" Spacing="16">
+                <ComboBox x:Name="ModelSelector" x:FieldModifier="internal" Header="场景模型" HorizontalAlignment="Stretch" AutomationProperties.AutomationId="ModelSelector" />
+                <ComboBox x:Name="DenoiserSelector" x:FieldModifier="internal" Header="降噪" HorizontalAlignment="Stretch" AutomationProperties.AutomationId="DenoiserSelector">
+                    <ComboBoxItem Content="关闭" />
+                    <ComboBoxItem Content="时间累积" />
+                    <ComboBoxItem Content="RELAX 风格（时间 + 空间）" />
+                </ComboBox>
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <NumberBox x:Name="SamplesBox" x:FieldModifier="internal" Header="每像素采样 SPP" Minimum="1" Maximum="16" SmallChange="1" Value="2" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="SamplesBox" />
+                    <NumberBox x:Name="MaxBouncesBox" x:FieldModifier="internal" Grid.Column="1" Header="最大反弹次数" Minimum="1" Maximum="32" SmallChange="1" Value="10" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="MaxBouncesBox" />
+                </Grid>
+                <Button x:Name="ResetCameraButton" x:FieldModifier="internal" Content="重置相机" AutomationProperties.AutomationId="ResetCameraButton" />
+            </StackPanel>
+            <ToggleSwitch x:Name="HdrToggle" x:FieldModifier="internal" Header="HDR10 输出" OnContent="开启" OffContent="关闭" AutomationProperties.AutomationId="HdrToggle" />
+            <TextBlock x:Name="HdrStatusText" x:FieldModifier="internal" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <ToggleSwitch x:Name="DiagnosticsToggle" x:FieldModifier="internal" Header="GPU 诊断信息" IsOn="True" OnContent="显示" OffContent="隐藏" AutomationProperties.AutomationId="DiagnosticsToggle" />
+            <TextBlock Text="RENDER 为渲染帧率，SUBMIT 为成功提交呈现的帧率；显示器实际刷新率由系统决定。FRAME 为完整渲染循环的平均耗时，包含同步、降噪和呈现。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <Button x:Name="ResolutionButton" x:FieldModifier="internal" Content="场景分辨率设为 1280 × 720" AutomationProperties.AutomationId="ResolutionButton" />
+            <TextBlock x:Name="ErrorText" x:FieldModifier="internal" TextWrapping="Wrap" IsTextSelectionEnabled="True" AutomationProperties.LiveSetting="Polite" />
+            <TextBlock Text="Stanford 模型来源与使用条款见 Assets/Models/SOURCES.md。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+    </ScrollViewer>
+</winex:WindowEx>

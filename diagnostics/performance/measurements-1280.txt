@@ -1,0 +1,22 @@
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=baseline.hlsl; size=1280x720
+GPU timestamp: median=3.0628 ms; mean=3.8677 ms; p10=2.4429; p90=6.3745; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=samples2.hlsl; size=1280x720
+GPU timestamp: median=1.2671 ms; mean=1.6079 ms; p10=1.2543; p90=2.8023; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=offset_direction.hlsl; size=1280x720
+GPU timestamp: median=2.7108 ms; mean=3.6606 ms; p10=2.2486; p90=6.2004; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=shadow_unroll.hlsl; size=1280x720
+GPU timestamp: median=2.8694 ms; mean=3.7876 ms; p10=2.4159; p90=6.5921; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=literal_scene.hlsl; size=1280x720
+GPU timestamp: median=3.0233 ms; mean=3.5230 ms; p10=2.6877; p90=5.3869; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=analytic_raygen.hlsl; size=1280x720
+GPU timestamp: median=0.7278 ms; mean=0.8275 ms; p10=0.7231; p90=0.9248; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=analytic_literal.hlsl; size=1280x720
+GPU timestamp: median=0.6494 ms; mean=0.7904 ms; p10=0.6449; p90=0.8319; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=analytic.cs.hlsl; size=1280x720
+GPU timestamp: median=0.4853 ms; mean=0.5454 ms; p10=0.4808; p90=0.4943; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=analytic_literal.cs.hlsl; size=1280x720
+GPU timestamp: median=0.4810 ms; mean=0.5251 ms; p10=0.4764; p90=0.4914; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=rng_match_compute.hlsl; size=1280x720
+GPU timestamp: median=2.8640 ms; mean=3.3288 ms; p10=2.6281; p90=4.9692; n=300
+GPU=NVIDIA GeForce RTX 5070 Ti; shader=baseline.hlsl; size=1280x720
+GPU timestamp: median=2.8770 ms; mean=3.2651 ms; p10=2.4238; p90=4.7901; n=300

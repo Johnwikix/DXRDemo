@@ -1,0 +1,43 @@
+{
+  "analytic_raygen": {
+    "rgb_mean_absolute_error_out_of_255": 0.00732349537037037,
+    "rgb_channels_within_one_code_value_percent": 99.93051938657408,
+    "rgb_rmse_out_of_255": 0.42948427433160824
+  },
+  "analytic.cs": {
+    "rgb_mean_absolute_error_out_of_255": 0.10750904224537038,
+    "rgb_channels_within_one_code_value_percent": 98.20345052083333,
+    "rgb_rmse_out_of_255": 1.189511727996688
+  },
+  "inline_query.cs": {
+    "rgb_mean_absolute_error_out_of_255": 0.10750904224537038,
+    "rgb_channels_within_one_code_value_percent": 98.20345052083333,
+    "rgb_rmse_out_of_255": 1.189511727996688
+  },
+  "offset_direction": {
+    "rgb_mean_absolute_error_out_of_255": 7.247468894675926,
+    "rgb_channels_within_one_code_value_percent": 84.20446325231481,
+    "rgb_rmse_out_of_255": 25.94135438228891
+  },
+  "glass_self_hit": {
+    "incoming_origin": [
+      0,
+      0,
+      -3
+    ],
+    "incoming_direction": [
+      0.24253562503633297,
+      0.0,
+      0.9701425001453319
+    ],
+    "hit_position": [
+      0.5395042867796359,
+      0.0,
+      -0.8419828528814564
+    ],
+    "transmitted_direction_dot_normal": -0.8744746321952063,
+    "ray_t_min": 0.001,
+    "next_hit_t_original_positive_normal_offset": 0.0011437197337680338,
+    "next_hit_t_directional_offset": 1.7483436830001058
+  }
+}

@@ -1,0 +1,80 @@
+[
+  {
+    "model": "dragon_vrip_res4",
+    "triangles": 11102,
+    "dxr_gpu_ms": 0.468272,
+    "sm_gpu_ms": 3.873664,
+    "speedup": 8.272252024464414,
+    "computesharp_wall_ms": 3.6764,
+    "primary_mesh_coverage_percent": 12.85763888888889,
+    "primary_hit_mask_mismatch_percent": 0.0,
+    "primary_depth_mae": 2.1571473496351246e-07,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 2.193721968524187e-07
+  },
+  {
+    "model": "dragon_vrip_res3",
+    "triangles": 47794,
+    "dxr_gpu_ms": 0.49904000000000004,
+    "sm_gpu_ms": 5.193984,
+    "speedup": 10.407951266431548,
+    "computesharp_wall_ms": 5.671,
+    "primary_mesh_coverage_percent": 13.051323784722221,
+    "primary_hit_mask_mismatch_percent": 0.0,
+    "primary_depth_mae": 2.1707644748403254e-07,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 5.348006197891664e-07
+  },
+  {
+    "model": "bun_zipper",
+    "triangles": 69451,
+    "dxr_gpu_ms": 0.54384,
+    "sm_gpu_ms": 6.163328,
+    "speedup": 11.332980288320094,
+    "computesharp_wall_ms": 5.7749,
+    "primary_mesh_coverage_percent": 23.12912326388889,
+    "primary_hit_mask_mismatch_percent": 0.0,
+    "primary_depth_mae": 4.371535396785475e-06,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 6.401786549758981e-07
+  },
+  {
+    "model": "dragon_vrip_res2",
+    "triangles": 202520,
+    "dxr_gpu_ms": 0.551904,
+    "sm_gpu_ms": 7.006752,
+    "speedup": 12.695599234649505,
+    "computesharp_wall_ms": 6.6531,
+    "primary_mesh_coverage_percent": 13.030815972222223,
+    "primary_hit_mask_mismatch_percent": 0.00010850694444444444,
+    "primary_depth_mae": 5.424243227025727e-06,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 1.4520162494591204e-06
+  },
+  {
+    "model": "Armadillo",
+    "triangles": 345944,
+    "dxr_gpu_ms": 0.5047360000000001,
+    "sm_gpu_ms": 4.492352,
+    "speedup": 8.900399416724783,
+    "computesharp_wall_ms": 7.7639,
+    "primary_mesh_coverage_percent": 12.842556423611112,
+    "primary_hit_mask_mismatch_percent": 0.0,
+    "primary_depth_mae": 2.0388769428336673e-07,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 4.707725338448654e-07
+  },
+  {
+    "model": "dragon_vrip",
+    "triangles": 871414,
+    "dxr_gpu_ms": 0.622304,
+    "sm_gpu_ms": 14.925728,
+    "speedup": 23.984624877873195,
+    "computesharp_wall_ms": 13.0585,
+    "primary_mesh_coverage_percent": 13.018880208333334,
+    "primary_hit_mask_mismatch_percent": 0.0,
+    "primary_depth_mae": 1.1205240298295394e-05,
+    "computesharp_max_difference": 0.0,
+    "path_linear_rgb_mae": 1.711715526653279e-06
+  }
+]

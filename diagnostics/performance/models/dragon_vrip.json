@@ -1,0 +1,8 @@
+{
+  "name": "dragon_vrip",
+  "triangles": 871414,
+  "nodes": 306649,
+  "max_depth": 23,
+  "leaf_limit": 8,
+  "build_seconds": 30.033018800000264
+}
