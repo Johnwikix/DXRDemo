@@ -9,7 +9,7 @@ public readonly partial struct MeshPathTraceShader(
     int temporal, Float2 jitter,
     ReadOnlyBuffer<Float4> triangles, ReadOnlyBuffer<Float4> nodes,
     ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-    ReadWriteTexture2D<Float4> surfaces) : IComputeShader
+    ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4> normalRoughness) : IComputeShader
 {
     private static float Random(ref uint state)
     {
@@ -101,6 +101,7 @@ public readonly partial struct MeshPathTraceShader(
         uint rng = (uint)(pixel.X * 73856093 + pixel.Y * 19349663 + frame * 83492791 + 12345);
         Float3 sum = Float3.Zero;
         float distanceSum = 0;
+        float diffuseHitSum = 0;
         Float3 primaryNormal = Float3.Zero;
         float primaryMaterial = 3;
         Float4 primarySurface = Float4.Zero;
@@ -115,6 +116,8 @@ public readonly partial struct MeshPathTraceShader(
             Float3 rd = Hlsl.Normalize(forward + right * sx + up * sy);
             Float3 throughput = new(1,1,1);
             Float3 color = Float3.Zero;
+            float diffuseHit = 65504;
+            bool primaryHit = false;
             for (int bounce = 0; bounce < maxBounces; bounce++)
             {
                 float meshT; int id;
@@ -131,10 +134,12 @@ public readonly partial struct MeshPathTraceShader(
                     color += throughput * Sky(rd); break;
                 }
                 float t = ground ? groundT : meshT;
+                if (bounce == 1) diffuseHit = t;
                 Float3 normal = ground ? new Float3(0,1,0) : Hlsl.Normalize(Hlsl.Cross(triangles[id*3+1].XYZ,triangles[id*3+2].XYZ));
                 if (Hlsl.Dot(normal,rd) > 0) normal = -normal;
                 if (bounce == 0)
                 {
+                    primaryHit = true;
                     distanceSum += t / (t + 1);
                     if (sample == 0)
                     {
@@ -157,10 +162,27 @@ public readonly partial struct MeshPathTraceShader(
                 rd = Hlsl.Normalize(tangent * (r * Hlsl.Cos(phi)) + bitangent * (r * Hlsl.Sin(phi)) + normal * Hlsl.Sqrt(Hlsl.Max(0,1-r*r)));
                 throughput *= albedo;
             }
+            if (temporal == 2 && maxBounces == 1 && primaryHit)
+            {
+                // NRD requires the actual first diffuse-lobe hit even when radiance tracing stops after direct light.
+                float hitT; int hitId;
+                bool hit = HitMesh(ro, rd, 1000, false, out hitT, out hitId);
+                float groundHit = rd.Y < -1e-8f ? -ro.Y / rd.Y : 1000;
+                if (groundHit > 0.0001f && groundHit < hitT) { hitT = groundHit; hit = true; }
+                diffuseHit = hit ? hitT : 65504;
+            }
+            diffuseHitSum += diffuseHit;
             sum += color;
         }
-        output[pixel] = new Float4(sum / samples, distanceSum / samples);
+        output[pixel] = new Float4(sum / samples, temporal == 2 ? diffuseHitSum / samples : distanceSum / samples);
         normals[pixel] = new Float4(primaryNormal * 0.5f + 0.5f, primaryMaterial / 255.0f);
         if (temporal != 0) surfaces[pixel] = primarySurface;
+        if (temporal == 2)
+        {
+            // Matches NRD normal encoding 4 (RGBA16_SNORM / float) and linear roughness 1.
+            Float3 n = primaryMaterial == 3 ? new Float3(0, 0, 1) : primaryNormal;
+            n /= Hlsl.Max(Hlsl.Abs(n.X), Hlsl.Max(Hlsl.Abs(n.Y), Hlsl.Abs(n.Z)));
+            normalRoughness[pixel] = new Float4(n, 1);
+        }
     }
 }

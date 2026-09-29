@@ -1,7 +1,9 @@
 # DXR Demo — WinUI 3 + DirectX 12 Raytracing Path Tracer
 
 当前三角形模型渲染器已支持 **FSR 3.1 / XeSS / DLSS 超分辨率**：在设置中选择算法与
-1–100% 渲染比例，不支持的算法会禁用，初始化失败会显示原生分辨率回退。
+1–100% 渲染比例滑块，不支持的算法会禁用，初始化失败会显示原生分辨率回退。
+默认降噪已接入真正的 **NVIDIA NRD 4.17.3 / RELAX_DIFFUSE**，支持原生分辨率与 SR
+组合，并在 Intel Arc 140T 上验证；旧版风格滤波保留作对照，详见 [NRD 说明](docs/NRD.md)。
 默认仍关闭 SR。x64 构建还需要 PowerShell 7 与 Visual Studio C++ v145 工具集；
 厂商 SDK 已固定版本并附带许可证，构建时会校验和编译原生桥接。
 管线、Intel 离屏验证及 DLSS 光线重建可行性见 [超分说明](docs/SUPER_RESOLUTION.md)。

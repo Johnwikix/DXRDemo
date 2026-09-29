@@ -5,12 +5,17 @@ using DXRDemo.SuperResolution;
 
 namespace DXRDemo.Shaders.RayTrace;
 
-public enum RayTraceDenoiserMode { None, TemporalOnly, Relax }
+public enum RayTraceDenoiserMode
+{
+    None, TemporalOnly, Relax,
+    /// <summary>Uses the complete NVIDIA NRD RELAX diffuse denoiser for the diffuse-only mesh renderer.</summary>
+    NrdRelax
+}
 
 /// <summary>Both trace backends feed the same HDR encoder and temporal / SVGF-style filters.</summary>
 public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
 {
-    private sealed record Settings(int Scene = 0, RayTraceDenoiserMode Denoiser = RayTraceDenoiserMode.Relax,
+    private sealed record Settings(int Scene = 0, RayTraceDenoiserMode Denoiser = RayTraceDenoiserMode.NrdRelax,
         int Bounces = 10, int Samples = 2, Float2 Orbit = default, float Distance = 2.7f, Float2 Mouse = default, int Revision = 0,
         ReconstructionMode Reconstruction = ReconstructionMode.Off, int RenderScale = 67, int CameraReset = 0);
     private readonly object _settingsLock = new();
@@ -35,6 +40,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     private ReadWriteTexture2D<R16, float>? _momentA, _momentB;
     private ReadWriteTexture2D<Rgba32, Float4>? _normal;
     private ReadWriteTexture2D<Float4>? _surfaces;
+    private ReadWriteTexture2D<Float4>? _normalRoughness;
     private SuperResolutionRenderer? _reconstruction;
     private Settings? _previousSettings;
     private TimeSpan _lastRenderTime;
@@ -66,6 +72,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     public int RenderScalePercent { get => Snapshot.RenderScale; set => Change(s => s with { RenderScale = Math.Clamp(value, 1, 100) }); }
     /// <summary>Gets the most recently published capabilities and actual reconstruction mode.</summary>
     public ReconstructionStatus? ReconstructionStatus => Volatile.Read(ref _reconstruction)?.Status;
+    internal uint NrdDispatchCount => _reconstruction?.NrdDispatchCount ?? 0;
     public string DiagnosticText
     {
         get
@@ -76,7 +83,9 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             string reconstruction = sr == null ? "SR INITIALIZING" : sr.Active == ReconstructionMode.Off
                 ? (sr.Requested == ReconstructionMode.Off ? "SR OFF / NATIVE" : $"{sr.Requested} UNAVAILABLE / NATIVE")
                 : $"SR {sr.Active}  {sr.InputWidth}x{sr.InputHeight} -> {sr.OutputWidth}x{sr.OutputHeight}";
-            return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {s.Denoiser.ToString().ToUpperInvariant()}\n{reconstruction}";
+            string denoiser = s.Denoiser == RayTraceDenoiserMode.NrdRelax
+                ? (sr?.NrdActive == true ? "NRD RELAX" : "LEGACY RELAX (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
+            return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}\n{reconstruction}";
         }
     }
     public string Id => "ray-trace";
@@ -112,15 +121,18 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             }
             mesh = load.GetAwaiter().GetResult();
         }
-        if (_backend is DxrMeshBackend || s.Reconstruction != ReconstructionMode.Off)
+        if (_reconstruction != null || _backend is DxrMeshBackend || s.Reconstruction != ReconstructionMode.Off || s.Denoiser == RayTraceDenoiserMode.NrdRelax)
         {
             if (_reconstruction == null) Volatile.Write(ref _reconstruction, new SuperResolutionRenderer(device));
-            _reconstruction.Configure(mesh == null ? ReconstructionMode.Off : s.Reconstruction, s.RenderScale, width, height);
+            _reconstruction.Configure(mesh == null ? ReconstructionMode.Off : s.Reconstruction, s.RenderScale, width, height,
+                mesh != null && s.Denoiser == RayTraceDenoiserMode.NrdRelax);
         }
-        bool temporal = _reconstruction is { Active: not ReconstructionMode.Off };
+        bool temporal = _reconstruction is { LinearPipelineActive: true };
+        bool nrd = _reconstruction?.Status.NrdActive == true;
+        RayTraceDenoiserMode denoiserMode = s.Denoiser == RayTraceDenoiserMode.NrdRelax && !nrd ? RayTraceDenoiserMode.Relax : s.Denoiser;
         int inputWidth = temporal ? _reconstruction!.InputWidth : width;
         int inputHeight = temporal ? _reconstruction!.InputHeight : height;
-        EnsureTextures(inputWidth, inputHeight, temporal);
+        EnsureTextures(inputWidth, inputHeight, temporal, nrd);
         if (_revision != s.Revision || _hdr != hdr) { _frame = 0; _revision = s.Revision; _hdr = hdr; }
         if (temporal)
         {
@@ -128,17 +140,17 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 old.Samples != s.Samples || old.Bounces != s.Bounces || old.Denoiser != s.Denoiser)
                 _reconstruction!.Reset();
             Float2 jitter = _reconstruction!.Jitter();
-            _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter);
+            _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness);
             double elapsed = _lastRenderTime == TimeSpan.Zero ? 1.0 / 60 : (time - _lastRenderTime).TotalSeconds;
             // Deterministic offscreen callers may intentionally pass TimeSpan.Zero on every frame.
             if (time == TimeSpan.Zero) elapsed = 1.0 / 60;
-            bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, s.Denoiser, hdr, elapsed);
+            bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness);
             _previousSettings = s; _lastRenderTime = time;
             _frame = Math.Min(_frame + 1, int.MaxValue - 1);
             return produced;
         }
         _previousSettings = s; _lastRenderTime = time;
-        var signal = s.Denoiser == RayTraceDenoiserMode.None ? texture : _signal!;
+        var signal = denoiserMode == RayTraceDenoiserMode.None ? texture : _signal!;
         if (mesh != null)
         {
             _backend.Trace(mesh, width, height, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!);
@@ -146,9 +158,9 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         }
         else device.ForEach(signal, new RayTraceShader((float)time.TotalSeconds, s.Mouse, new(width, height), _frame, s.Distance,
             hdr.IsHdrEnabled, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, s.Bounces, s.Samples, _normal!));
-        if (s.Denoiser == RayTraceDenoiserMode.TemporalOnly)
+        if (denoiserMode == RayTraceDenoiserMode.TemporalOnly)
             device.ForEach(texture, new NaiveTemporalAccumulationShader(_frame, _signal!, _historyA!));
-        else if (s.Denoiser == RayTraceDenoiserMode.Relax)
+        else if (denoiserMode == RayTraceDenoiserMode.Relax)
         {
             Float2 res = new(width, height);
             device.ForEach(_historyB!, new TemporalAccumulationShader(_frame, res, _signal!, _historyA!, _momentA!, _momentB!));
@@ -163,9 +175,9 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         _frame = Math.Min(_frame + 1, int.MaxValue - 1);
         return true;
     }
-    private void EnsureTextures(int width, int height, bool temporal)
+    private void EnsureTextures(int width, int height, bool temporal, bool nrd)
     {
-        if (_raw != null && _width == width && _height == height && (_surfaces != null) == temporal) return;
+        if (_raw != null && _width == width && _height == height && (_surfaces != null) == temporal && (_normalRoughness != null) == nrd) return;
         DisposeTextures();
         var device = _device ?? throw new InvalidOperationException("Initialize before allocating textures.");
         _raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
@@ -173,6 +185,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         if (temporal)
         {
             _surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
+            if (nrd) _normalRoughness = device.AllocateReadWriteTexture2D<Float4>(width, height);
             _width = width; _height = height; _frame = 0;
             return;
         }
@@ -190,6 +203,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         _raw?.Dispose(); _normal?.Dispose(); _signal?.Dispose(); _historyA?.Dispose(); _historyB?.Dispose();
         _filterA?.Dispose(); _filterB?.Dispose(); _momentA?.Dispose(); _momentB?.Dispose();
         _surfaces?.Dispose(); _surfaces = null;
+        _normalRoughness?.Dispose(); _normalRoughness = null;
         _raw = null; _normal = null;
         _signal = _historyA = _historyB = _filterA = _filterB = null;
         _momentA = _momentB = null;

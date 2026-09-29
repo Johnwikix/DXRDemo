@@ -9,6 +9,7 @@ using System.Text.Json;
 Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
 if (args.Contains("--sr")) { ReconstructionProbe.Run(); return; }
+if (args.Contains("--nrd-missing")) { ReconstructionProbe.Run(true); return; }
 using var device = GraphicsDevice.GetDefault();
 using var hardware = new RayTracePass(new DxrMeshBackend());
 using var software = new RayTracePass();
@@ -25,6 +26,8 @@ for (int scene = 0; scene < 3; scene++)
         {
             pass.SceneIndex = scene; pass.DenoiserMode = mode; pass.Samples = 2; pass.MaxBounces = 10;
             for (int i = 0; i < 12; i++) pass.TryExecute(target, target.Width, target.Height, TimeSpan.Zero, new HdrRenderParameters(hdr, 200, 1000));
+            if (mode == RayTraceDenoiserMode.NrdRelax && (pass.ReconstructionStatus?.NrdActive != true || pass.NrdDispatchCount <= 5))
+                throw new Exception("NRD was unavailable during parity check");
             var pixels = target.ToArray();
             return MemoryMarshal.Cast<Rgba64, ushort>(MemoryMarshal.CreateReadOnlySpan(ref pixels[0, 0], pixels.Length)).ToArray();
         }
@@ -48,4 +51,4 @@ hud.Draw(resized, hardware, HdrRenderParameters.Default, 1, 2);
 var screenshot = resized.ToArray();
 File.WriteAllBytes("output/hud.rgba16", MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref screenshot[0, 0], screenshot.Length)).ToArray());
 File.WriteAllText("output/results.json", JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
-Console.WriteLine("PASS: 18 model/denoiser/HDR parity cases, resize, GPU HUD.");
+Console.WriteLine($"PASS: {results.Count} model/denoiser/HDR parity cases, resize, GPU HUD.");

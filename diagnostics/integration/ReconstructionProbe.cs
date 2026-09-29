@@ -13,7 +13,7 @@ using Vortice.DXGI;
 /// <summary>Exercises actual vendor dispatch, shared texture states and temporal camera guides without a window.</summary>
 internal static unsafe class ReconstructionProbe
 {
-    internal static void Run()
+    internal static void Run(bool missingNrd = false)
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
         debug.EnableDebugLayer();
@@ -31,6 +31,19 @@ internal static unsafe class ReconstructionProbe
         Render(pass, target, false, 3);
         var status = pass.ReconstructionStatus!;
         Console.WriteLine($"Capabilities: 0x{status.Capabilities:X}");
+        Console.WriteLine($"NRD available: {status.NrdAvailable}; active: {status.NrdActive}; dispatches: {pass.NrdDispatchCount}; {status.Message}");
+        if (missingNrd)
+        {
+            Require(!status.NrdAvailable && !status.NrdActive && status.Message.Contains("NRD"), "Missing NRD DLL was not reported");
+            VerifyPixels(target); VerifyDebug(queue);
+            pass.ReconstructionMode = ReconstructionMode.Fsr;
+            Render(pass, target, false, 6);
+            Require(pass.ReconstructionStatus is { Active: ReconstructionMode.Fsr, NrdActive: false }, "Missing NRD disabled the independent SR provider");
+            VerifyPixels(target); VerifyDebug(queue);
+            Console.WriteLine("PASS missing NRD DLL: explicit legacy denoiser fallback; FSR still executes");
+            return;
+        }
+        Require(status.NrdAvailable && status.NrdActive && pass.NrdDispatchCount > 5, "Official NRD did not run at native resolution");
         Console.WriteLine(Marshal.PtrToStringUTF8(NativeReconstruction.FsrDiagnostic()));
         Require(status.Supports(ReconstructionMode.Fsr), "Bundled FSR provider not found: run IntegrationProbe.exe, not dotnet IntegrationProbe.dll");
         foreach (var mode in new[] { ReconstructionMode.Fsr, ReconstructionMode.XeSS, ReconstructionMode.Dlss })
@@ -54,10 +67,13 @@ internal static unsafe class ReconstructionProbe
                     Render(pass, target, hdr, 6);
                     var active = pass.ReconstructionStatus!;
                     Require(active.Active == mode, active.Message);
+                    Require(active.NrdActive == (denoiser == RayTraceDenoiserMode.NrdRelax), active.Message);
+                    if (active.NrdActive) Require(pass.NrdDispatchCount > 5, "NRD fallback was counted as success");
                     Require(active.InputWidth == 480 * scale / 100 && active.InputHeight == 270 * scale / 100, "Input dimensions differ from requested scale");
                     VerifyPixels(target);
                     VerifyDebug(queue);
-                    if (scale == 67 && denoiser == RayTraceDenoiserMode.Relax && !hdr) SavePpm(target, $"output/{mode}-67-sdr.ppm");
+                    if (scale == 67 && (denoiser is RayTraceDenoiserMode.Relax or RayTraceDenoiserMode.NrdRelax) && !hdr)
+                        SavePpm(target, $"output/{mode}-{denoiser}-67-sdr.ppm");
                 }
                 Console.WriteLine($"PASS {mode} {scale}% / all denoisers / SDR+HDR");
             }
@@ -89,6 +105,7 @@ internal static unsafe class ReconstructionProbe
         VerifyPixels(target); VerifyDebug(queue);
         VerifyGuides(device, native, queue, status);
         VerifyTemporalReprojection(device, native, queue, status);
+        VerifyNrdQuality(device, native, queue);
         VerifyDebug(queue);
         Console.WriteLine("PASS reconstruction mode/scale/denoiser/HDR transitions, odd resize, scene switch, fallback and camera guides.");
     }
@@ -273,6 +290,82 @@ internal static unsafe class ReconstructionProbe
             Require(maxEdgeError < 0.00001f, "Bilinear history leaked across a depth discontinuity or disocclusion");
             Console.WriteLine($"PASS {mode} history depth rejection, disocclusion and image borders");
         }
+    }
+
+    /// <summary>Compares the actual NRD output with an independently sampled 512-SPP reference.</summary>
+    private static void VerifyNrdQuality(GraphicsDevice device, ID3D12Device5 native, ID3D12InfoQueue info)
+    {
+        const int width = 320, height = 180;
+        using var sr = new SuperResolutionRenderer(device);
+        sr.Configure(ReconstructionMode.Off, 100, width, height, true);
+        Require(sr.Status.NrdActive, sr.Status.Message);
+        using var backend = new DxrMeshBackend(); backend.Initialize(device);
+        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
+        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var normalRoughness = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        MeshData mesh = MeshData.LoadAsync(0).GetAwaiter().GetResult();
+        Float2 orbit = new(0, 0.165f);
+        void Frame(int frame, Float2 camera, float distance, int bounces = 10)
+        {
+            backend.Trace(mesh, width, height, 2, bounces, frame, camera, distance, raw, normals, surfaces, default, normalRoughness);
+            Require(sr.Execute(raw, normals, surfaces, target, camera, distance, default,
+                RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness), sr.Status.Message);
+            Require(sr.NrdDispatchCount > 5, "Official NRD dispatch missing");
+        }
+        for (int frame = 0; frame < 64; frame++) Frame(frame, orbit, 2.7f);
+        SavePpm(target, "output/NRD-native-sdr.ppm");
+        float[] denoised = ReadTexture(native, sr.DenoisedColor, true);
+        float[] viewZ = ReadTexture(native, sr.NrdViewZ, false);
+        Float4[,] noisy = raw.ToArray(), geometry = surfaces.ToArray(), normalGuide = normalRoughness.ToArray();
+        int shortHits = 0, escapedHits = 0;
+        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+        {
+            if (geometry[y, x].W < 0) { Require(viewZ[y * width + x] == -1000000, "Sky entered NRD denoising range"); continue; }
+            Require(viewZ[y * width + x] < 0 && viewZ[y * width + x] > -1000, "NRD linear view Z disagrees with RH camera");
+            Require(normalGuide[y, x].W == 1 && Math.Max(Math.Abs(normalGuide[y, x].X), Math.Max(Math.Abs(normalGuide[y, x].Y), Math.Abs(normalGuide[y, x].Z))) > 0.999f,
+                "NRD normal/roughness encoding invalid");
+            Require(noisy[y, x].W > 0 && noisy[y, x].W <= 65504, "Diffuse hit distance is not a positive world-space distance");
+            if (noisy[y, x].W < 5) shortHits++;
+            if (noisy[y, x].W > 60000) escapedHits++;
+        }
+        Require(shortHits > 100 && escapedHits > 100, "Diffuse hit distances do not distinguish secondary hits and misses");
+        var reference = new Vector3[width * height];
+        for (int frame = 0; frame < 32; frame++)
+        {
+            backend.Trace(mesh, width, height, 16, 10, 10000 + frame, orbit, 2.7f, raw, normals, surfaces, default, normalRoughness);
+            var sample = raw.ToArray();
+            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+                reference[y * width + x] += new Vector3(sample[y, x].X, sample[y, x].Y, sample[y, x].Z) / 32;
+        }
+        double rawError = 0, nrdError = 0, expectedEnergy = 0, actualEnergy = 0;
+        int count = 0;
+        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+        {
+            if (geometry[y, x].W < 0) continue;
+            int index = y * width + x;
+            Vector3 expected = reference[index], actual = new(denoised[index * 4], denoised[index * 4 + 1], denoised[index * 4 + 2]);
+            rawError += Vector3.DistanceSquared(new(noisy[y, x].X, noisy[y, x].Y, noisy[y, x].Z), expected);
+            nrdError += Vector3.DistanceSquared(actual, expected);
+            expectedEnergy += expected.X + expected.Y + expected.Z; actualEnergy += actual.X + actual.Y + actual.Z;
+            count++;
+        }
+        Console.WriteLine($"NRD vs 512-SPP reference: raw RMSE={Math.Sqrt(rawError / (count * 3)):F6}, NRD RMSE={Math.Sqrt(nrdError / (count * 3)):F6}, energy={actualEnergy / expectedEnergy:F5}");
+        Require(nrdError < rawError * 0.8 && actualEnergy / expectedEnergy is > 0.8 and < 1.2, "NRD did not reduce noise or changed material energy");
+        for (int frame = 0; frame < 12; frame++) Frame(100 + frame, new(0.2f + frame * 0.01f, 0.25f), 2.2f);
+        VerifyPixels(target);
+        Require(ReadTexture(native, sr.DenoisedColor, true).All(float.IsFinite), "Nonfinite NRD output while moving camera");
+        sr.Reset(); Frame(0, orbit, 2.7f, 1);
+        float[] reset = ReadTexture(native, sr.DenoisedColor, true);
+        using var fresh = new SuperResolutionRenderer(device);
+        fresh.Configure(ReconstructionMode.Off, 100, width, height, true);
+        Require(fresh.Execute(raw, normals, surfaces, target, orbit, 2.7f, default,
+            RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness), fresh.Status.Message);
+        float[] clean = ReadTexture(native, fresh.DenoisedColor, true);
+        Require(reset.Zip(clean, (a, b) => Math.Abs(a - b)).Max() < 0.0001f, "NRD reset differs from a new context");
+        VerifyDebug(info);
+        Console.WriteLine("PASS NRD guide semantics, energy/noise, camera motion/zoom, direct-light-only tracing and reset");
     }
 
     private static float[] ReadTexture(ID3D12Device5 device, ID3D12Resource source, bool half2,

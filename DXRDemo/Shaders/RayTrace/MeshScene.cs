@@ -43,7 +43,7 @@ public interface IMeshTraceBackend : IDisposable
     void Initialize(GraphicsDevice device);
     void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
         Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default);
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null);
 }
 
 public sealed class SoftwareMeshBackend : IMeshTraceBackend
@@ -55,7 +55,7 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
     public void Initialize(GraphicsDevice device) => _device = device;
     public void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
         Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default)
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null)
     {
         if (!ReferenceEquals(mesh, _mesh))
         {
@@ -65,7 +65,7 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
             _mesh = mesh;
         }
         _device.For(width, height, new MeshPathTraceShader(width, height, samples, bounces, frame, orbit, distance,
-            surfaces != null ? 1 : 0, jitter, _triangles!, _nodes!, output, normals, surfaces ?? output));
+            normalRoughness != null ? 2 : surfaces != null ? 1 : 0, jitter, _triangles!, _nodes!, output, normals, surfaces ?? output, normalRoughness ?? output));
     }
     public void Dispose() { _triangles?.Dispose(); _nodes?.Dispose(); }
 }

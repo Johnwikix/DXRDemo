@@ -41,7 +41,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
             new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All),
             new(RootParameterType.ShaderResourceView, new RootDescriptor1(0, 0), ShaderVisibility.All),
             new(RootParameterType.ShaderResourceView, new RootDescriptor1(1, 0), ShaderVisibility.All),
-            new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 3, 0, 0)), ShaderVisibility.All),
+            new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 4, 0, 0)), ShaderVisibility.All),
             new(RootParameterType.ShaderResourceView, new RootDescriptor1(2, 0), ShaderVisibility.All)
         };
         string error = D3D12.D3D12SerializeVersionedRootSignature(new VersionedRootSignatureDescription(new RootSignatureDescription1(RootSignatureFlags.None, parameters)), out Blob blob);
@@ -56,7 +56,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         })));
         using (var props = _pipeline.QueryInterface<ID3D12StateObjectProperties>()) _table.Build(_gpu.Device, props);
         _constants = Keep(DxrResources.CreateUploadBuffer(_gpu.Device, 256));
-        _heap = Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible)));
+        _heap = Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new DescriptorHeapDescription(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 4, DescriptorHeapFlags.ShaderVisible)));
         _initialized = true;
     }
 
@@ -157,7 +157,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         where T : struct, IComputeShader, IComputeShaderDescriptor<T> => T.LoadConstantBuffer(in shader, ref loader, width, height, 1);
     public void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame, Float2 orbit, float distance,
         ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default)
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null)
     {
         if (!_initialized) InitializePipeline();
         if (!ReferenceEquals(mesh, _mesh)) BuildScene(mesh);
@@ -170,13 +170,17 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         nint sp;
         InteropServices.GetID3D12Resource(surfaces ?? output, &iid, (void**)&sp);
         using var surfaceResource = new ID3D12Resource(sp);
+        nint gp;
+        InteropServices.GetID3D12Resource(normalRoughness ?? output, &iid, (void**)&gp);
+        using var guideResource = new ID3D12Resource(gp);
         var cpu = _heap.GetCPUDescriptorHandleForHeapStart();
         _gpu.Device.CreateUnorderedAccessView(outputResource, null, null, cpu);
         _gpu.Device.CreateUnorderedAccessView(normalResource, null, null, cpu + (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
         _gpu.Device.CreateUnorderedAccessView(surfaceResource, null, null, cpu + 2 * (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
+        _gpu.Device.CreateUnorderedAccessView(guideResource, null, null, cpu + 3 * (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView));
         // Ask ComputeSharp's generated descriptor to pack constants; no hand-maintained offsets.
         var shader = new MeshPathTraceShader(width, height, samples, bounces, frame, orbit, distance,
-            surfaces != null ? 1 : 0, jitter, null!, null!, output, normals, surfaces ?? output);
+            normalRoughness != null ? 2 : surfaces != null ? 1 : 0, jitter, null!, null!, output, normals, surfaces ?? output, normalRoughness ?? output);
         void* pointer; _constants.Map(0, null, &pointer).CheckError();
         var loader = new ConstantLoader((nint)pointer); WriteConstants(in shader, ref loader, width, height); _constants.Unmap(0);
         Begin(); var cmd = _gpu.CommandList;
@@ -190,6 +194,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         cmd.DispatchRays(new DispatchRaysDescription(new(_table.Buffer.GPUVirtualAddress, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64), new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)width, (uint)height, 1));
         cmd.ResourceBarrierUnorderedAccessView(outputResource); cmd.ResourceBarrierUnorderedAccessView(normalResource);
         if (surfaces != null) cmd.ResourceBarrierUnorderedAccessView(surfaceResource);
+        if (normalRoughness != null) cmd.ResourceBarrierUnorderedAccessView(guideResource);
         // Complete this queue before ComputeSharp consumes the textures on its own queue.
         End();
     }

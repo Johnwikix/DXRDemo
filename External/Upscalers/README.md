@@ -1,8 +1,9 @@
 # DXRDemo reconstruction SDKs
 
 These pinned SDK files and the C++ adapter were ported from the local Spectrum
-project. Spectrum itself is unchanged. Only super resolution is enabled; there
+project. Spectrum itself is unchanged. These SDKs provide super resolution; there
 is no frame generation or DLSS Ray Reconstruction implementation in this adapter.
+The bridge also supports the separately pinned [NRD denoiser SDK](../NRD/README.md).
 
 - XeSS: `intel/xess`, commit `de0fb9c1c510661c571164e1418ceca8101dab69`.
 - FSR: `GPUOpen-LibrariesAndSDKs/FidelityFX-SDK`, commit `60f4ea81909200d8542eca14dccb2628b763a9a3`.

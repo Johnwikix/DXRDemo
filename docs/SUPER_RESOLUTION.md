@@ -10,7 +10,7 @@ the UI; programmatic requests and SDK failures report the fallback explicitly.
 The GPU HUD shows the actual algorithm and input/output dimensions.
 
 The scale is `max(1, floor(outputDimension * percent / 100))` on each axis.
-Changes are applied by the render thread; NumberBox changes are debounced for
+Changes are applied by the render thread; the 1%-step slider is debounced for
 200 ms. Preset K is requested for DLSS, matching Spectrum's default. No frame
 generation is included. The optional vendor SDK bridge currently targets x64.
 
@@ -28,7 +28,9 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    reprojects history, rejects disocclusions by view depth, and clamps it to the
    current neighborhood. RELAX-style mode additionally applies five edge-aware
    A-trous passes, using the existing normal/material guides. This is a custom
-   filter, not NVIDIA NRD or DLSS Ray Reconstruction.
+   filter. The additional default **NVIDIA NRD RELAX** mode uses the official SDK
+   and bypasses these custom filters; see [NRD integration](NRD.md). None of these
+   modes implements DLSS Ray Reconstruction.
 4. The real vendor SDK consumes FP16 linear color, R32 depth, RG16F motion and
    R8 reactive masks. Its FP16 output is then encoded to SDR gamma or Rec.2020/PQ.
    The GPU HUD and XAML controls remain at output resolution.
@@ -53,8 +55,8 @@ command list is discarded before native fallback; a changed configuration can
 retry initialization. Resources and descriptors are reused in steady state.
 No whole-application zero-allocation or FPS claim is made.
 
-The Off path keeps the previous encoded-space filters and stochastic primary
-sampling. The extra temporal surface is allocated only when SR is active.
+With SR and NRD both off, the previous encoded-space filters and stochastic
+primary sampling remain. Temporal surfaces are allocated when SR or NRD is active.
 One loading frame is presented before cold shader/SDK initialization.
 
 ## Validation on Intel Arc 140T
@@ -66,7 +68,7 @@ performed for this feature.
 - Native bridge and WinUI x64 Release build passed. The app retains its existing
   generated WinUIEx obsolete `Icon` warning.
 - Actual capability mask `0x18`: FSR and XeSS available; DLSS unavailable.
-- 60 actual SDK cases: FSR/XeSS × 67/50/100/33/37% × three denoiser modes × SDR/HDR.
+- 80 actual SDK cases: FSR/XeSS × 67/50/100/33/37% × four denoiser modes × SDR/HDR.
   Every case requires the actual active algorithm to equal the requested one;
   fallback output does not count as SR success. RGB is nonempty and nonconstant.
 - Odd resize (401×227 at 37%), return to the previous size, model changes,
@@ -84,7 +86,7 @@ performed for this feature.
   alone cannot detect. Separate cases cover depth edges, disocclusions and
   image borders. These are numeric checks, not a claim that stochastic path
   tracing noise disappears or a substitute for visual motion-quality testing.
-- The existing 18 hardware/software parity cases, resize and GPU HUD still pass
+- All 24 hardware/software parity cases (including NRD), resize and GPU HUD pass
   with SR disabled. Maximum normalized RGBA RMSE is approximately 0.001193.
 - FSR/XeSS SDR snapshots were inspected. Motion quality, sustained performance,
   settings-window interaction and physical HDR output remain user/device checks.
@@ -106,7 +108,7 @@ are in `External/Upscalers/README.md`.
 
 ## DLSS Ray Reconstruction (DLSSD): feasible, not implemented here
 
-DLSSD can replace this demo's custom denoising, but it is a separate integration
+DLSSD can replace this demo's custom or NRD denoising, but it is a separate integration
 from DLSS Super Resolution. The NVIDIA guide states that enabling RR overrides
 the SR path and consumes noisy radiance plus additional material/geometry guides.
 It should not be run after RELAX or followed by another DLSS SR dispatch.
@@ -117,15 +119,16 @@ motion and camera history. The remaining work is:
 - Add the pinned RR headers and release `nvngx_dlssd.dll`, its capability query,
   feature creation/evaluation ABI and resource lifecycle.
 - Write linear diffuse and specular albedo, floating-point world/view normals
-  and linear roughness at the same primary sample location. Existing RGBA8
-  normals pack material ID in alpha, so they are not a drop-in RR normal/roughness
-  input. The current diffuse meshes can supply their actual constant albedo,
+  and linear roughness at the same primary sample location. NRD now provides
+  a high-precision normal/roughness guide, while the older RGBA8 normal guide
+  still packs material ID in alpha. The current diffuse meshes can supply their actual constant albedo,
   roughness 1 and zero specular reflectance; future glass/metal needs real guides.
 - Supply specular hit distance plus the required camera transforms, or specular
   motion vectors. The current alpha `t/(t+1)` is averaged **primary** hit distance;
   it is not world-space **secondary specular** hit distance and must not be relabeled.
+  NRD mode supplies a secondary **diffuse** distance, which also is not a specular guide.
 - When RR is active, pass noisy linear radiance directly to RR and bypass both
-  custom denoisers and DLSS SR. Encode its reconstructed output once. Keep a
+  custom/NRD denoisers and DLSS SR. Encode its reconstructed output once. Keep a
   capability-gated fallback to the selected conventional denoiser plus SR.
 - On RTX hardware, validate guide normalization, matrix conventions, transparent
   materials, disocclusions, camera cuts, reconstruction sizes and motion quality.

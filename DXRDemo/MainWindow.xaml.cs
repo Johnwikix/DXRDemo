@@ -5,6 +5,7 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using System.Diagnostics;
 using Microsoft.UI.Windowing;
@@ -58,7 +59,7 @@ public sealed partial class MainWindow : WindowEx
         MaxBouncesBox.ValueChanged += OnMaxBouncesChanged;
         SamplesBox.ValueChanged += OnSamplesChanged;
         _settings.ReconstructionSelector.SelectionChanged += OnReconstructionChanged;
-        _settings.RenderScaleBox.ValueChanged += OnRenderScaleChanged;
+        _settings.RenderScaleSlider.ValueChanged += OnRenderScaleChanged;
         _renderScaleTimer.Tick += (_, _) =>
         {
             _renderScaleTimer.Stop();
@@ -202,7 +203,7 @@ public sealed partial class MainWindow : WindowEx
             {
                 ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, _ => 0
             };
-            _settings.RenderScaleBox.Value = pass.RenderScalePercent;
+            _settings.RenderScaleSlider.Value = pass.RenderScalePercent;
         }
         finally
         {
@@ -217,11 +218,11 @@ public sealed partial class MainWindow : WindowEx
         {
             1 => ReconstructionMode.Fsr, 2 => ReconstructionMode.XeSS, 3 => ReconstructionMode.Dlss, _ => ReconstructionMode.Off
         };
-        _settings.RenderScaleBox.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
+        _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = "正在应用超分设置；首次启用需要初始化 SDK。";
     }
 
-    private void OnRenderScaleChanged(NumberBox sender, NumberBoxValueChangedEventArgs e)
+    private void OnRenderScaleChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (_syncingRayTraceParams || double.IsNaN(e.NewValue)) return;
         _pendingRenderScale = (int)Math.Round(e.NewValue);
@@ -238,7 +239,8 @@ public sealed partial class MainWindow : WindowEx
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[1]).IsEnabled = status.Supports(ReconstructionMode.Fsr);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[2]).IsEnabled = status.Supports(ReconstructionMode.XeSS);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[3]).IsEnabled = status.Supports(ReconstructionMode.Dlss);
-        _settings.RenderScaleBox.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
+        ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.NrdAvailable;
+        _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;
     }
 

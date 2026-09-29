@@ -1,4 +1,5 @@
 // Linear Rec.709 SR path. The SDK consumes projection jitter; ray sampling uses its negative.
+#include "NRD/NRD.hlsli"
 cbuffer FrameConstants : register(b0)
 {
     float4 CameraOrigin;
@@ -93,7 +94,7 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         mean += l; square += l*l; count++;
     }
     float variance = max(square / count - (mean / count) * (mean / count), 0.0001);
-    if (Control.y != 0 && Control.x == 0 && previousZ > 0)
+    if (Control.y > 0 && Control.y < 3 && Control.x == 0 && previousZ > 0)
     {
         float3 old;
         if (ReprojectHistory(previousPixel, previousZ, sky, old))
@@ -135,6 +136,37 @@ void Filter(uint3 tid : SV_DispatchThreadID)
         sum += tap * weight; weights += weight;
     }
     Color[p] = sum / weights;
+}
+
+float3 DiffuseAlbedo(int2 pixel)
+{
+    return Normals[pixel].w > 0.5 / 255.0 ? float3(0.7, 0.7, 0.7) : float3(0.65, 0.3, 0.12);
+}
+
+[numthreads(8, 8, 1)]
+void PrepareNrd(uint3 tid : SV_DispatchThreadID)
+{
+    int2 p = tid.xy;
+    if (any(p >= int2(Size.xy))) return;
+    float4 surface = Surfaces[p];
+    bool sky = surface.w < 0;
+    float viewZ = dot(surface.xyz - CameraOrigin.xyz, CameraForward.xyz);
+    // NRD linear view Z matches the right-handed camera matrix (forward is -Z).
+    Depth[p] = sky ? -1000000 : -viewZ;
+    Color[p] = sky ? 0 : RELAX_FrontEnd_PackRadianceAndHitDist(Raw[p].rgb / DiffuseAlbedo(p), Raw[p].w, true);
+}
+
+[numthreads(8, 8, 1)]
+void ComposeNrd(uint3 tid : SV_DispatchThreadID)
+{
+    int2 p = tid.xy;
+    if (any(p >= int2(Size.xy))) return;
+    float4 surface = Surfaces[p];
+    float viewZ = dot(surface.xyz - CameraOrigin.xyz, CameraForward.xyz);
+    // NRD leaves pixels beyond denoisingRange unwritten, including sky.
+    float3 color = surface.w < 0 || viewZ >= 1000 ? Raw[p].rgb :
+        RELAX_BackEnd_UnpackRadiance(Reconstructed[p]).rgb * DiffuseAlbedo(p);
+    Color[p] = float4(max(color, 0), 1);
 }
 
 [numthreads(8, 8, 1)]

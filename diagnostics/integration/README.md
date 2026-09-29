@@ -1,11 +1,14 @@
 # Model / HDR / settings integration validation
 
-The `--sr` option now exercises the real FSR/XeSS/DLSS adapters, temporal guides,
-scale/denoiser/HDR transitions and fallback. Run the built **IntegrationProbe.exe**
+The `--sr` option now exercises the real NRD/FSR/XeSS/DLSS adapters, temporal guides,
+scale/denoiser/HDR transitions, a 512-SPP quality reference and fallback. NRD must
+execute its official dispatches for its cases to pass. Run the built **IntegrationProbe.exe**
 so the FidelityFX loader discovers providers beside the executable. The native
 bridge builds automatically; `SkipReconstructionNativeBuild=true` reuses it.
 Intel results and the DLSSD feasibility assessment are in
 [`docs/SUPER_RESOLUTION.md`](../../docs/SUPER_RESOLUTION.md).
+The new NRD contract and results are in [`docs/NRD.md`](../../docs/NRD.md).
+The notes below describe the original integration before the SR/NRD extensions.
 
 Both apps now load the same packaged Stanford Bunny (69,451 triangles), Armadillo
 (345,944) and Dragon (871,414). Each app has its own settings window; the main
@@ -69,7 +72,7 @@ From this directory:
 
 ```powershell
 dotnet build IntegrationProbe.csproj -c Release --configfile ../performance/NuGet.Config
-dotnet bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.dll
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
 ```
 
 Build DXR first so its bundled DXC exists. Model assets are copied into the probe's

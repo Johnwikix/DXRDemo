@@ -6,6 +6,11 @@
   </PropertyGroup>
   <ItemGroup Condition="'$(EnableVendorReconstruction)' == 'true'">
     <Content Include="$(ReconstructionRoot)Native\Reconstruction\bin\DXRDemo.Reconstruction.dll" Link="DXRDemo.Reconstruction.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(ReconstructionRoot)External\NRD\Runtime\NRD.dll" Link="NRD.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(ReconstructionRoot)External\NRD\Shaders\*.hlsli" Link="Shaders\DXR\NRD\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(ReconstructionRoot)External\NRD\LICENSE.txt" Link="Licenses\NRD.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(ReconstructionRoot)External\NRD\MathLib-LICENSE.txt" Link="Licenses\NRD-MathLib.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(ReconstructionRoot)External\NRD\ShaderMake-LICENSE.txt" Link="Licenses\NRD-ShaderMake.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(ReconstructionRoot)External\Upscalers\xess\bin\libxess.dll" Link="libxess.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(ReconstructionRoot)External\Upscalers\fsr\Kits\FidelityFX\signedbin\*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="$(ReconstructionRoot)External\Upscalers\dlss\lib\Windows_x86_64\rel\nvngx_dlss.dll" Link="nvngx_dlss.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
