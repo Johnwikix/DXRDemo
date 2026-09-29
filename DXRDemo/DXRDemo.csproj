@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
     <PackageReference Include="Microsoft.Direct3D.DXC" Version="1.9.2602.24" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
@@ -57,6 +58,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Content Include="Assets\Models\**" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\Samples\RainyCorner\RainyCorner.glb" Link="Assets\Models\RainyCorner.glb"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="ComputeSharp" Version="3.2.0" />

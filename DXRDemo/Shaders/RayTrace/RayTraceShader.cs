@@ -6,16 +6,16 @@ namespace DXRDemo.Shaders.RayTrace;
 [GeneratedComputeShaderDescriptor]
 public readonly partial struct RayTraceShader(
     float iTime,
-    Float2 iMouse,
     Float2 iResolution,
     int frame,
-    float iDist,
     bool isHdrEnabled,
     float sdrWhiteLevelInNits,
     float maxLuminanceInNits,
     int maxBounces,
     int samples,
-    IReadWriteNormalizedTexture2D<Float4> normalTexture) : IComputeShader<Float4>
+    IReadWriteNormalizedTexture2D<Float4> normalTexture,
+    Float3 SunDir, Float3 SunColor, float environment,
+    Float3 cameraOrigin, Float3 cameraForward, Float3 cameraRight, Float3 cameraUp, float tanHalfFov) : IComputeShader<Float4>
 {
     private const float PI = 3.14159265359f;
     private const float PI2 = 6.28318530717f;
@@ -25,10 +25,6 @@ public readonly partial struct RayTraceShader(
     private const int DIEL = 2;
 
     private const float Gamma = 2.2f;
-
-    // Sun lighting
-    private static readonly Float3 SunDir = Hlsl.Normalize(new Float3(1.0f, 0.8f, -0.5f));
-    private static readonly Float3 SunColor = new(3.0f, 2.8f, 2.5f);
 
     // Sphere 0 — green lambertian
     private static readonly Float3 S0C = new(0, 1, 0);
@@ -291,7 +287,7 @@ public readonly partial struct RayTraceShader(
         return Scale(i * eta - n * (eta * dt + Hlsl.Sqrt(k)), 1.0f);
     }
 
-    private static Float3 GetSkyColor(Float3 dir)
+    private Float3 GetSkyColor(Float3 dir)
     {
         float t = dir.Y * 0.5f + 0.5f;
         Float3 bottom = new(0.01f, 0.01f, 0.04f);
@@ -301,7 +297,7 @@ public readonly partial struct RayTraceShader(
         float sunAngle = Hlsl.Max(Hlsl.Dot(dir, SunDir), 0.0f);
         sky += SunColor * Hlsl.Pow(sunAngle, 200.0f) * 0.5f;
 
-        return sky * 0.3f;
+        return sky * (0.3f * environment);
     }
 
     public Float4 Execute()
@@ -316,26 +312,9 @@ public readonly partial struct RayTraceShader(
 
         float ratio = iResolution.X / iResolution.Y;
 
-        const float fov = 80.0f;
-        float halfWidth = Hlsl.Tan(fov * PI / 360.0f);
-        float halfHeight = halfWidth / ratio;
-
-        float dist = iDist;
-        Float2 mousePos = iMouse / iResolution;
-        if (mousePos.X == 0.0f && mousePos.Y == 0.0f)
-            mousePos = new Float2(0.55f, 0.2f);
-
-        float cx = Hlsl.Cos(mousePos.X * 10.0f) * dist;
-        float cz = Hlsl.Sin(mousePos.X * 10.0f) * dist;
-        float cy = mousePos.Y * 10.0f;
-
-        Float3 origin = new(cx, cy, cz);
-        Float3 lookAt = new(0.0f, 1.0f, 0.0f);
-        Float3 upVector = new(0.0f, 1.0f, 0.0f);
-
-        Float3 w = Hlsl.Normalize(origin - lookAt);
-        Float3 u = Hlsl.Cross(upVector, w);
-        Float3 v = Hlsl.Cross(w, u);
+        float halfHeight = tanHalfFov, halfWidth = halfHeight * ratio;
+        Float3 origin = cameraOrigin;
+        Float3 w = -cameraForward, u = cameraRight, v = cameraUp;
 
         Float3 lowerLeft = origin - Scale(u, halfWidth) - Scale(v, halfHeight) - w;
         Float3 horizontal = Scale(u, halfWidth * 2.0f);

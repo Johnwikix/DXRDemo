@@ -2,6 +2,8 @@ using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using ComputeSharp;
+using DXRDemo.Camera;
+using DXRDemo.Scene;
 
 namespace DXRDemo.Shaders.RayTrace;
 
@@ -43,7 +45,7 @@ public interface IMeshTraceBackend : IDisposable
     void Initialize(GraphicsDevice device);
     void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
         Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null);
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null, CameraFrame? camera = null, SunLightSettings? sun = null, ReadWriteTexture2D<Float4>? directLight = null, float environment = 1);
 }
 
 public sealed class SoftwareMeshBackend : IMeshTraceBackend
@@ -55,7 +57,7 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
     public void Initialize(GraphicsDevice device) => _device = device;
     public void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
         Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null)
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default, ReadWriteTexture2D<Float4>? normalRoughness = null, CameraFrame? camera = null, SunLightSettings? sun = null, ReadWriteTexture2D<Float4>? directLight = null, float environment = 1)
     {
         if (!ReferenceEquals(mesh, _mesh))
         {
@@ -64,8 +66,13 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
             _nodes = _device.AllocateReadOnlyBuffer(mesh.Nodes);
             _mesh = mesh;
         }
-        _device.For(width, height, new MeshPathTraceShader(width, height, samples, bounces, frame, orbit, distance,
-            normalRoughness != null ? 2 : surfaces != null ? 1 : 0, jitter, _triangles!, _nodes!, output, normals, surfaces ?? output, normalRoughness ?? output));
+        CameraFrame view = camera ?? CameraFrame.FromOrbit(orbit.X, orbit.Y, distance);
+        SunLightSettings light = sun ?? SunLightSettings.Legacy;
+        _device.For(width, height, new MeshPathTraceShader(width, height, samples, bounces, frame,
+            normalRoughness != null ? 2 : surfaces != null ? 1 : 0, directLight != null ? 1 : 0, environment, jitter, _triangles!, _nodes!, output, normals, surfaces ?? output, normalRoughness ?? output, directLight ?? output,
+            new(view.Origin.X, view.Origin.Y, view.Origin.Z), new(view.Forward.X, view.Forward.Y, view.Forward.Z),
+            new(view.Right.X, view.Right.Y, view.Right.Z), new(view.Up.X, view.Up.Y, view.Up.Z),
+            new(light.Direction.X, light.Direction.Y, light.Direction.Z), new(light.Radiance.X, light.Radiance.Y, light.Radiance.Z)));
     }
     public void Dispose() { _triangles?.Dispose(); _nodes?.Dispose(); }
 }

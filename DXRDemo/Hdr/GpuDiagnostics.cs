@@ -29,7 +29,7 @@ internal sealed class GpuDiagnostics : IDisposable
             string description = runner is IRenderDiagnostics diagnostics ? diagnostics.DiagnosticText : "COMPUTESHARP";
             string text = description + "\n" + FormattableString.Invariant($"RENDER {_frames / Math.Max(seconds, 0.001):F1} FPS   SUBMIT {(presented - _lastPresented) / Math.Max(seconds, 0.001):F1} FPS")
                 + "\n" + FormattableString.Invariant($"FRAME {_frameMs / _frames:F2} MS   {texture.Width} X {texture.Height}   {(hdr.IsHdrEnabled ? "HDR10" : "SDR")}")
-                + "\nUNLIMITED   DRAG TO ORBIT / WHEEL TO ZOOM";
+                + "\nUNLIMITED";
             Array.Clear(_characters);
             int row = 0, col = 0, longest = 0;
             foreach (char c in text.ToUpper(CultureInfo.InvariantCulture))

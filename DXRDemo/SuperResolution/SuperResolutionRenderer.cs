@@ -8,13 +8,15 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Vortice.Direct3D12;
 using Vortice.DXGI;
+using DXRDemo.Camera;
+using DXRDemo.Scene;
 
 namespace DXRDemo.SuperResolution;
 
 /// <summary>Owns linear denoising, vendor reconstruction and encoding on a synchronized render-thread queue.</summary>
 internal sealed unsafe class SuperResolutionRenderer : IDisposable
 {
-    private const int DescriptorsPerSet = 12;
+    private const int SrvCount = 11, UavCount = 7, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _pipelineResources = [];
     private readonly List<IDisposable> _sizeResources = [];
@@ -32,6 +34,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private int _descriptorStride;
     private ID3D12Resource _color = null!, _depth = null!, _motion = null!, _reactive = null!, _output = null!;
     private ID3D12Resource _viewZ = null!, _nrdOutput = null!;
+    private ID3D12Resource _nrdSpecInput = null!, _nrdSpecOutput = null!;
+    private readonly ID3D12Resource?[] _pbrInputs = new ID3D12Resource?[4];
     private readonly ID3D12Resource[] _history = new ID3D12Resource[2];
     private readonly ID3D12Resource[] _filters = new ID3D12Resource[2];
     private ID3D12Resource? _raw, _normals, _surfaces;
@@ -40,11 +44,12 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private readonly ReadWriteTexture2D<Rgba64, Float4>?[] _targets = new ReadWriteTexture2D<Rgba64, Float4>?[2];
     private readonly ID3D12Resource?[] _targetResources = new ID3D12Resource?[2];
     private int _targetSlot;
-    private (ReconstructionMode Mode, int Scale, int Width, int Height, bool Nrd) _configuration;
+    private (ReconstructionMode Mode, int Scale, int Width, int Height, bool Nrd, bool Pbr) _configuration;
+    private bool _linearReady;
     private bool _configured, _disposed, _recording, _pipelinesReady, _reset = true;
     private uint _frame;
     private Float2 _previousJitter;
-    private Camera _previousCamera;
+    private CameraFrame _previousCamera;
     private ReconstructionStatus _status;
 
     internal SuperResolutionRenderer(GraphicsDevice device)
@@ -75,7 +80,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 
     internal ReconstructionStatus Status => Volatile.Read(ref _status);
     internal ReconstructionMode Active => Status.Active;
-    internal bool LinearPipelineActive => Active != ReconstructionMode.Off || _nrdContext != 0;
+    internal bool LinearPipelineActive => _linearReady;
     internal uint NrdDispatchCount => _nrdContext == 0 ? 0 : NativeNrd.DispatchCount(_nrdContext);
     internal int InputWidth => Status.InputWidth;
     internal int InputHeight => Status.InputHeight;
@@ -92,9 +97,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private T Keep<T>(T value) where T : IDisposable { _pipelineResources.Add(value); return value; }
     private T Sized<T>(T value) where T : IDisposable { _sizeResources.Add(value); return value; }
 
-    internal void Configure(ReconstructionMode mode, int scale, int outputWidth, int outputHeight, bool nrd = false)
+    internal void Configure(ReconstructionMode mode, int scale, int outputWidth, int outputHeight, bool nrd = false, bool pbr = false)
     {
-        var configuration = (mode, scale, outputWidth, outputHeight, nrd);
+        var configuration = (mode, scale, outputWidth, outputHeight, nrd, pbr);
         if (_configured && _configuration == configuration) return;
         _configured = true;
         _configuration = configuration;
@@ -107,7 +112,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             message = $"{mode} 在当前设备不可用，使用原生分辨率。" + (mode == ReconstructionMode.Fsr ? _availabilityMessage : "");
             mode = ReconstructionMode.Off;
         }
-        if (mode == ReconstructionMode.Off && !useNrd)
+        if (mode == ReconstructionMode.Off && !useNrd && !pbr)
         {
             Publish(ReconstructionMode.Off, outputWidth, outputHeight, message);
             return;
@@ -129,16 +134,18 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             }
             if (useNrd)
             {
-                int result = NativeNrd.Create(_gpu.Device.NativePointer, (uint)width, (uint)height, out _nrdContext);
+                int result = pbr ? NativeNrd.CreatePbr(_gpu.Device.NativePointer, (uint)width, (uint)height, out _nrdContext)
+                    : NativeNrd.Create(_gpu.Device.NativePointer, (uint)width, (uint)height, out _nrdContext);
                 if (result != 0)
                 {
                     _nrdMessage = Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? $"NRD 初始化失败 ({result})";
-                    if (mode == ReconstructionMode.Off) { Publish(mode, width, height, message); return; }
+                    if (mode == ReconstructionMode.Off && !pbr) { Publish(mode, width, height, message); return; }
                 }
                 else
                 {
                     _viewZ = Texture(width, height, Format.R32_Float);
                     _nrdOutput = Texture(width, height, Format.R16G16B16A16_Float);
+                    if (pbr) { _nrdSpecInput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecOutput = Texture(width, height, Format.R16G16B16A16_Float); }
                 }
             }
             _color = Texture(width, height, Format.R16G16B16A16_Float);
@@ -151,12 +158,18 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 _history[i] = Texture(width, height, Format.R32G32B32A32_Float);
                 _filters[i] = Texture(width, height, Format.R16G16B16A16_Float);
             }
+            _linearReady = true;
             Publish(mode, width, height, message);
         }
         catch (Exception e)
         {
             Discard(); // Discard partially recorded work; no resource state has changed on the GPU.
             ReleaseSizeResources();
+            if (pbr && (configuration.mode != ReconstructionMode.Off || configuration.nrd))
+            {
+                Configure(ReconstructionMode.Off, 100, outputWidth, outputHeight, false, true);
+                _configuration = configuration;
+            }
             Publish(ReconstructionMode.Off, outputWidth, outputHeight, $"{e.Message}；使用原生分辨率。");
         }
     }
@@ -177,8 +190,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _root = Keep(_gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None,
             [new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All),
              new RootParameter1(new RootDescriptorTable1(
-                new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 6, 0, 0),
-                 new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 6, 0, 0)), ShaderVisibility.All)])));
+                new DescriptorRange1(DescriptorRangeType.ShaderResourceView, SrvCount, 0, 0),
+                 new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, UavCount, 0, 0)), ShaderVisibility.All)])));
         string file = Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "Reconstruction.hlsl");
         _prepare = Compile(file, "Prepare");
         _filter = Compile(file, "Filter");
@@ -204,11 +217,11 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         {
             Format = Format.R32G32B32A32_Float, ViewDimension = UnorderedAccessViewDimension.Texture2D
         };
-        for (int set = 0; set < 9; set++) for (int i = 0; i < 6; i++)
+        for (int set = 0; set < 9; set++)
         {
             var start = _heap.GetCPUDescriptorHandleForHeapStart() + set * DescriptorsPerSet * _descriptorStride;
-            _gpu.Device.CreateShaderResourceView(null, nullSrv, start + i * _descriptorStride);
-            _gpu.Device.CreateUnorderedAccessView(null, null, nullUav, start + (6 + i) * _descriptorStride);
+            for (int i = 0; i < SrvCount; i++) _gpu.Device.CreateShaderResourceView(null, nullSrv, start + i * _descriptorStride);
+            for (int i = 0; i < UavCount; i++) _gpu.Device.CreateUnorderedAccessView(null, null, nullUav, start + (SrvCount + i) * _descriptorStride);
         }
         _pipelinesReady = true;
     }
@@ -258,12 +271,15 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     }
 
     private void BindInputs(ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4>? nrdNormals)
+        ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4>? nrdNormals, PbrSignals? pbr, ReadWriteTexture2D<Float4>? directLight)
     {
         if (ReferenceEquals(raw, _boundRaw)) return;
         _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
         _raw = Resource(raw); _normals = Resource(normals); _surfaces = Resource(surfaces);
         _nrdNormals = nrdNormals == null ? null : Resource(nrdNormals);
+        for (int i = 0; i < _pbrInputs.Length; i++) { _pbrInputs[i]?.Dispose(); _pbrInputs[i] = null; }
+        if (pbr != null) { _pbrInputs[0] = Resource(pbr.Diffuse); _pbrInputs[1] = Resource(pbr.Specular); _pbrInputs[2] = Resource(pbr.Albedo); _pbrInputs[3] = Resource(pbr.Unfiltered); }
+        else if (directLight != null) _pbrInputs[3] = Resource(directLight);
         _boundRaw = raw;
     }
 
@@ -280,7 +296,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         => _gpu.Device.CreateShaderResourceView(resource, null, _heap.GetCPUDescriptorHandleForHeapStart() + (set * DescriptorsPerSet + index) * _descriptorStride);
 
     private void Uav(int set, int index, ID3D12Resource resource)
-        => _gpu.Device.CreateUnorderedAccessView(resource, null, null, _heap.GetCPUDescriptorHandleForHeapStart() + (set * DescriptorsPerSet + 6 + index) * _descriptorStride);
+        => _gpu.Device.CreateUnorderedAccessView(resource, null, null, _heap.GetCPUDescriptorHandleForHeapStart() + (set * DescriptorsPerSet + SrvCount + index) * _descriptorStride);
 
     private void Bind(int set, ID3D12PipelineState pipeline, int constants)
     {
@@ -298,12 +314,13 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal bool Execute(ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normals,
         ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Rgba64, Float4> target,
         Float2 orbit, float distance, Float2 jitter, RayTraceDenoiserMode denoiser, in HdrRenderParameters hdr, double seconds,
-        ReadWriteTexture2D<Float4>? nrdNormals = null)
+        ReadWriteTexture2D<Float4>? nrdNormals = null, CameraFrame? cameraFrame = null, PbrSignals? pbr = null, float exposure = 0,
+        ReadWriteTexture2D<Float4>? directLight = null)
     {
         if (seconds > 0.25 || seconds <= 0) Reset();
-        BindInputs(raw, normals, surfaces, nrdNormals);
+        BindInputs(raw, normals, surfaces, nrdNormals, pbr, directLight);
         ID3D12Resource encoded = BindTarget(target);
-        Camera camera = Camera.Create(orbit, distance);
+        CameraFrame camera = cameraFrame ?? CameraFrame.FromOrbit(orbit.X, orbit.Y, distance);
         if (_reset) { _previousCamera = camera; _previousJitter = jitter; }
         Constants data = new()
         {
@@ -313,7 +330,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Size = new(InputWidth, InputHeight, target.Width, target.Height),
             Jitter = new(jitter.X, jitter.Y, _previousJitter.X, _previousJitter.Y),
             Control = new(_reset ? 1 : 0, (int)denoiser, Math.Min(_frame, 31), 0),
-            Output = new(hdr.IsHdrEnabled ? 1 : 0, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, 0)
+            Output = new(hdr.IsHdrEnabled ? 1 : 0, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, exposure),
+            Projection = new(MathF.Tan(camera.VerticalFov * .5f), camera.Near, camera.Far, pbr != null ? 1 : 0),
+            Lighting = new(directLight != null ? 1 : 0, 0, 0, 0)
         };
         *(Constants*)_constantPointer = data;
         for (int i = 0; i < 5; i++)
@@ -323,6 +342,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         }
         int historySlot = (int)(_frame % 2);
         Srv(0, 0, _raw!); Srv(0, 1, _normals!); Srv(0, 2, _surfaces!); Srv(0, 3, _history[1 - historySlot]);
+        if (pbr != null)
+            for (int set = 0; set < 9; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, 6 + i, _pbrInputs[i]!);
+        else if (directLight != null) { Srv(7, 9, _pbrInputs[3]!); Srv(8, 9, _pbrInputs[3]!); }
         Uav(0, 0, _color); Uav(0, 1, _depth); Uav(0, 2, _motion); Uav(0, 3, _reactive); Uav(0, 4, _history[historySlot]);
         Uav(6, 5, encoded);
         try
@@ -331,6 +353,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_raw!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_normals!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_surfaces!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            if (pbr != null) foreach (var inputResource in _pbrInputs) Transition(inputResource!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            else if (directLight != null) Transition(_pbrInputs[3]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_depth, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
@@ -349,6 +373,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 if (_nrdNormals == null) throw new InvalidOperationException("NRD normal/roughness guide missing");
                 Srv(7, 0, _raw!); Srv(7, 1, _normals!); Srv(7, 2, _surfaces!);
                 Uav(7, 0, _color); Uav(7, 1, _viewZ);
+                if (pbr != null) { Uav(7, 6, _nrdSpecInput); Transition(_nrdSpecInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess); }
                 Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                 Transition(_viewZ, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                 Transition(_nrdNormals, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
@@ -356,6 +381,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
                 Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                 Transition(_viewZ, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                if (pbr != null) Transition(_nrdSpecInput, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                 // .NET 10: 值类型矩阵直接写入栈上的 ABI 帧，复用 NRD 资源，不在渲染循环分配数组。
                 NativeNrd.Frame nrdFrame = new()
                 {
@@ -363,14 +389,17 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     ViewZ = _viewZ.NativePointer, Motion = _motion.NativePointer, Output = _nrdOutput.NativePointer,
                     WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
                     WorldToViewPrevious = Matrix4x4.CreateLookAt(_previousCamera.Origin, _previousCamera.Origin + _previousCamera.Forward, _previousCamera.Up),
-                    ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(2 * MathF.Atan(0.5f), InputWidth / (float)InputHeight, 0.01f, 1000),
+                    ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, InputWidth / (float)InputHeight, camera.Near, camera.Far),
                     // NRD asks for ray sample offsets; SR SDKs below ask for projection offsets.
                     Jitter = new(jitter.X, jitter.Y), PreviousJitter = new(_previousJitter.X, _previousJitter.Y),
-                    Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250), FrameIndex = _frame, Reset = _reset ? 1u : 0u
+                    Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250), FrameIndex = _frame, Reset = _reset ? 1u : 0u,
+                    Specular = pbr != null ? _nrdSpecInput.NativePointer : 0, SpecularOutput = pbr != null ? _nrdSpecOutput.NativePointer : 0,
+                    DenoisingRange = camera.Far
                 };
                 if (NativeNrd.Execute(_nrdContext, _gpu.CommandList.NativePointer, &nrdFrame) != 0)
                     throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "NRD 执行失败");
                 Srv(8, 0, _raw!); Srv(8, 1, _normals!); Srv(8, 2, _surfaces!); Srv(8, 5, _nrdOutput);
+                if (pbr != null) Srv(8, 10, _nrdSpecOutput);
                 Uav(8, 0, _color);
                 Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                 Bind(8, _composeNrd, 0);
@@ -400,7 +429,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     Width = (uint)InputWidth, Height = (uint)InputHeight,
                     // SDKs receive projection offsets; path-traced primary rays use inverse projection.
                     JitterX = -jitter.X, JitterY = -jitter.Y, Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
-                    Reset = _reset ? 1u : 0u, NearPlane = 0.01f, FarPlane = 1000, VerticalFieldOfView = 2 * MathF.Atan(0.5f)
+                    Reset = _reset ? 1u : 0u, NearPlane = camera.Near, FarPlane = camera.Far, VerticalFieldOfView = camera.VerticalFov
                 };
                 int result = NativeReconstruction.Execute(_context, _gpu.CommandList.NativePointer, &frame);
                 if (result != 0) throw new InvalidOperationException($"{Active} 执行失败 ({result})");
@@ -415,6 +444,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_raw!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_normals!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_surfaces!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            if (pbr != null) foreach (var inputResource in _pbrInputs) Transition(inputResource!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            else if (directLight != null) Transition(_pbrInputs[3]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             End(); // Complete before ComputeSharp HUD or presentation consumes the shared target.
             _previousCamera = camera; _previousJitter = jitter; _frame++; _reset = false;
             return true;
@@ -422,8 +453,14 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         catch (Exception e)
         {
             Discard();
+            var failed = _configuration;
             ReleaseSizeResources();
             if (_configuration.Nrd) _nrdMessage = e.Message;
+            if (failed.Pbr && (failed.Mode != ReconstructionMode.Off || failed.Nrd))
+            {
+                Configure(ReconstructionMode.Off, 100, target.Width, target.Height, false, true);
+                _configuration = failed;
+            }
             Publish(ReconstructionMode.Off, target.Width, target.Height, $"{e.Message}；使用原生分辨率。");
             return false;
         }
@@ -462,12 +499,14 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 
     private void ReleaseSizeResources()
     {
+        _linearReady = false;
         _gpu.SignalAndWait();
         if (_context != 0) { NativeReconstruction.Destroy(_context); _context = 0; }
         if (_nrdContext != 0) { NativeNrd.Destroy(_nrdContext); _nrdContext = 0; }
         _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
         _nrdNormals = null;
         _raw = _normals = _surfaces = null; _boundRaw = null;
+        for (int i = 0; i < _pbrInputs.Length; i++) { _pbrInputs[i]?.Dispose(); _pbrInputs[i] = null; }
         for (int i = 0; i < 2; i++)
         {
             _targetResources[i]?.Dispose(); _targetResources[i] = null; _targets[i] = null;
@@ -491,16 +530,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     {
         internal Vector4 Origin, Forward, Right, Up, PreviousOrigin, PreviousForward, PreviousRight, PreviousUp;
         internal Vector4 Size, Jitter, Control, Output;
+        internal Vector4 Projection, Lighting;
     }
 
-    private readonly record struct Camera(Vector3 Origin, Vector3 Forward, Vector3 Right, Vector3 Up)
-    {
-        internal static Camera Create(Float2 orbit, float distance)
-        {
-            Vector3 origin = new Vector3(MathF.Sin(orbit.X) * MathF.Cos(orbit.Y), MathF.Sin(orbit.Y), MathF.Cos(orbit.X) * MathF.Cos(orbit.Y)) * distance + new Vector3(0, 0.9f, 0);
-            Vector3 forward = Vector3.Normalize(new Vector3(0, 0.9f, 0) - origin);
-            Vector3 right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
-            return new(origin, forward, right, Vector3.Cross(right, forward));
-        }
-    }
 }

@@ -13,6 +13,11 @@ using Windows.Graphics;
 using WinUIEx;
 using DispatcherTimer = Microsoft.UI.Xaml.DispatcherTimer;
 using Microsoft.UI;
+using DXRDemo.Camera;
+using Windows.System;
+using Windows.Storage;
+using Windows.Storage.Pickers;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace DXRDemo;
 
@@ -43,6 +48,11 @@ public sealed partial class MainWindow : WindowEx
     private bool _layoutInitialized;
     private bool _disposed;
     private bool _syncingRayTraceParams;
+    private uint? _dragPointer;
+    private Windows.Foundation.Point _previousPointer;
+    private bool _panDrag;
+    private CameraMovement _movement;
+    private CancellationTokenSource? _loadCancellation;
 
     // XAML sizes are in DIPs; the swap chain / render target must be physical pixels.
     private double DpiScale => RootGrid.XamlRoot?.RasterizationScale ?? 1.0;
@@ -71,9 +81,22 @@ public sealed partial class MainWindow : WindowEx
             if (!_syncingRayTraceParams && ModelSelector.SelectedIndex >= 0 && _activePass is RayTracePass pass)
                 pass.SceneIndex = ModelSelector.SelectedIndex;
         };
-        _settings.ResetCameraButton.Click += (_, _) => { if (_activePass is RayTracePass pass) pass.SceneIndex = pass.SceneIndex; };
+        _settings.ResetCameraButton.Click += OnResetCamera;
+        _settings.CameraSpeedBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.Camera.Speed = (float)e.NewValue; };
+        _settings.EnvironmentBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.EnvironmentIntensity = (float)e.NewValue; };
+        _settings.ExposureBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.Exposure = (float)e.NewValue; };
+        _settings.SunToggle.Toggled += (_, _) => ApplySunSettings();
+        _settings.SunAzimuthBox.ValueChanged += (_, _) => ApplySunSettings();
+        _settings.SunElevationBox.ValueChanged += (_, _) => ApplySunSettings();
+        _settings.SunIntensityBox.ValueChanged += (_, _) => ApplySunSettings();
+        _settings.ModelLightingOnlyToggle.Toggled += (_, _) =>
+        {
+            if (!_syncingRayTraceParams && _activePass is RayTracePass pass)
+                pass.ExternalLightingEnabled = !_settings.ModelLightingOnlyToggle.IsOn;
+        };
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
-        _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1280, 720));
+        _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1280,
+            720 + (int)Math.Round((RootGrid.ActualHeight - ViewportFocus.ActualHeight) * DpiScale)));
         // Create the GPU device and shader panel
         _device = GraphicsDevice.GetDefault();
         _factory = new ShaderFactory();
@@ -87,6 +110,10 @@ public sealed partial class MainWindow : WindowEx
 
         // Mouse tracking
         _shaderPanel.PointerMoved += OnPointerMoved;
+        _shaderPanel.PointerPressed += OnPointerPressed;
+        _shaderPanel.PointerReleased += OnPointerReleased;
+        _shaderPanel.PointerCaptureLost += OnPointerReleased;
+        _shaderPanel.PointerCanceled += OnPointerReleased;
         _shaderPanel.PointerWheelChanged += OnPointerWheelChanged;
         _shaderPanel.SizeChanged += OnShaderPanelSizeChanged;
         _shaderPanel.RenderingFailed += OnRenderingFailed;
@@ -115,6 +142,7 @@ public sealed partial class MainWindow : WindowEx
 
     private void OnWindowActivated(object sender, WindowActivatedEventArgs e)
     {
+        if (e.WindowActivationState == WindowActivationState.Deactivated) ClearCameraInput();
         if (_hdrDetectionInitialized) return;
         _hdrDetectionInitialized = true;
 
@@ -204,6 +232,14 @@ public sealed partial class MainWindow : WindowEx
                 ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, _ => 0
             };
             _settings.RenderScaleSlider.Value = pass.RenderScalePercent;
+            _settings.CameraSpeedBox.Value = pass.Camera.Speed;
+            _settings.EnvironmentBox.Value = pass.EnvironmentIntensity;
+            _settings.ExposureBox.Value = pass.Exposure;
+            _settings.SunToggle.IsOn = pass.Sun.Enabled;
+            _settings.SunAzimuthBox.Value = pass.Sun.Azimuth;
+            _settings.SunElevationBox.Value = pass.Sun.Elevation;
+            _settings.SunIntensityBox.Value = pass.Sun.Intensity;
+            _settings.ModelLightingOnlyToggle.IsOn = !pass.ExternalLightingEnabled;
         }
         finally
         {
@@ -222,6 +258,14 @@ public sealed partial class MainWindow : WindowEx
         _settings.ReconstructionStatusText.Text = "正在应用超分设置；首次启用需要初始化 SDK。";
     }
 
+    private void ApplySunSettings()
+    {
+        if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
+        double azimuth = _settings.SunAzimuthBox.Value, elevation = _settings.SunElevationBox.Value, intensity = _settings.SunIntensityBox.Value;
+        if (!double.IsFinite(azimuth) || !double.IsFinite(elevation) || !double.IsFinite(intensity)) return;
+        pass.Sun = new(_settings.SunToggle.IsOn, (float)azimuth, (float)elevation, (float)intensity);
+    }
+
     private void OnRenderScaleChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (_syncingRayTraceParams || double.IsNaN(e.NewValue)) return;
@@ -232,6 +276,8 @@ public sealed partial class MainWindow : WindowEx
 
     private void RefreshReconstructionUi()
     {
+        if (_activePass is RayTracePass selected && ModelSelector.SelectedIndex != selected.SceneIndex)
+            SyncRayTraceParams(selected);
         if (_activePass is not RayTracePass pass || pass.ReconstructionStatus is not ReconstructionStatus status ||
             ReferenceEquals(_lastReconstructionStatus, status)) return;
         _lastReconstructionStatus = status;
@@ -267,21 +313,118 @@ public sealed partial class MainWindow : WindowEx
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_activePass?.Capabilities.HasFlag(ShaderCapabilities.UsesMouse) == true)
-        {
-            var pointerPoint = e.GetCurrentPoint(_shaderPanel);
+        if (_activePass is not RayTracePass pass || _dragPointer != e.Pointer.PointerId) return;
+        var point = e.GetCurrentPoint(_shaderPanel);
+        float dx = (float)((point.Position.X - _previousPointer.X) / Math.Max(1, _shaderPanel.ActualWidth));
+        float dy = (float)((point.Position.Y - _previousPointer.Y) / Math.Max(1, _shaderPanel.ActualHeight));
+        _previousPointer = point.Position;
+        if (_panDrag) pass.Camera.Pan(dx * (float)(_shaderPanel.ActualWidth / Math.Max(1, _shaderPanel.ActualHeight)), dy);
+        else if (pass.Camera.Mode == CameraMode.Fly) pass.Camera.Rotate(-dx * MathF.Tau, dy * 2.4f);
+        else pass.Camera.Rotate(dx * MathF.Tau, -dy * 2.4f);
+        e.Handled = true;
+    }
 
-            // The panel is sized in physical pixels, so its coordinates are already
-            // buffer pixels — no DPI scaling needed.
-            if (pointerPoint.Properties.IsLeftButtonPressed)
-            {
-                _activePass.SetMouse(
-                    (float)pointerPoint.Position.X,
-                    (float)pointerPoint.Position.Y,
-                    (float)_shaderPanel.ActualWidth,
-                    (float)_shaderPanel.ActualHeight);
-            }
+    private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        if (_activePass is not RayTracePass pass) return;
+        ViewportFocus.Focus(FocusState.Pointer);
+        var point = e.GetCurrentPoint(_shaderPanel);
+        bool rotate = pass.Camera.Mode == CameraMode.Orbit ? point.Properties.IsLeftButtonPressed : point.Properties.IsRightButtonPressed;
+        if ((!rotate && !point.Properties.IsMiddleButtonPressed) || _dragPointer != null) return;
+        _previousPointer = point.Position; _panDrag = point.Properties.IsMiddleButtonPressed;
+        if (_shaderPanel.CapturePointer(e.Pointer)) _dragPointer = e.Pointer.PointerId;
+        e.Handled = true;
+    }
+
+    private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (_dragPointer != e.Pointer.PointerId) return;
+        _dragPointer = null; _shaderPanel.ReleasePointerCapture(e.Pointer);
+    }
+    private static CameraMovement MovementKey(VirtualKey key) => key switch
+    {
+        VirtualKey.W => CameraMovement.Forward, VirtualKey.S => CameraMovement.Backward,
+        VirtualKey.A => CameraMovement.Left, VirtualKey.D => CameraMovement.Right,
+        VirtualKey.E => CameraMovement.Up, VirtualKey.Q => CameraMovement.Down,
+        VirtualKey.Shift => CameraMovement.Fast, _ => CameraMovement.None
+    };
+    private void OnCameraKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (_activePass is not RayTracePass pass) return;
+        if (e.Key == VirtualKey.R) { pass.ResetCamera(); _movement = 0; e.Handled = true; return; }
+        if (e.Key == VirtualKey.Escape) { ClearCameraInput(); e.Handled = true; return; }
+        if (pass.Camera.Mode != CameraMode.Fly) return;
+        CameraMovement key = MovementKey(e.Key); if (key == 0) return;
+        _movement |= key; pass.Camera.SetMovement(_movement); e.Handled = true;
+    }
+    private void OnCameraKeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        CameraMovement key = MovementKey(e.Key); if (key == 0) return;
+        _movement &= ~key; if (_activePass is RayTracePass pass) pass.Camera.SetMovement(_movement); e.Handled = true;
+    }
+    private void OnViewportLostFocus(object sender, RoutedEventArgs e) => ClearCameraInput();
+    private void ClearCameraInput()
+    {
+        _movement = 0; _dragPointer = null;
+        if (_activePass is RayTracePass pass) pass.Camera.SetMovement(0);
+        _shaderPanel?.ReleasePointerCaptures();
+    }
+    private void OnCameraModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_activePass is not RayTracePass pass) return;
+        ClearCameraInput(); pass.Camera.Mode = CameraModeSelector.SelectedIndex == 1 ? CameraMode.Fly : CameraMode.Orbit;
+        NavigationHint.Text = pass.Camera.Mode == CameraMode.Fly ? "点击视口后 WASD 移动 · Q/E 升降 · 右键观察 · Shift 加速 · 滚轮调速 · R 重置" :
+            "左键旋转 · 中键平移 · 滚轮缩放 · 拖入 glTF / GLB 打开";
+        ViewportFocus.Focus(FocusState.Programmatic);
+    }
+    private void OnResetCamera(object sender, RoutedEventArgs e) { ClearCameraInput(); if (_activePass is RayTracePass pass) pass.ResetCamera(); }
+    private async void OnOpenModel(object sender, RoutedEventArgs e) => await PickModelAsync();
+    private async void OnOpenModelShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e) { e.Handled = true; await PickModelAsync(); }
+    private async Task PickModelAsync()
+    {
+        try
+        {
+            ClearCameraInput();
+            var picker = new FileOpenPicker();
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+            picker.FileTypeFilter.Add(".gltf"); picker.FileTypeFilter.Add(".glb");
+            StorageFile? file = await picker.PickSingleFileAsync();
+            if (file != null) await LoadModelAsync(file.Path);
         }
+        catch (Exception error) { SceneLoadStatus.Visibility = Visibility.Visible; SceneLoadStatus.Text = error.Message; }
+    }
+    private async Task LoadModelAsync(string path)
+    {
+        if (_activePass is not RayTracePass pass) return;
+        _loadCancellation?.Cancel();
+        using var cancellation = new CancellationTokenSource(); _loadCancellation = cancellation;
+        ClearCameraInput(); CancelLoadButton.Visibility = Visibility.Visible; SceneLoadStatus.Visibility = Visibility.Visible;
+        SceneLoadStatus.Text = $"正在解析模型、解码贴图并上传 GPU：{System.IO.Path.GetFileName(path)}";
+        try
+        {
+            var document = await pass.ImportAsync(path, cancellation.Token);
+            if (_disposed || !ReferenceEquals(_loadCancellation, cancellation)) return;
+            SyncRayTraceParams(pass);
+            var scene = document.Scenes[document.DefaultScene];
+            SceneLoadStatus.Text = $"{System.IO.Path.GetFileName(path)} · {scene.Instances.Length} 实例 · {scene.Materials.Length - 1} 材质 · {scene.Textures.Length} 贴图 · {scene.Lights.Length} 灯光" +
+                (scene.Warnings.Length > 0 ? "\n" + string.Join("\n", scene.Warnings) : "");
+        }
+        catch (OperationCanceledException) { if (!_disposed && ReferenceEquals(_loadCancellation, cancellation)) SceneLoadStatus.Text = "已取消加载。"; }
+        catch (Exception error) { if (!_disposed && ReferenceEquals(_loadCancellation, cancellation)) SceneLoadStatus.Text = "加载失败：" + error.Message; }
+        finally { if (ReferenceEquals(_loadCancellation, cancellation)) { _loadCancellation = null; if (!_disposed) CancelLoadButton.Visibility = Visibility.Collapsed; } }
+    }
+    private void OnCancelLoad(object sender, RoutedEventArgs e) => _loadCancellation?.Cancel();
+    private void OnSceneDragOver(object sender, DragEventArgs e)
+    { if (e.DataView.Contains(StandardDataFormats.StorageItems)) e.AcceptedOperation = DataPackageOperation.Copy; }
+    private async void OnSceneDrop(object sender, DragEventArgs e)
+    {
+        try
+        {
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            var items = await e.DataView.GetStorageItemsAsync();
+            foreach (var item in items) if (item is StorageFile file) { await LoadModelAsync(file.Path); break; }
+        }
+        catch (Exception error) { if (!_disposed) SceneLoadStatus.Text = error.Message; }
     }
 
     private void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -428,8 +571,8 @@ public sealed partial class MainWindow : WindowEx
             }
 
             double dpiScale = DpiScale;
-            double contentWidth = RootGrid.ActualWidth;
-            double contentHeight = Math.Max(1, RootGrid.ActualHeight);
+            double contentWidth = ViewportFocus.ActualWidth;
+            double contentHeight = Math.Max(1, ViewportFocus.ActualHeight);
 
             double w = Math.Round(contentWidth * dpiScale);
             double h = Math.Round(contentHeight * dpiScale);
@@ -503,6 +646,7 @@ public sealed partial class MainWindow : WindowEx
         if (_disposed) return;
         _disposed = true;
         _recheckTimer.Stop();
+        _loadCancellation?.Cancel(); ClearCameraInput();
         _renderScaleTimer.Stop();
         _settings.AllowClose = true;
         _settings.Close();

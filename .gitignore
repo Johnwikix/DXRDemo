@@ -362,6 +362,11 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
+# Local compiled shader probes.
+/diagnostics/*.dxil
+/diagnostics/*-pid.txt
+/Samples/RainyCorner/*.blend1
+
 # Pinned vendor redistributables and the static NGX import library are source dependencies.
 !External/Upscalers/xess/bin/
 !External/Upscalers/xess/bin/libxess.dll

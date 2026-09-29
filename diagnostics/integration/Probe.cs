@@ -8,6 +8,8 @@ using System.Text.Json;
 
 Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
+if (args.Contains("--scene")) { await SceneProbe.Run(args.SkipWhile(a => a != "--scene").Skip(1).FirstOrDefault()); return; }
+if (args.Contains("--scene-preview")) { await SceneProbe.Preview(args.SkipWhile(a => a != "--scene-preview").Skip(1).First()); return; }
 if (args.Contains("--sr")) { ReconstructionProbe.Run(); return; }
 if (args.Contains("--nrd-missing")) { ReconstructionProbe.Run(true); return; }
 using var device = GraphicsDevice.GetDefault();

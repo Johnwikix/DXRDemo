@@ -14,6 +14,8 @@ cbuffer FrameConstants : register(b0)
     float4 Jitter;           // current and previous ray sample offsets, in input pixels
     float4 Control;          // history reset, denoiser mode, history length, spatial level
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
+    float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
+    float4 Lighting;        // separate primary direct light in the packaged mesh path
 };
 
 Texture2D<float4> Raw : register(t0);
@@ -22,18 +24,24 @@ Texture2D<float4> Surfaces : register(t2); // world position + ray distance; sky
 Texture2D<float4> History : register(t3);  // linear radiance + previous view depth (-1 for sky)
 Texture2D<float4> FilterInput : register(t4);
 Texture2D<float4> Reconstructed : register(t5);
+Texture2D<float4> PbrDiffuse : register(t6);
+Texture2D<float4> PbrSpecular : register(t7);
+Texture2D<float4> PbrAlbedo : register(t8);
+Texture2D<float4> PbrUnfiltered : register(t9); // Primary analytic direct lighting + emission; preserve hard shadows.
+Texture2D<float4> SpecularReconstructed : register(t10);
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float> Depth : register(u1);
 RWTexture2D<float2> Motion : register(u2);
 RWTexture2D<float> Reactive : register(u3);
 RWTexture2D<float4> NextHistory : register(u4);
 RWTexture2D<float4> Encoded : register(u5);
+RWTexture2D<float4> PackedSpecular : register(u6);
 
 float2 Project(float3 direction, float3 forward, float3 right, float3 up)
 {
     float z = max(dot(direction, forward), 0.00001);
-    float2 ndc = float2(dot(direction, right) / (z * (Size.x / Size.y) * 0.5),
-                        dot(direction, up) / (z * 0.5));
+    float2 ndc = float2(dot(direction, right) / (z * (Size.x / Size.y) * Projection.x),
+                        dot(direction, up) / (z * Projection.x));
     return float2((ndc.x + 1) * 0.5, (1 - ndc.y) * 0.5) * Size.xy;
 }
 
@@ -79,8 +87,8 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
     if (Control.x != 0 || previousZ <= 0) motion = 0;
     Motion[p] = clamp(motion, -32700, 32700);
     // Conventional finite perspective depth: near=0.01, far=1000, FOV=2*atan(0.5).
-    Depth[p] = sky ? 1 : saturate(1000.0 / 999.99 - 10.0 / (999.99 * max(currentZ, 0.01)));
-    Reactive[p] = 0; // All current meshes are opaque and have valid camera motion.
+    Depth[p] = sky ? 1 : saturate(Projection.z / (Projection.z-Projection.y) - Projection.z*Projection.y / ((Projection.z-Projection.y) * max(currentZ, Projection.y)));
+    Reactive[p] = Projection.w != 0 ? PbrAlbedo[p].a : 0;
 
     float3 value = max(Raw[p].rgb, 0);
     float3 lo = value, hi = value;
@@ -152,8 +160,17 @@ void PrepareNrd(uint3 tid : SV_DispatchThreadID)
     bool sky = surface.w < 0;
     float viewZ = dot(surface.xyz - CameraOrigin.xyz, CameraForward.xyz);
     // NRD linear view Z matches the right-handed camera matrix (forward is -Z).
-    Depth[p] = sky ? -1000000 : -viewZ;
-    Color[p] = sky ? 0 : RELAX_FrontEnd_PackRadianceAndHitDist(Raw[p].rgb / DiffuseAlbedo(p), Raw[p].w, true);
+    Depth[p] = sky ? -max(1000000, Projection.z * 2) : -viewZ;
+    if (Projection.w != 0)
+    {
+        float4 d = PbrDiffuse[p], s = PbrSpecular[p];
+        Color[p] = sky ? 0 : RELAX_FrontEnd_PackRadianceAndHitDist(d.rgb, d.a, true);
+        PackedSpecular[p] = sky ? 0 : RELAX_FrontEnd_PackRadianceAndHitDist(s.rgb, s.a, true);
+    }
+    else {
+        float3 diffuse = Raw[p].rgb - (Lighting.x != 0 ? PbrUnfiltered[p].rgb : 0);
+        Color[p] = sky ? 0 : RELAX_FrontEnd_PackRadianceAndHitDist(max(diffuse,0) / DiffuseAlbedo(p), Raw[p].w, true);
+    }
 }
 
 [numthreads(8, 8, 1)]
@@ -164,8 +181,11 @@ void ComposeNrd(uint3 tid : SV_DispatchThreadID)
     float4 surface = Surfaces[p];
     float viewZ = dot(surface.xyz - CameraOrigin.xyz, CameraForward.xyz);
     // NRD leaves pixels beyond denoisingRange unwritten, including sky.
-    float3 color = surface.w < 0 || viewZ >= 1000 ? Raw[p].rgb :
-        RELAX_BackEnd_UnpackRadiance(Reconstructed[p]).rgb * DiffuseAlbedo(p);
+    float3 albedo = Projection.w != 0 ? PbrAlbedo[p].rgb : DiffuseAlbedo(p);
+    float3 color = RELAX_BackEnd_UnpackRadiance(Reconstructed[p]).rgb * albedo;
+    if (Projection.w != 0) color += RELAX_BackEnd_UnpackRadiance(SpecularReconstructed[p]).rgb + PbrUnfiltered[p].rgb;
+    else if (Lighting.x != 0) color += PbrUnfiltered[p].rgb;
+    if (surface.w < 0 || viewZ >= Projection.z) color = Raw[p].rgb;
     Color[p] = float4(max(color, 0), 1);
 }
 
@@ -173,15 +193,20 @@ void ComposeNrd(uint3 tid : SV_DispatchThreadID)
 void Encode(uint3 tid : SV_DispatchThreadID)
 {
     if (any(tid.xy >= uint2(Size.zw))) return;
-    float3 color = max(Reconstructed[tid.xy].rgb, 0);
+    float3 color = max(Reconstructed[tid.xy].rgb, 0) * exp2(OutputParameters.w);
     if (OutputParameters.x != 0)
     {
+        if (Projection.w != 0) color /= 1 + color / max(OutputParameters.z / OutputParameters.y, 1);
         color = float3(dot(color, float3(0.627404, 0.329283, 0.043313)),
                        dot(color, float3(0.069097, 0.919540, 0.011362)),
                        dot(color, float3(0.016391, 0.088013, 0.895595)));
         float3 y = pow(min(color * OutputParameters.y, OutputParameters.z) / 10000, 0.1593017578125);
         color = pow((0.8359375 + 18.8515625 * y) / (1 + 18.6875 * y), 78.84375);
     }
-    else color = pow(color, 1.0 / 2.2);
+    else
+    {
+        if (Projection.w != 0) color = saturate((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14));
+        color = pow(color, 1.0 / 2.2);
+    }
     Encoded[tid.xy] = float4(color, 1);
 }

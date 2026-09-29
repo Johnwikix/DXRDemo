@@ -15,6 +15,9 @@ internal static unsafe partial class NativeNrd
         internal Vector2 Jitter, PreviousJitter;
         internal float Milliseconds;
         internal uint FrameIndex, Reset, Padding;
+        internal nint Specular, SpecularOutput;
+        internal float DenoisingRange;
+        internal uint Reserved;
     }
 
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdAvailable")]
@@ -23,6 +26,8 @@ internal static unsafe partial class NativeNrd
     internal static partial nint Diagnostic();
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdCreate")]
     internal static partial int Create(nint device, uint width, uint height, out nint context);
+    [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdCreatePbr")]
+    internal static partial int CreatePbr(nint device, uint width, uint height, out nint context);
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdExecute")]
     internal static partial int Execute(nint context, nint commands, Frame* frame);
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdDispatchCount")]

@@ -1,5 +1,10 @@
 # DXR Demo — WinUI 3 + DirectX 12 Raytracing Path Tracer
 
+已加入 **glTF 2.0 / GLB 静态场景加载与 PBR DXR 渲染**：打开文件或拖入模型，支持节点实例、PNG/JPEG 贴图、金属度/粗糙度、法线、自发光、透明度与 `KHR_lights_punctual` 灯光。新增连续拖动相机、WASD 自由相机和独立镜头重置；导入场景使用 NRD 漫反射/镜面反射双信号降噪。操作、支持范围、架构与验证见 [场景渲染器说明](docs/SCENE_RENDERER.md)。
+
+
+启动默认加载随程序打包的 **雨后便利店 · Rainy Corner**，使用仅模型光照、曝光 −2 EV；设置中的场景列表保留 Bunny、Armadillo、Dragon 和便利店，导入其他模型后仍可切回。场景源文件与预览见 [便利店样例](Samples/RainyCorner/README.md)。
+
 当前三角形模型渲染器已支持 **FSR 3.1 / XeSS / DLSS 超分辨率**：在设置中选择算法与
 1–100% 渲染比例滑块，不支持的算法会禁用，初始化失败会显示原生分辨率回退。
 默认降噪已接入真正的 **NVIDIA NRD 4.17.3 / RELAX_DIFFUSE**，支持原生分辨率与 SR
@@ -7,7 +12,7 @@
 默认仍关闭 SR。x64 构建还需要 PowerShell 7 与 Visual Studio C++ v145 工具集；
 厂商 SDK 已固定版本并附带许可证，构建时会校验和编译原生桥接。
 管线、Intel 离屏验证及 DLSS 光线重建可行性见 [超分说明](docs/SUPER_RESOLUTION.md)。
-下文球体管线描述保留为最初版本的技术记录，当前默认场景为 Stanford 三角形模型。
+下文球体管线描述保留为最初版本的技术记录，当前默认场景为雨后便利店。
 
 DXR Demo 是一个基于 WinUI 3 的实时 DirectX 12 光线追踪（DXR）演示程序。它使用 [Vortice](https://github.com/amerkoleci/Vortice.Windows)（C# 的 DirectX 绑定，非 SharpDX）从零实现了完整的 DXR 渲染管线，渲染一个 Monte Carlo 路径追踪场景（5 个球体：绿色 Lambertian、银色金属、带内气泡的玻璃球、巨型地面）。
 

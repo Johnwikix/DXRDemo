@@ -5,11 +5,13 @@ namespace DXRDemo.Shaders.RayTrace;
 [ThreadGroupSize(8, 8, 1)]
 [GeneratedComputeShaderDescriptor]
 public readonly partial struct MeshPathTraceShader(
-    int width, int height, int samples, int maxBounces, int frame, Float2 orbit, float distance,
-    int temporal, Float2 jitter,
+    int width, int height, int samples, int maxBounces, int frame,
+    int temporal, int splitDirect, float environment, Float2 jitter,
     ReadOnlyBuffer<Float4> triangles, ReadOnlyBuffer<Float4> nodes,
     ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
-    ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4> normalRoughness) : IComputeShader
+    ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4> normalRoughness, ReadWriteTexture2D<Float4> directLight,
+    Float3 cameraOrigin, Float3 cameraForward, Float3 cameraRight, Float3 cameraUp,
+    Float3 sunDirection, Float3 sunRadiance) : IComputeShader
 {
     private static float Random(ref uint state)
     {
@@ -92,14 +94,11 @@ public readonly partial struct MeshPathTraceShader(
     {
         Int2 pixel = ThreadIds.XY;
         if (pixel.X >= width || pixel.Y >= height) return;
-        float yaw = orbit.X, pitch = orbit.Y;
-        Float3 origin = new Float3(Hlsl.Sin(yaw) * Hlsl.Cos(pitch), Hlsl.Sin(pitch), Hlsl.Cos(yaw) * Hlsl.Cos(pitch)) * distance + new Float3(0, 0.9f, 0);
-        Float3 forward = Hlsl.Normalize(new Float3(0,0.9f,0) - origin);
-        Float3 right = Hlsl.Normalize(Hlsl.Cross(forward, new Float3(0,1,0)));
-        Float3 up = Hlsl.Cross(right, forward);
-        Float3 sun = Hlsl.Normalize(new Float3(-1,2,1));
+        Float3 origin = cameraOrigin, forward = cameraForward, right = cameraRight, up = cameraUp;
+        Float3 sun = sunDirection;
         uint rng = (uint)(pixel.X * 73856093 + pixel.Y * 19349663 + frame * 83492791 + 12345);
         Float3 sum = Float3.Zero;
+        Float3 directSum = Float3.Zero;
         float distanceSum = 0;
         float diffuseHitSum = 0;
         Float3 primaryNormal = Float3.Zero;
@@ -131,7 +130,7 @@ public readonly partial struct MeshPathTraceShader(
                         distanceSum += 1;
                         if (sample == 0) primarySurface = new Float4(rd, -1);
                     }
-                    color += throughput * Sky(rd); break;
+                    color += throughput * Sky(rd) * environment; break;
                 }
                 float t = ground ? groundT : meshT;
                 if (bounce == 1) diffuseHit = t;
@@ -152,8 +151,12 @@ public readonly partial struct MeshPathTraceShader(
                 ro = point + normal * 0.0002f;
                 float ndotl = Hlsl.Max(Hlsl.Dot(normal,sun),0);
                 float shadowT; int shadowId;
-                if (ndotl > 0 && !HitMesh(ro,sun,1000,true,out shadowT,out shadowId))
-                    color += throughput * albedo * new Float3(3,2.8f,2.5f) * (ndotl / 3.141592654f);
+                if (ndotl > 0 && Hlsl.Dot(sunRadiance,sunRadiance) > 0 && !HitMesh(ro,sun,1000,true,out shadowT,out shadowId))
+                {
+                    Float3 direct = throughput * albedo * sunRadiance * (ndotl / 3.141592654f);
+                    color += direct;
+                    if (bounce == 0) directSum += direct;
+                }
                 // Cosine-weighted diffuse continuation, same PRNG and arithmetic in both backends.
                 float r = Hlsl.Sqrt(Random(ref rng));
                 float phi = Random(ref rng) * 6.283185307f;
@@ -175,6 +178,7 @@ public readonly partial struct MeshPathTraceShader(
             sum += color;
         }
         output[pixel] = new Float4(sum / samples, temporal == 2 ? diffuseHitSum / samples : distanceSum / samples);
+        if (splitDirect != 0) directLight[pixel] = new Float4(directSum / samples, 1);
         normals[pixel] = new Float4(primaryNormal * 0.5f + 0.5f, primaryMaterial / 255.0f);
         if (temporal != 0) surfaces[pixel] = primarySurface;
         if (temporal == 2)

@@ -122,8 +122,12 @@ struct NrdFrame {
     float jitter[2], jitterPrev[2];
     float milliseconds;
     uint32_t frameIndex, reset, padding;
+    ID3D12Resource* specular;
+    ID3D12Resource* specularOutput;
+    float denoisingRange;
+    uint32_t reserved;
 };
-static_assert(sizeof(NrdFrame) == 264);
+static_assert(sizeof(NrdFrame) == 288);
 
 struct NrdContext {
     NrdApi api;
@@ -157,13 +161,14 @@ struct NrdContext {
             texture.resource = texture.owned.Get();
         }
     }
-    void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h) {
+    void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h, bool pbr = false) {
         device = gpu; width = w; height = h;
-        nrd::DenoiserDesc denoiser{denoiserId, nrd::Denoiser::RELAX_DIFFUSE};
+        nrd::DenoiserDesc denoiser{denoiserId, pbr ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR : nrd::Denoiser::RELAX_DIFFUSE};
         nrd::InstanceCreationDesc creation{}; creation.denoisers = &denoiser; creation.denoisersNum = 1;
         Check(api.create(creation, instance), "Create NRD RELAX_DIFFUSE");
         nrd::RelaxSettings settings{};
         settings.enableAntiFirefly = true;
+        if (pbr) settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
         Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
         const auto& desc = *api.description(*instance);
         Pool(permanent, desc.permanentPool, desc.permanentPoolSize);
@@ -224,7 +229,7 @@ struct NrdContext {
         common.resourceSize[1] = common.resourceSizePrev[1] = common.rectSize[1] = common.rectSizePrev[1] = uint16_t(height);
         common.motionVectorScale[0] = 1.0f / width; common.motionVectorScale[1] = 1.0f / height;
         common.frameIndex = frame.frameIndex; common.timeDeltaBetweenFrames = frame.milliseconds;
-        common.denoisingRange = 1000;
+        common.denoisingRange = frame.denoisingRange > 0 ? frame.denoisingRange : 1000;
         common.accumulationMode = frame.reset ? nrd::AccumulationMode::CLEAR_AND_RESTART : nrd::AccumulationMode::CONTINUE;
         Check(api.common(*instance, common), "Set NRD camera settings");
         const nrd::DispatchDesc* dispatches = nullptr;
@@ -236,6 +241,8 @@ struct NrdContext {
         external[unsigned(nrd::ResourceType::IN_VIEWZ)].resource = frame.viewZ;
         external[unsigned(nrd::ResourceType::IN_MV)].resource = frame.motion;
         external[unsigned(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST)].resource = frame.output;
+        external[unsigned(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST)].resource = frame.specular;
+        external[unsigned(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST)].resource = frame.specularOutput;
         ID3D12DescriptorHeap* heaps[] = {heap.Get()}; commands->SetDescriptorHeaps(1, heaps);
         for (uint32_t i = 0; i < dispatchCount; i++) {
             const auto& dispatch = dispatches[i]; auto& pipeline = pipelines.at(dispatch.pipelineIndex);
@@ -284,6 +291,16 @@ API int NrdExecute(NrdContext* context, ID3D12GraphicsCommandList* commands, con
     try { context->Execute(commands, *frame); return 0; }
     catch (const std::exception& e) { strncpy_s(diagnostic, e.what(), _TRUNCATE); return -2; }
     catch (...) { strcpy_s(diagnostic, "Unknown NRD dispatch error"); return -3; }
+}
+API int NrdCreatePbr(ID3D12Device* device, uint32_t width, uint32_t height, NrdContext** output) noexcept {
+    if (!output) return -1;
+    *output = nullptr;
+    if (!device || !width || !height || width > 65535 || height > 65535) return -1;
+    try {
+        auto context = std::make_unique<NrdContext>(); context->Initialize(device, width, height, true);
+        *output = context.release(); return 0;
+    } catch (const std::exception& e) { strncpy_s(diagnostic, e.what(), _TRUNCATE); return -2; }
+    catch (...) { strcpy_s(diagnostic, "Unknown PBR NRD initialization error"); return -3; }
 }
 API uint32_t NrdDispatchCount(const NrdContext* context) noexcept { return context ? context->dispatchCount : 0; }
 API void NrdDestroy(NrdContext* context) noexcept { delete context; }
