@@ -8,9 +8,11 @@ struct Instance { uint4 mesh; row_major float4x4 world, normal; };
 struct Light { float4 positionType, directionRange, colorIntensity, spot; };
 struct Emitter { float4 p0, e1, e2, meta; };
 struct Payload { float t; uint instance, primitive; float2 bary; uint random, transparency; };
-struct Surface { float3 p, n, g, base, emission; float metallic, roughness, alpha, ao, transmission, ior, thickness; uint material, front; };
+struct Surface { float3 p, n, g, base, emission; float metallic, roughness, alpha, ao, transmission, ior, thickness; uint material, front, causticCaster; };
 cbuffer Frame : register(b0) {
     float4 CameraOrigin, CameraForward, CameraRight, CameraUp, Size, Control, Environment, Limits, SunDirection, SunRadiance;
+    float4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
+    float4 Lighting, CausticBounds, CausticSettings;
 }
 RaytracingAccelerationStructure Scene : register(t0);
 StructuredBuffer<Vertex> Vertices : register(t1);
@@ -97,12 +99,16 @@ Surface Evaluate(uint instance, uint primitive, float2 bary, float cone, float3 
     result.transmission=saturate(material.transmission.x*Sample(material.transmissionMap,uv,footprint[(uint)material.transmissionMap.info.y]).r)*(1-result.metallic);
     result.ior=max(material.transmission.y,1); result.front=front;
     result.thickness=max(material.transmission.z*Sample(material.thicknessMap,uv,footprint[(uint)material.thicknessMap.info.y]).g,0);
+    result.causticCaster=node.mesh.w;
     return result;
 }
 [shader("anyhit")]
 void AnyHit(inout Payload payload, BuiltInTriangleIntersectionAttributes attr) {
     Instance node; Vertex a,b,c; Triangle(InstanceID(),PrimitiveIndex(),node,a,b,c);
     Material material=Materials[node.mesh.z];
+    // The first shadow query ignores transmitting surfaces and terminates on any opaque blocker.
+    if((payload.transparency&4)!=0 && material.transmission.x>0) { IgnoreHit(); return; }
+    if((payload.transparency&8)!=0 && material.transmission.x<=0) { IgnoreHit(); return; }
     float3 normal=mul(float4(cross(b.position.xyz-a.position.xyz,c.position.xyz-a.position.xyz),0),node.normal).xyz;
     // Volume exit faces must remain intersectable even on single-sided glTF materials.
     if (material.flags.z==0 && material.transmission.x==0 && dot(normal,WorldRayDirection())>=0) { IgnoreHit(); return; }
@@ -121,7 +127,7 @@ void ClosestHit(inout Payload payload, BuiltInTriangleIntersectionAttributes att
 void Miss(inout Payload payload) { payload.instance=0xffffffff; }
 Payload Trace(float3 origin,float3 direction,float maximum,bool shadow,inout uint rng,bool guide=false) {
     RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=max(maximum,Limits.x*2);
-    Payload hit; hit.t=ray.TMax; hit.instance=0xffffffff; hit.primitive=0; hit.bary=0; hit.random=rng; hit.transparency=guide?2:0;
+    Payload hit; hit.t=ray.TMax; hit.instance=0xffffffff; hit.primitive=0; hit.bary=0; hit.random=rng; hit.transparency=(guide?2:0)|(shadow?4:0);
     TraceRay(Scene,shadow?RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:RAY_FLAG_NONE,255,0,0,0,ray,hit); rng=hit.random; return hit;
 }
 float3 Offset(Surface s,float3 direction) {
@@ -157,14 +163,30 @@ float3 Local(float3 n,float3 v) {
     float3 t=normalize(cross(abs(n.y)<.99?float3(0,1,0):float3(1,0,0),n)); return t*v.x+cross(n,t)*v.y+n*v.z;
 }
 float Weight(float a,float b) { a*=a; b*=b; return a/max(a+b,1e-20); }
-// Straight-line visibility through transparent panes. Refraction caustics require a different light sampler.
-float3 Visibility(float3 origin,float3 direction,float maximum,inout uint rng,out bool stochastic) {
+// Opaque blockers use first-hit termination, without material/normal-map evaluation.
+// Thick refractors lit by analytic lights are handled by the photon pass.
+Payload TraceGlass(float3 origin,float3 direction,float maximum,inout uint rng) {
+    RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=maximum;
+    Payload hit=(Payload)0; hit.t=maximum; hit.instance=0xffffffff; hit.random=rng; hit.transparency=8;
+    TraceRay(Scene,RAY_FLAG_NONE,255,0,0,0,ray,hit); rng=hit.random; return hit;
+}
+float3 Visibility(float3 origin,float3 direction,float maximum,inout uint rng,out bool stochastic,bool analytic=false) {
     float3 visibility=1; stochastic=false;
+    if(maximum<=Limits.x*2) return 0;
+    Payload blocker=Trace(origin,direction,maximum,true,rng);
+    stochastic=(blocker.transparency&1)!=0;
+    if(blocker.instance!=0xffffffff) return 0;
+    if(Limits.w==0) return 1;
     for(uint layer=0;layer<24;layer++) {
-        Payload hit=Trace(origin,direction,maximum,false,rng); stochastic=stochastic||hit.transparency!=0;
+        // Alpha coverage was already sampled by the opaque query. Skip it on the ordered glass query.
+        Payload hit=TraceGlass(origin,direction,maximum,rng);
+        stochastic=stochastic||(hit.transparency&1)!=0;
         if(hit.instance==0xffffffff) return visibility;
         Surface s=Evaluate(hit.instance,hit.primitive,hit.bary,0,-direction);
         if(s.transmission<=0) return 0;
+        // Only focusing geometry delegates transmission to the photon map. Parallel panes retain
+        // continuous analytic lighting instead of replacing it with isolated photon footprints.
+        if(analytic && CausticSettings.x>0 && s.causticCaster!=0 && s.thickness>0 && s.ior>1.001) return 0;
         float f=Fresnel(saturate(dot(s.g,-direction)),s.front!=0?1/s.ior:s.ior);
         visibility*=s.transmission*(1-f);
         if(s.thickness==0) visibility*=s.base;
@@ -175,7 +197,7 @@ float3 Visibility(float3 origin,float3 direction,float maximum,inout uint rng,ou
     }
     return 0;
 }
-void Direct(Surface s,float3 v,inout uint rng,out float3 diffuse,out float3 specular,out float3 unfiltered) {
+void DirectClassic(Surface s,float3 v,inout uint rng,out float3 diffuse,out float3 specular,out float3 unfiltered) {
     diffuse=specular=unfiltered=0;
     // Evaluate analytic lights deterministically. Their sharp shadows must not be blurred with
     // the indirect lobe hit distance. Stochastic transparent shadows still require denoising.
@@ -191,8 +213,8 @@ void Direct(Surface s,float3 v,inout uint rng,out float3 diffuse,out float3 spec
             if(light.positionType.w==2) { float cone=saturate((dot(-l,light.directionRange.xyz)-light.spot.y)/max(light.spot.x-light.spot.y,1e-6)); attenuation*=cone*cone; }
         }
         float3 d,r; float pdf; Bsdf(s,v,l,d,r,pdf); float nl=saturate(dot(s.n,l));
-        if(nl>0 && attenuation>0) {
-            bool stochastic; float3 visibility=Visibility(Offset(s,l),l,distance-Limits.x*4,rng,stochastic);
+        if(nl>0 && attenuation>0 && any(d+r>0)) {
+            bool stochastic; float3 visibility=Visibility(Offset(s,l),l,distance-Limits.x*4,rng,stochastic,true);
             if(any(visibility>0)) {
                 float3 energy=light.colorIntensity.rgb*light.colorIntensity.w*attenuation*nl*visibility;
                 if(stochastic || Materials[s.material].flags.x==2) { diffuse+=d*energy; specular+=r*energy; }
@@ -213,7 +235,8 @@ void Direct(Surface s,float3 v,inout uint rng,out float3 diffuse,out float3 spec
         float3 front=normalize(mul(float4(cross(vb.position.xyz-va.position.xyz,vc.position.xyz-va.position.xyz),0),node.normal).xyz);
         if(lm.flags.z!=0||dot(front,-l)>0) {
             float lightPdf=dist*dist/max(Environment.z*cosine,1e-10); float3 d,r; float pdf; Bsdf(s,v,l,d,r,pdf);
-            bool stochastic; float3 visibility=Visibility(Offset(s,l),l,dist-max(Limits.x*8,dist*1e-5),rng,stochastic);
+            bool stochastic; float3 visibility=0;
+            if(cosine>0 && any(d+r>0)) visibility=Visibility(Offset(s,l),l,dist-max(Limits.x*8,dist*1e-5),rng,stochastic);
             if(cosine>0 && dot(s.n,l)>0 && any(visibility>0)) {
                 float3 energy=lamp.emission*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/max(lightPdf,1e-10)*visibility;
                 if(lm.flags.x==1 && lamp.alpha<lm.flags.y) energy=0; if(lm.flags.x==2) energy*=lamp.alpha;
@@ -224,20 +247,23 @@ void Direct(Surface s,float3 v,inout uint rng,out float3 diffuse,out float3 spec
     if(Environment.x>0) {
         float z=1-2*Random(rng),phi=2*PI*Random(rng),radius=sqrt(max(0,1-z*z)); float3 l=float3(radius*cos(phi),z,radius*sin(phi));
         float3 d,r; float pdf; Bsdf(s,v,l,d,r,pdf); float lightPdf=1/(4*PI);
-        bool stochastic; float3 visibility=Visibility(Offset(s,l),l,CameraRight.w,rng,stochastic);
+        bool stochastic; float3 visibility=0;
+        if(any(d+r>0)) visibility=Visibility(Offset(s,l),l,CameraRight.w,rng,stochastic);
         if(dot(s.n,l)>0 && any(visibility>0)) {
             // AO affects only environment illumination, never punctual lights.
             float3 energy=Sky(l)*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/lightPdf*s.ao*visibility; diffuse+=d*energy; specular+=r*energy;
         }
     }
 }
+#include "SceneLighting.hlsli"
 [shader("raygeneration")]
 void RayGen() {
     uint2 pixel=DispatchRaysIndex().xy;
+    ReservoirsOut[pixel.y*(uint)Size.x+pixel.x]=(Reservoir)0;
     uint rng=pixel.x*73856093+pixel.y*19349663+(uint)Control.z*83492791+12345;
     float2 ndc=(float2(pixel)+.5+Size.zw)/Size.xy*2-1;
     float3 primary=normalize(CameraForward.xyz+CameraRight.xyz*ndc.x*(Size.x/Size.y)*CameraForward.w-CameraUp.xyz*ndc.y*CameraForward.w);
-    float3 sumD=0,sumS=0,sumE=0,primaryAlbedo=0,primaryNormal=float3(0,0,1),specularAlbedo=0; float roughness=1,reactive=0,mirrorDistance=0;
+    float3 sumD=0,sumS=0,sumE=0,primaryAlbedo=0,primaryNormal=float3(0,0,1),specularAlbedo=0,primaryCausticD=0,primaryCausticS=0; float roughness=1,reactive=0,mirrorDistance=0;
     float4 primarySurface=float4(primary,-1); uint primaryMaterial=0;
     // A separate deterministic guide ray prevents alpha coverage from changing the G-buffer every frame.
     uint guideRng=pixel.x*73856093+pixel.y*19349663+12345;
@@ -245,6 +271,7 @@ void RayGen() {
     bool coverage=(guide.transparency&1)!=0;
     if(guide.instance!=0xffffffff) {
         Surface g=Evaluate(guide.instance,guide.primitive,guide.bary,guide.t*CameraForward.w*2/Size.y,-primary);
+        if(!coverage) GatherCaustics(g,-primary,primaryCausticD,primaryCausticS);
         primarySurface=float4(g.p,guide.t); primaryNormal=g.n; primaryAlbedo=g.base*(1-g.metallic)*(1-g.transmission);
         roughness=g.roughness; primaryMaterial=g.material; reactive=coverage||g.transmission>0?1:0;
         // Split-sum environment BRDF approximation (linear material reflectance, never lit radiance).
@@ -263,7 +290,8 @@ void RayGen() {
         // Bounded nesting: medium IOR and Beer-Lambert absorption coefficient, air in slot zero.
         float4 media[8]; media[0]=float4(1,0,0,0); uint medium=0;
         for(uint bounce=0;bounce<(uint)Control.y;bounce++) {
-            Payload hit=Trace(ro,rd,CameraRight.w,false,rng);
+            Payload hit;
+            if(bounce==0 && !coverage) hit=guide; else hit=Trace(ro,rd,CameraRight.w,false,rng);
             if(bounce==0) reactive=max(reactive,(float)(hit.transparency&1));
             if(bounce>0 && !hitDistanceRecorded) secondaryDistance+=hit.instance==0xffffffff?65504:min(hit.t,65504);
             if(hit.instance==0xffffffff) {
@@ -285,7 +313,11 @@ void RayGen() {
             if(m.flags.w!=0) radiance+=s.base;
             if(bounce==0) sumE+=radiance; else if(firstLobe==0) sumD+=throughput*radiance; else sumS+=throughput*radiance;
             if(m.flags.w!=0) break;
-            float3 directD,directS,unfiltered; Direct(s,-rd,rng,directD,directS,unfiltered);
+            float3 directD,directS,unfiltered;
+            Direct(s,-rd,rng,bounce==0 && sample==0 && !coverage && s.transmission==0,pixel,directD,directS,unfiltered);
+            float3 causticD=primaryCausticD,causticS=primaryCausticS;
+            if(bounce>0 || coverage) GatherCaustics(s,-rd,causticD,causticS);
+            directD+=causticD; directS+=causticS;
             if(bounce==0) { sumD+=directD; sumS+=directS; sumE+=unfiltered; }
             else if(firstLobe==0) sumD+=throughput*(directD+directS+unfiltered); else sumS+=throughput*(directD+directS+unfiltered);
             if(s.transmission>0) {

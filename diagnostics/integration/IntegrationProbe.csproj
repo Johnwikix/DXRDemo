@@ -16,6 +16,7 @@
     <Compile Include="Probe.cs" />
     <Compile Include="ReconstructionProbe.cs" />
     <Compile Include="SceneProbe.cs" />
+    <Compile Include="LightingProbe.cs" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />
     <Compile Include="../../DXRDemo/DXR/*.cs" Exclude="../../DXRDemo/DXR/DxrRenderer.cs;../../DXRDemo/DXR/DxrSwapChain.cs" />
     <Compile Include="../../DXRDemo/Shaders/RayTrace/*.cs" />
@@ -27,6 +28,7 @@
     <Content Include="../../Samples/RainyCorner/RainyCorner.glb" Link="Assets/Models/RainyCorner.glb" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Reconstruction.hlsl" Link="Shaders/DXR/Reconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli" Link="Shaders/DXR/SceneLighting.hlsli" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Import Project="../../DXRDemo/SuperResolution/ReconstructionAssets.targets" />
 </Project>

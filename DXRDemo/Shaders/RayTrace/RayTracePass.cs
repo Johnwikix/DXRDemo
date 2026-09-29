@@ -284,6 +284,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         _cameraRevision = cameraRevision;
         if (temporal)
         {
+            bool lightingCut = cameraCut != _cameraCut;
             if (_previousSettings is not Settings old || old.CameraReset != s.CameraReset || old.Scene != s.Scene || old.Asset != s.Asset || cameraCut != _cameraCut ||
                 old.Samples != s.Samples || old.Bounces != s.Bounces || old.Denoiser != s.Denoiser || old.Environment != s.Environment || old.Sun != s.Sun || old.ExternalLightingEnabled != s.ExternalLightingEnabled)
                 _reconstruction!.Reset();
@@ -294,7 +295,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
                     _pbrSignals!.Diffuse, _pbrSignals.Specular, _pbrSignals.Albedo, _pbrSignals.Unfiltered, _pbrSignals.SpecularGuide,
-                    sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction);
+                    sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut);
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
             bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight);

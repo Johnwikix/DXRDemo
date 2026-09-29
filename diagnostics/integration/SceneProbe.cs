@@ -92,7 +92,6 @@ internal static class SceneProbe
     }
     internal static async Task Preview(string path)
     {
-        Environment.SetEnvironmentVariable("DXR_DXC_PATH",Path.GetFullPath("../../DXRDemo/bin/renderer-verified/dxc.exe"));
         using var device=GraphicsDevice.GetDefault();
         using var pass=new RayTracePass(new DxrMeshBackend());pass.Initialize(device,default);
         using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(800,600);
@@ -110,7 +109,6 @@ internal static class SceneProbe
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
     internal static async Task Run(string? external = null)
     {
-        Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/renderer-work/dxc.exe"));
         Directory.CreateDirectory("output/scenes");
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
         CameraTests();
@@ -420,7 +418,7 @@ internal static class SceneProbe
         output.Write(jsonSize);output.Write(0x4e4f534au);output.Write(utf8);for(int i=utf8.Length;i<jsonSize;i++)output.Write((byte)32);
         output.Write(binary.Length);output.Write(0x004e4942u);output.Write(binary); return file;
     }
-    private static void Save(ReadWriteTexture2D<Rgba64,Float4> target,string file)
+    internal static void Save(ReadWriteTexture2D<Rgba64,Float4> target,string file)
     {
         var pixels=target.ToArray();var values=MemoryMarshal.Cast<Rgba64,ushort>(MemoryMarshal.CreateReadOnlySpan(ref pixels[0,0],pixels.Length));
         byte[] rgba=new byte[values.Length];for(int i=0;i<rgba.Length;i++)rgba[i]=(byte)(values[i]>>8);

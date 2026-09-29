@@ -1,5 +1,27 @@
 # Model / HDR / settings integration validation
 
+`IntegrationProbe.exe --lighting` exercises ReSTIR DI and refractive photon caustics
+with synthetic fixtures and the D3D12 debug layer. It checks many-light and emissive
+area-light energy, history/camera cuts, lobe reconstruction, glass focusing, IOR=1,
+light removal and resize. See [implementation and results](../../docs/RESTIR_CAUSTICS.md).
+The `DXR_DXC_PATH` environment override is honored by all probe modes.
+
+The lighting suite includes raw-radiance regressions for a wet floor behind
+parallel glass (including mirrored/scaled and densely tessellated variants),
+plus static photon reuse and light-change invalidation. These fail on the original
+photon-blotch implementation; sphere focusing must continue to pass.
+
+`--lighting-scene baseline|no-restir|no-caustics|neither` captures the actual
+Rainy Corner scene at a fixed camera, frame sequence, 640×400, 2 SPP and 10 bounces,
+without a denoiser or SR. It saves exposure −2 SDR PPMs and linear RGBA32F buffers
+under `output/lighting/scene/`. This is an attribution probe; it does not assert
+that the image quality is acceptable.
+
+`--lighting-scene nrd-fixed` and `--lighting-scene dlssd-fixed` execute the actual
+requested reconstruction for 48 frames and save display PNGs alongside raw buffers.
+They fail if NRD/DLSSD falls back. Run outside a restricted sandbox if vendor
+capability initialization cannot access its driver/SDK cache.
+
 The `--sr` option now exercises the real NRD/FSR/XeSS/DLSS adapters, temporal guides,
 scale/denoiser/HDR transitions, a 512-SPP quality reference and fallback. NRD must
 execute its official dispatches for its cases to pass. Run the built **IntegrationProbe.exe**

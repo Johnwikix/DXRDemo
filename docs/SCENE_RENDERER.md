@@ -26,14 +26,14 @@
 | 透明度/玻璃 | OPAQUE、MASK、BLEND；覆盖率透明与实体透射分开；`KHR_materials_transmission`、`KHR_materials_ior`、`KHR_materials_volume`，含透射/厚度贴图 |
 | 灯光 | `KHR_lights_punctual`：方向光、点光源、聚光灯；颜色、强度、范围、锥角和节点变换 |
 | 常用扩展 | `KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization` |
-| 光照 | GGX 镜面反射、漫反射、直接光、环境照明、自发光三角形采样、MIS、路径继续与 Russian roulette |
+| 光照 | GGX 镜面反射、漫反射、ReSTIR DI、环境照明、自发光三角形采样、MIS、折射焦散、路径继续与 Russian roulette |
 | 降噪/显示 | NRD RELAX_DIFFUSE_SPECULAR、FSR/XeSS/DLSS SR、DLSSD 光线重建接入（运行验证留给用户）、线性滤波、曝光、SDR/HDR 编码 |
 
 这是静态场景渲染器，不宣称完整支持所有 glTF 扩展。蒙皮和 Morph Target 暂时明确拒绝，节点动画显示静态姿态并提示；点/线图元、UV 集 2 以上暂不支持。
 
 Draco、Meshopt、KTX2/BasisU、WebP 解码尚未接入。有标准回退数据的可选扩展使用回退并提示；不支持的 `extensionsRequired` 会拒绝加载。图片没有 PNG/JPEG 回退时明确报告错误。当前每个 GPU 场景最多 1024 个纹理视图；同一图像用于 sRGB 和线性数据时会占用不同视图/纹理。
 
-BLEND 表示覆盖率透明；玻璃使用独立的 transmission/IOR/volume 路径。透射包含 Snell 折射、Fresnel 反射、全反射、粗糙微表面和 Beer–Lambert 吸收；封闭几何提供实际穿行厚度，厚度为零时按薄片处理。最多支持七层正确嵌套的实体介质；重叠且不嵌套的体积未完整处理。直射阴影使用透射率和吸收近似，尚未实现折射焦散。Clearcoat、sheen、各向异性以及 OBJ/FBX 导入器仍是后续工作。环境照明目前为可调程序化天空，尚未提供 HDRI 文件导入。
+BLEND 表示覆盖率透明；玻璃使用独立的 transmission/IOR/volume 路径。透射包含 Snell 折射、Fresnel 反射、全反射、粗糙微表面和 Beer–Lambert 吸收；封闭几何提供实际穿行厚度，厚度为零时按薄片处理。最多支持七层正确嵌套的实体介质；重叠且不嵌套的体积未完整处理。解析灯光穿过具有聚焦可能的实体玻璃时，由光子焦散通道计算照明；平行平板玻璃保留连续透射阴影，避免用稀疏光子替代窗户透光。薄片、自发光网格和环境的透射阴影仍采用直线近似。焦散在非透射接收表面按漫反射/镜面 BSDF 分别求值；光子镜面估计使用有限角向带宽，会适度展宽尖锐镜面焦散。Clearcoat、sheen、各向异性以及 OBJ/FBX 导入器仍是后续工作。环境照明目前为可调程序化天空，尚未提供 HDRI 文件导入。
 
 多光源样例位于 `Samples/RainyCorner`，通过 Blender MCP 制作，包含 2,019,650 个实例化三角形、3,199 个网格实例、24 个导出材质（含渲染器默认项为 25）和 8 盏灯。瓶罐、包装、货架、五金及街道设备补充了真实几何细节。附 `.blend` / `.glb`、可复现脚本、Blender 参考图和实际 DXR 预览。
 
@@ -55,7 +55,7 @@ BLEND 表示覆盖率透明；玻璃使用独立的 transmission/IOR/volume 路�
 
 DLSSD 使用独立的 NGX feature 和评价入口，消费原始带噪线性辐射、漫反射/镜面反照率、单位世界法线/粗糙度、真实镜面射线距离、深度、运动与相机矩阵。启用时旁路 NRD/自定义滤波和单独的 DLSS SR。界面按能力查询启用选项，失败时显示具体 NGX 状态并回退常规管线。此路径只做编译和静态接线检查，按用户要求未运行，详见 [超分与光线重建](SUPER_RESOLUTION.md)。
 
-首个命中点的点光源、聚光灯、方向光和全局太阳逐灯确定性计算，硬阴影与发光在 NRD 后合成，避免间接光的命中距离把阴影边缘模糊或拖出残影。经随机透明遮挡的直接光、环境/发光网格采样、间接反弹仍进入对应 lobe 降噪。合成后的画面再交给 SR，因此低渲染比例下仍受 SR 重建质量影响。多灯成本随灯数增加，尚未使用光源树。
+导入场景默认启用 ReSTIR DI：解析灯光与自发光三角形进入同一 reservoir，主表面生成 8 个候选，重投影复用上一帧中心与 4 个邻域样本，历史有效样本数限制为 32。最终只对选中的灯光执行可见性查询；次级反弹使用 4 候选 RIS。无自发光网格且解析灯光不超过 2 盏时保留逐灯确定性计算，硬阴影与发光在 NRD 后合成。ReSTIR、焦散、随机透明遮挡、环境采样和间接光进入对应 lobe 降噪。合成后的画面再交给 SR，因此低渲染比例下仍受 SR 重建质量影响。实现与验证限制见 [ReSTIR 与焦散](RESTIR_CAUSTICS.md)。
 
 内置 Bunny/Armadillo/Dragon 的旧漫反射管线也独立输出主命中的太阳直射光，NRD 只处理剩余的天空与间接照明，之后加回直射光。回归不只比较全图平均误差，还隔离太阳、关闭环境，在兔子投影的 1,409 个地面阴影像素以及相机转动时逐像素比较原始参考；最大误差约 0.00032（FP16 合成误差）。
 
@@ -74,6 +74,7 @@ dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --config
 
 ```powershell
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --lighting
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
@@ -88,6 +89,6 @@ dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --config
 
 加载时间包含后台解码、mip 生成、GPU 上传、BLAS/TLAS 构建和首次着色器/驱动编译；冷启动首次导入会更慢。静态场景不逐帧重建加速结构，帧资源和输出资源引用会复用。当前队列间仍采用保守同步，未宣称任意模型在任意 GPU 上达到固定 FPS。
 
-后续优先项为压缩资产解码、HDRI 环境、纹理/显存预算、批量异步上传和 GPU 队列重叠；再扩展高级材质、动画和其他模型格式。大规模多灯场景尚未实现 ReSTIR 或光源树。
+后续优先项为压缩资产解码、HDRI 环境、纹理/显存预算、批量异步上传和 GPU 队列重叠；再扩展高级材质、动画和其他模型格式。ReSTIR 当前为有偏的实时复用版本，尚未实现光源树、ReSTIR GI/PT 或可见性偏差校正。
 
 规范依据：[glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html)、[punctual lights](https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_lights_punctual/README.md)、[SharpGLTF](https://github.com/vpenades/SharpGLTF)、[NRD](https://github.com/NVIDIA-RTX/NRD)。真实资产验证使用 [Khronos DamagedHelmet](https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/DamagedHelmet)，下载文件仅保存在本地测试输出目录，许可证见原资产页面。

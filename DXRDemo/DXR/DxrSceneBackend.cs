@@ -25,11 +25,23 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     private int _stride;
     private readonly ID3D12Resource?[] _outputs = new ID3D12Resource?[OutputCount];
     private object? _boundOutput;
+    // Structured-buffer ABIs are declared in SceneLighting.hlsli.
+    private const int ReservoirStride = 64, PhotonStride = 64, PhotonCount = 131072, PhotonGridSize = 65536;
+    private readonly ID3D12Resource?[] _reservoirs = new ID3D12Resource?[2];
+    private ID3D12Resource _photons = null!, _photonGrid = null!, _lightingTable = null!;
+    private int _reservoirWidth, _reservoirHeight, _reservoirWrite, _previousFrame = -1;
+    private Constants _previous;
+    private bool _historyValid;
+    private bool _photonsValid;
+    private Constants _photonFrame;
+    internal int PhotonBuildCount { get; private set; }
+    internal bool RestirEnabled { get; set; } = true;
+    internal bool CausticsEnabled { get; set; } = true;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct InstanceData
     {
-        public uint VertexOffset, IndexOffset, Material, Padding;
+        public uint VertexOffset, IndexOffset, Material, CausticCaster;
         public Matrix4x4 World, Normal;
     }
     [StructLayout(LayoutKind.Sequential)]
@@ -38,6 +50,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     private struct Constants
     {
         public Vector4 Origin, Forward, Right, Up, Size, Control, Environment, Limits, SunDirection, SunRadiance;
+        public Vector4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
+        public Vector4 Lighting, CausticBounds, CausticSettings;
     }
     private sealed class SceneGpu : IDisposable
     {
@@ -48,6 +62,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         internal ID3D12DescriptorHeap[] DescriptorHeaps = [];
         internal uint EmitterCount;
         internal float EmitterArea;
+        internal bool HasTransmission, HasRefractiveVolumes;
+        internal Vector4 CausticBounds;
         internal T Keep<T>(T value) where T : IDisposable { Owned.Add(value); return value; }
         public void Dispose() { for (int i = Owned.Count - 1; i >= 0; i--) Owned[i].Dispose(); Owned.Clear(); }
     }
@@ -64,16 +80,27 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, OutputCount, 0, 0),
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, MaxTextures, 0, 1)), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.Sampler, MaxTextures, 0, 1)), ShaderVisibility.All));
+        for (uint i = 9; i < 13; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         _root = _gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())); _owned.Add(_root);
         using var compiler = new DxrShaderCompiler();
         compiler.CompileLibrary(Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "SceneTrace.hlsl"));
         _pipeline = _gpu.Device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
-        [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
+        [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("PhotonGen"), new("ClearPhotonGrid"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
          new(new HitGroupDescription("HitGroup_Sphere", HitGroupType.Triangles, anyHitShaderImport: "AnyHit", closestHitShaderImport: "ClosestHit")),
          new(new GlobalRootSignature(_root)), new(new RaytracingPipelineConfig(1)), new(new RaytracingShaderConfig(28, 8))]));
         _owned.Add(_pipeline);
-        using (var props = _pipeline.QueryInterface<ID3D12StateObjectProperties>()) _table.Build(_gpu.Device, props);
-        _constants = DxrResources.CreateUploadBuffer(_gpu.Device, 256); _owned.Add(_constants);
+        using (var props = _pipeline.QueryInterface<ID3D12StateObjectProperties>())
+        {
+            _table.Build(_gpu.Device, props);
+            _lightingTable = DxrResources.CreateUploadBuffer(_gpu.Device, 128); _owned.Add(_lightingTable);
+            void* records; _lightingTable.Map(0, null, &records).CheckError(); NativeMemory.Clear(records, 128);
+            NativeMemory.Copy((void*)props.GetShaderIdentifier("ClearPhotonGrid"), records, 32);
+            NativeMemory.Copy((void*)props.GetShaderIdentifier("PhotonGen"), (byte*)records + 64, 32);
+            _lightingTable.Unmap(0);
+        }
+        _constants = DxrResources.CreateUploadBuffer(_gpu.Device, 512); _owned.Add(_constants);
+        _photons = DxrResources.CreateDefaultBuffer(_gpu.Device, PhotonCount * PhotonStride, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess); _owned.Add(_photons);
+        _photonGrid = DxrResources.CreateDefaultBuffer(_gpu.Device, PhotonGridSize * 4, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess); _owned.Add(_photonGrid);
         _stride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
         _initialized = true;
     }
@@ -126,12 +153,25 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             }
             var instanceData = new InstanceData[asset.Instances.Length]; var emitters = new List<Emitter>();
             var descriptions = new byte[checked(asset.Instances.Length * 64)]; float areaSum = 0;
+            Vector3 glassMin = new(float.PositiveInfinity), glassMax = new(float.NegativeInfinity);
             for (int i = 0; i < instanceData.Length; i++)
             {
                 SceneInstance instance = asset.Instances[i]; var mesh = asset.Meshes[instance.Mesh];
+                SceneMaterial material = asset.Materials[mesh.Material];
+                scene.HasTransmission |= material.Transmission.X > 0;
+                bool causticCaster = CausticGeometry.IsCaster(mesh, material, instance.Transform);
+                if (causticCaster)
+                {
+                    scene.HasRefractiveVolumes = true;
+                    foreach (ref readonly SceneVertex vertex in mesh.Vertices.AsSpan())
+                    {
+                        Vector3 point = Vector3.Transform(new(vertex.Position.X, vertex.Position.Y, vertex.Position.Z), instance.Transform);
+                        glassMin = Vector3.Min(glassMin, point); glassMax = Vector3.Max(glassMax, point);
+                    }
+                }
                 Matrix4x4.Invert(instance.Transform, out Matrix4x4 inverse);
                 instanceData[i] = new() { VertexOffset = (uint)offsets[instance.Mesh].Vertex, IndexOffset = (uint)offsets[instance.Mesh].Index,
-                    Material = (uint)mesh.Material, World = instance.Transform, Normal = Matrix4x4.Transpose(inverse) };
+                    Material = (uint)mesh.Material, CausticCaster = causticCaster ? 1u : 0u, World = instance.Transform, Normal = Matrix4x4.Transpose(inverse) };
                 Span<byte> desc = descriptions.AsSpan(i * 64, 64); Span<float> transform = MemoryMarshal.Cast<byte, float>(desc[..48]);
                 Matrix4x4 m = Matrix4x4.Transpose(instance.Transform);
                 MemoryMarshal.CreateReadOnlySpan(ref m.M11, 12).CopyTo(transform);
@@ -151,6 +191,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             for (int i = 0; i < emitters.Count; i++) { Emitter e = emitters[i]; e.Meta.Y /= areaSum; emitters[i] = e; }
             scene.EmitterCount = (uint)emitters.Count;
             scene.EmitterArea = areaSum;
+            if (scene.HasRefractiveVolumes) scene.CausticBounds = new((glassMin + glassMax) * .5f, MathF.Max(Vector3.Distance(glassMin, glassMax) * .501f, 1e-4f));
             if (emitters.Count == 0) emitters.Add(default);
             scene.Emitters = Upload(scene, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(emitters)));
             scene.Instances = Upload(scene, MemoryMarshal.AsBytes(instanceData.AsSpan()));
@@ -178,7 +219,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             for (int i = 0; i < asset.Textures.Length; i++) { cancellation.ThrowIfCancellationRequested(); UploadTexture(scene, asset.Textures[i], i); }
             cancellation.ThrowIfCancellationRequested();
             // 已完成的 fence 保护旧场景释放；候选场景完全成功后才替换。
-            _scene?.Dispose(); _scene = scene; _boundOutput = null;
+            _scene?.Dispose(); _scene = scene; _boundOutput = null; _historyValid = false; _photonsValid = false;
         }
         catch { _gpu.SignalAndWait(); scene.Dispose(); throw; }
     }
@@ -225,9 +266,19 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
         ReadWriteTexture2D<Float4> guide, ReadWriteTexture2D<Float4> diffuse, ReadWriteTexture2D<Float4> specular,
         ReadWriteTexture2D<Float4> albedo, ReadWriteTexture2D<Float4> unfiltered, ReadWriteTexture2D<Float4> specularGuide,
-        SunLightSettings sun = default, bool rayReconstruction = false)
+        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
+        if (raw.Width != _reservoirWidth || raw.Height != _reservoirHeight)
+        {
+            _historyValid = false;
+            for (int i = 0; i < 2; i++)
+            {
+                _reservoirs[i]?.Dispose();
+                _reservoirs[i] = DxrResources.CreateDefaultBuffer(_gpu.Device, checked((ulong)raw.Width * (ulong)raw.Height * ReservoirStride), ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess);
+            }
+            _reservoirWidth = raw.Width; _reservoirHeight = raw.Height;
+        }
         if (!ReferenceEquals(raw, _boundOutput))
         {
             foreach (var old in _outputs) old?.Dispose();
@@ -240,8 +291,19 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         Constants data = new() { Origin = new(camera.Origin, camera.Near), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
             Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterArea, 0),
-            Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, 0),
-            SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0) };
+            Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, scene.HasTransmission ? 1 : 0),
+            SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0),
+            PreviousOrigin = _previous.Origin, PreviousForward = _previous.Forward, PreviousRight = _previous.Right, PreviousUp = _previous.Up, PreviousSize = _previous.Size,
+            Lighting = new(RestirEnabled ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
+            CausticSettings = new(CausticsEnabled && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,
+                MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12) };
+        bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 &&
+            data.Environment == _previous.Environment && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
+            data.Control.X == _previous.Control.X && data.Control.Y == _previous.Control.Y && data.Lighting.X == _previous.Lighting.X &&
+            data.CausticSettings == _previous.CausticSettings && data.Forward.W == _previous.Forward.W &&
+            Vector3.Dot(camera.Forward, new(_previous.Forward.X, _previous.Forward.Y, _previous.Forward.Z)) > .9f &&
+            Vector3.Distance(camera.Origin, new(_previous.Origin.X, _previous.Origin.Y, _previous.Origin.Z)) < data.Limits.Y * .1f;
+        data.Lighting.Y = compatible ? 1 : 0;
         void* pointer; _constants.Map(0, null, &pointer).CheckError(); *(Constants*)pointer = data; _constants.Unmap(0);
         Begin(); var cmd = _gpu.CommandList;
         cmd.SetDescriptorHeaps(2, scene.DescriptorHeaps); cmd.SetComputeRootSignature(_root);
@@ -252,15 +314,37 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.SetComputeRootShaderResourceView(7, scene.Emitters.GPUVirtualAddress);
         cmd.SetComputeRootDescriptorTable(8, scene.Heap.GetGPUDescriptorHandleForHeapStart()); cmd.SetComputeRootDescriptorTable(9, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
         cmd.SetPipelineState1(_pipeline);
+        cmd.SetComputeRootUnorderedAccessView(10, _reservoirs[1 - _reservoirWrite]!.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(11, _reservoirs[_reservoirWrite]!.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(12, _photons.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(13, _photonGrid.GPUVirtualAddress);
+        // Static geometry/light photon map is camera-independent. Do not replace it with another
+        // sparse random map every frame or on a denoiser/camera-history reset.
+        bool rebuildPhotons = data.CausticSettings.X > 0 && (!_photonsValid ||
+            data.SunDirection != _photonFrame.SunDirection || data.SunRadiance != _photonFrame.SunRadiance ||
+            data.CausticSettings != _photonFrame.CausticSettings || data.Limits.X != _photonFrame.Limits.X ||
+            data.Right.W != _photonFrame.Right.W);
+        if (rebuildPhotons)
+        {
+            cmd.DispatchRays(new(new(_lightingTable.GPUVirtualAddress, 64), default, default, default, PhotonGridSize, 1, 1));
+            cmd.ResourceBarrierUnorderedAccessView(_photonGrid);
+            cmd.DispatchRays(new(new(_lightingTable.GPUVirtualAddress + 64, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
+                new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, PhotonCount, 1, 1));
+            cmd.ResourceBarrierUnorderedAccessView(_photons); cmd.ResourceBarrierUnorderedAccessView(_photonGrid);
+        }
         cmd.DispatchRays(new(new(_table.Buffer.GPUVirtualAddress, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
             new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)raw.Width, (uint)raw.Height, 1));
         foreach (var output in _outputs) cmd.ResourceBarrierUnorderedAccessView(output!);
+        cmd.ResourceBarrierUnorderedAccessView(_reservoirs[_reservoirWrite]!);
         End();
+        if (rebuildPhotons) { _photonFrame = data; _photonsValid = true; PhotonBuildCount++; }
+        _previous = data; _previousFrame = frame; _historyValid = true; _reservoirWrite = 1 - _reservoirWrite;
     }
     public void Dispose()
     {
         if (_initialized) _gpu.SignalAndWait();
         foreach (var output in _outputs) output?.Dispose(); _scene?.Dispose(); _table.Dispose();
+        foreach (var reservoir in _reservoirs) reservoir?.Dispose();
         for (int i = _owned.Count - 1; i >= 0; i--) _owned[i].Dispose(); _gpu.Dispose();
     }
 }
