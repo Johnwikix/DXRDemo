@@ -12,9 +12,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-	<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
   </PropertyGroup>
-
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
@@ -67,4 +66,14 @@
     <PackageReference Include="WinUIEx" Version="2.9.2" />
   </ItemGroup>
   <Import Project="SuperResolution\ReconstructionAssets.targets" />
+
+  <!-- MrtCore 只把应用 PRI/XBF 写入构建输出（PrepareForRun），其 Publish 钩子仅对 MSIX（AppxPackage=true）生效。
+       dotnet publish 解包发布时这些文件不会进入 publish 目录，导致 XAML 启动时 stowed exception (0xc000027b)。 -->
+  <Target Name="CopyAppPriAndXbfToPublish" AfterTargets="Publish" Condition="'$(AppxPackage)' != 'true'">
+    <ItemGroup>
+      <_AppPriAndXbf Include="$(OutDir)$(AssemblyName).pri" />
+      <_AppPriAndXbf Include="$(OutDir)*.xbf" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_AppPriAndXbf)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>
