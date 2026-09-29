@@ -69,6 +69,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource Depth => _depth;
     internal ID3D12Resource Motion => _motion;
     internal ID3D12Resource LinearOutput => _output;
+    /// <summary>Gets the most recently written linear denoiser history for offscreen regression checks.</summary>
+    internal ID3D12Resource DenoiserHistory => _history[(int)((_frame - 1) % 2)];
 
     private T Keep<T>(T value) where T : IDisposable { _pipelineResources.Add(value); return value; }
     private T Sized<T>(T value) where T : IDisposable { _sizeResources.Add(value); return value; }

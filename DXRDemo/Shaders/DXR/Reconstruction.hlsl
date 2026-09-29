@@ -36,6 +36,31 @@ float2 Project(float3 direction, float3 forward, float3 right, float3 up)
     return float2((ndc.x + 1) * 0.5, (1 - ndc.y) * 0.5) * Size.xy;
 }
 
+bool ReprojectHistory(float2 previousPixel, float previousZ, bool sky, out float3 color)
+{
+    // Convert the previous jittered raster position to texel-center coordinates.
+    // Rounding each frame's jitter delta to one texel introduces a directional drift.
+    float2 position = previousPixel - Jitter.zw - 0.5;
+    int2 base = int2(floor(position));
+    float2 fraction = frac(position);
+    float3 sum = 0;
+    float weights = 0;
+    [unroll] for (int y = 0; y < 2; y++) [unroll] for (int x = 0; x < 2; x++)
+    {
+        int2 q = base + int2(x, y);
+        if (any(q < 0) || any(q >= int2(Size.xy))) continue;
+        float4 tap = History[q];
+        bool valid = sky ? tap.w < 0 : tap.w > 0 && abs(tap.w - previousZ) < max(0.01, previousZ * 0.02);
+        if (!valid) continue;
+        // Reject disoccluded taps individually, then renormalize the remaining footprint.
+        float weight = (x == 0 ? 1 - fraction.x : fraction.x) * (y == 0 ? 1 - fraction.y : fraction.y);
+        sum += tap.rgb * weight;
+        weights += weight;
+    }
+    color = sum / max(weights, 0.00001);
+    return weights > 0.00001;
+}
+
 [numthreads(8, 8, 1)]
 void Prepare(uint3 tid : SV_DispatchThreadID)
 {
@@ -68,13 +93,11 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         mean += l; square += l*l; count++;
     }
     float variance = max(square / count - (mean / count) * (mean / count), 0.0001);
-    // Previous raster samples were taken at center + previous jitter, so undo it here.
-    int2 oldPixel = int2(floor(previousPixel - Jitter.zw));
-    if (Control.y != 0 && Control.x == 0 && previousZ > 0 && all(oldPixel >= 0) && all(oldPixel < int2(Size.xy)))
+    if (Control.y != 0 && Control.x == 0 && previousZ > 0)
     {
-        float4 old = History[oldPixel];
-        bool valid = sky ? old.w < 0 : old.w > 0 && abs(old.w - previousZ) < max(0.01, previousZ * 0.02);
-        if (valid) value = lerp(clamp(old.rgb, lo, hi), value, 1.0 / min(Control.z + 1, 32));
+        float3 old;
+        if (ReprojectHistory(previousPixel, previousZ, sky, old))
+            value = lerp(clamp(old, lo, hi), value, 1.0 / min(Control.z + 1, 32));
     }
     NextHistory[p] = float4(value, sky ? -1 : currentZ);
     Color[p] = float4(min(value, 65000), variance);

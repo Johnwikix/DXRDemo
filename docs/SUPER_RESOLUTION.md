@@ -35,7 +35,12 @@ generation is included. The optional vendor SDK bridge currently targets x64.
 
 Ray-sampling offsets are the inverse of projection offsets supplied to the SDK.
 The preparation shader removes jitter from motion and compensates previous
-jitter when looking up denoiser history. Camera dragging/zooming uses motion
+jitter when looking up denoiser history. History uses texel-center bilinear
+sampling with per-tap depth rejection and weight renormalization. Rounding
+`currentJitter - previousJitter` to a single history texel each frame can
+accumulate a directional error even when the camera and motion vectors are
+stationary; the subpixel position must survive the history lookup.
+Camera dragging/zooming uses motion
 reprojection. Explicit camera reset, model/settings discontinuities, size/mode
 changes and long frame gaps reset history. HDR encoding happens after SR and
 does not contaminate its linear history.
@@ -72,6 +77,13 @@ performed for this feature.
   verifies motion direction/magnitude, confirms changing jitter produces no
   static-camera motion, and confirms explicit reset discards old motion.
 - FP16 linear output is finite; the D3D12 debug layer reports no Error/Corruption.
+- A 96-frame stationary analytic-plane regression reads back the denoiser history
+  before vendor SR. The old nearest-texel lookup failed with 0.968769 input-pixel
+  error; bilinear reprojection reduces the maximum to 0.000477 pixels on both
+  FSR and XeSS. This catches history drift that the zero-motion-vector check
+  alone cannot detect. Separate cases cover depth edges, disocclusions and
+  image borders. These are numeric checks, not a claim that stochastic path
+  tracing noise disappears or a substitute for visual motion-quality testing.
 - The existing 18 hardware/software parity cases, resize and GPU HUD still pass
   with SR disabled. Maximum normalized RGBA RMSE is approximately 0.001193.
 - FSR/XeSS SDR snapshots were inspected. Motion quality, sustained performance,
