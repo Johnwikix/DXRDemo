@@ -11,7 +11,8 @@
 组合，并在 Intel Arc 140T 上验证；旧版风格滤波保留作对照，详见 [NRD 说明](docs/NRD.md)。
 默认仍关闭 SR。x64 构建还需要 PowerShell 7 与 Visual Studio C++ v145 工具集；
 厂商 SDK 已固定版本并附带许可证，构建时会校验和编译原生桥接。
-管线、Intel 离屏验证及 DLSS 光线重建可行性见 [超分说明](docs/SUPER_RESOLUTION.md)。
+已接入 **DLSSD 光线重建**（独立 SDK 调用，旁路 NRD/SR，按要求未运行验证），并加入实体玻璃折射、全反射与吸收。便利店已通过 Blender MCP 细化至 **2,019,650 个三角形**。
+管线、Intel 离屏验证及 DLSSD 接入说明见 [超分说明](docs/SUPER_RESOLUTION.md)。
 下文球体管线描述保留为最初版本的技术记录，当前默认场景为雨后便利店。
 
 DXR Demo 是一个基于 WinUI 3 的实时 DirectX 12 光线追踪（DXR）演示程序。它使用 [Vortice](https://github.com/amerkoleci/Vortice.Windows)（C# 的 DirectX 绑定，非 SharpDX）从零实现了完整的 DXR 渲染管线，渲染一个 Monte Carlo 路径追踪场景（5 个球体：绿色 Lambertian、银色金属、带内气泡的玻璃球、巨型地面）。

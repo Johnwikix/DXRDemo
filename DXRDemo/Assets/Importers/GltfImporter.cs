@@ -11,7 +11,8 @@ namespace DXRDemo.Assets.Importers;
 public static class GltfImporter
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.Ordinal)
-    { "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_mesh_quantization" };
+    { "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_unlit", "KHR_materials_emissive_strength", "KHR_mesh_quantization",
+      "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_volume" };
 
     /// <summary>Loads and decodes a document on a worker thread, with cancellation between resources.</summary>
     public static Task<SceneDocument> LoadAsync(string path, CancellationToken cancellation = default)
@@ -85,6 +86,17 @@ public static class GltfImporter
             value.NormalMap = await Binding(normal, false);
             value.OcclusionMap = await Binding(occlusion, false);
             value.EmissiveMap = await Binding(emission, true);
+            var transmission = m.FindChannel("Transmission");
+            var thickness = m.FindChannel("VolumeThickness");
+            var attenuation = m.FindChannel("VolumeAttenuation");
+            value.Transmission = new(Factor(transmission, "TransmissionFactor", 0), m.IndexOfRefraction,
+                Factor(thickness, "ThicknessFactor", 0), 0);
+            Vector4 attenuationColor = attenuation?.Color ?? Vector4.One;
+            float attenuationDistance = Factor(attenuation, "AttenuationDistance", float.PositiveInfinity);
+            value.Attenuation = new(attenuationColor.X, attenuationColor.Y, attenuationColor.Z,
+                float.IsFinite(attenuationDistance) && attenuationDistance > 0 ? attenuationDistance : 0);
+            value.TransmissionMap = await Binding(transmission, false);
+            value.ThicknessMap = await Binding(thickness, false);
             materials[i] = value;
         }
 

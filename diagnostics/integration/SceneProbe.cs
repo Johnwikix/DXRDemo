@@ -18,6 +18,78 @@ using Vortice.Direct3D12.Debug;
 
 internal static class SceneProbe
 {
+    internal static async Task Glass(string path)
+    {
+        using var debugLayer=D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debugLayer.EnableDebugLayer();
+        var document=await GltfImporter.LoadAsync(Path.GetFullPath(path)); var asset=document.Scenes[document.DefaultScene];
+        Require(Marshal.SizeOf<SceneMaterial>()==432,"Material GPU ABI changed");
+        Require(asset.Materials.Any(m=>m.Transmission.X>0 && m.Transmission.Z>0),"Demo has no refractive volume");
+        using var device=GraphicsDevice.GetDefault(); using var native=NativeDevice(device);
+        using var debug=native.QueryInterface<ID3D12InfoQueue>();
+        using var backend=new DxrSceneBackend();backend.Initialize(device);backend.SetScene(asset);
+        const int width=320,height=240;
+        using var raw=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var normals=device.AllocateReadWriteTexture2D<Rgba32,Float4>(width,height);
+        using var surface=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var guide=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var signals=new PbrSignals(device,width,height);
+        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
+        var camera=new CameraController();camera.FrameBounds(asset.Minimum,asset.Maximum,width/(float)height);camera.Rotate(.50f,.23f);camera.Zoom(3);
+        var view=camera.Advance(0,out _,out _);
+        void Trace(int frame,int spp)=>backend.Trace(view,frame,spp,10,default,0,raw,normals,surface,guide,signals.Diffuse,signals.Specular,signals.Albedo,signals.Unfiltered,signals.SpecularGuide);
+        Trace(0,2); var first=surface.ToArray();Trace(1,2);var second=surface.ToArray();
+        Require(first.Cast<Float4>().SequenceEqual(second.Cast<Float4>()),"Refractive primary geometry flickers between frames");
+        var n=normals.ToArray();var mask=new bool[width*height];int pixels=0;
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++)
+        {
+            int material=n[y,x].A;
+            if(first[y,x].W>0 && material<asset.Materials.Length && asset.Materials[material].Transmission.X>0){mask[y*width+x]=true;pixels++;}
+        }
+        Require(pixels>100,"No visible glass pixels");
+        double[] reference=new double[width*height*3];
+        for(int frame=0;frame<32;frame++)
+        {
+            Trace(1000+frame,16);var values=raw.ToArray();
+            for(int y=0;y<height;y++)for(int x=0;x<width;x++){int p=(y*width+x)*3;var v=values[y,x];reference[p]+=v.X/32;reference[p+1]+=v.Y/32;reference[p+2]+=v.Z/32;}
+        }
+        using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
+        for(int frame=0;frame<48;frame++)
+        {
+            Trace(frame,2);Require(sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
+                HdrRenderParameters.Default,1.0/60,guide,view,signals,-2),"Glass NRD execution failed");
+        }
+        Require(sr.Status.NrdActive,"Glass validation ran a fallback");
+        var denoised=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);var noisy=raw.ToArray();
+        double rawError=0,filteredError=0;double Compress(double value)=>Math.Max(value,0)/(1+Math.Max(value,0));
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++)if(mask[y*width+x])
+        {
+            int p=y*width+x;Float4 v=noisy[y,x];
+            for(int c=0;c<3;c++){double expected=Compress(reference[p*3+c]);double actual=Compress(c==0?v.X:c==1?v.Y:v.Z);
+                rawError+=Math.Pow(actual-expected,2);filteredError+=Math.Pow(Compress(denoised[p*4+c])-expected,2);}
+        }
+        rawError=Math.Sqrt(rawError/(pixels*3));filteredError=Math.Sqrt(filteredError/(pixels*3));
+        Directory.CreateDirectory("output/scenes");Save(target,"output/scenes/glass-nrd.png");
+        Console.WriteLine($"Glass: {pixels} pixels, 512-SPP reference, 2-SPP raw RMSE={rawError:F6}, NRD RMSE={filteredError:F6}");
+        Require(filteredError<rawError*.9,"Glass denoising does not reduce noise");
+        sr.Configure(ReconstructionMode.Off,100,width,height,false,true);
+        sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.None,
+            HdrRenderParameters.Default,1.0/60,guide,view,signals,-2);
+        Save(target,"output/scenes/glass-raw-2spp.png");
+        var mean=new Float4[height,width];
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++){int p=(y*width+x)*3;mean[y,x]=new((float)reference[p],(float)reference[p+1],(float)reference[p+2],1);}
+        raw.CopyFrom(mean);
+        sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.None,
+            HdrRenderParameters.Default,1.0/60,guide,view,signals,-2);
+        Save(target,"output/scenes/glass-reference-512spp.png");
+        var noRefraction=(SceneMaterial[])asset.Materials.Clone();
+        for(int i=0;i<noRefraction.Length;i++)if(noRefraction[i].Transmission.X>0)noRefraction[i].Transmission.Y=1;
+        backend.SetScene(asset with { Materials=noRefraction });Trace(1047,16);var straight=raw.ToArray();
+        backend.SetScene(asset);Trace(1047,16);var refracted=raw.ToArray();
+        double iorDifference=0;for(int y=0;y<height;y++)for(int x=0;x<width;x++)if(mask[y*width+x])iorDifference+=Math.Abs(straight[y,x].X-refracted[y,x].X);
+        Require(iorDifference/pixels>.001,"IOR has no effect on transmission");
+        VerifyDebug(debug);
+        Console.WriteLine($"PASS: stable glass guides, transmission/volume import, NRD noise reduction, IOR refraction (mean difference {iorDifference/pixels:F6}). DLSSD NOT executed.");
+    }
     internal static async Task Preview(string path)
     {
         Environment.SetEnvironmentVariable("DXR_DXC_PATH",Path.GetFullPath("../../DXRDemo/bin/renderer-verified/dxc.exe"));
@@ -28,7 +100,7 @@ internal static class SceneProbe
         while(!load.IsCompleted){pass.TryExecute(target,800,600,TimeSpan.Zero,HdrRenderParameters.Default);await Task.Delay(1);}
         var document=await load;var asset=document.Scenes[document.DefaultScene];
         Console.WriteLine($"Preview: {asset.Instances.Length} instances, {asset.TriangleCount} triangles, {asset.Materials.Length} materials, {asset.Lights.Length} embedded lights.");
-        pass.ExternalLightingEnabled=false;pass.MaxBounces=4;pass.Samples=8;pass.Exposure=-2;
+        pass.ExternalLightingEnabled=false;pass.MaxBounces=10;pass.Samples=2;pass.Exposure=-2;
         pass.Camera.Rotate(.50f,.23f);pass.Camera.Zoom(3);
         for(int i=0;i<48;i++){pass.TryExecute(target,800,600,TimeSpan.Zero,HdrRenderParameters.Default);if(i%8==7)Console.WriteLine($"Preview frame {i+1}/48");}
         Require(pass.ReconstructionStatus?.NrdActive==true,"Preview NRD not active");
@@ -53,8 +125,8 @@ internal static class SceneProbe
         Require(asset.Lights.Length == 1 && asset.Lights[0].PositionType.W == 1 && asset.Lights[0].ColorIntensity.W == 40, "Punctual light contract");
         Require(asset.Materials[0].Factors.X == 0 && Math.Abs(asset.Materials[0].Factors.Y - .35f) < .001, "PBR material factors");
         Require(asset.Minimum.X < -2 && asset.Maximum.X > 2, "World-space bounds");
-        var invalid = JsonNode.Parse(File.ReadAllText(fixture))!; invalid["extensionsRequired"] = new JsonArray("KHR_materials_transmission");
-        invalid["extensionsUsed"] = new JsonArray("KHR_lights_punctual", "KHR_materials_transmission");
+        var invalid = JsonNode.Parse(File.ReadAllText(fixture))!; invalid["extensionsRequired"] = new JsonArray("KHR_materials_anisotropy");
+        invalid["extensionsUsed"] = new JsonArray("KHR_lights_punctual", "KHR_materials_anisotropy");
         File.WriteAllText("output/scenes/required.gltf", invalid.ToJsonString());
         bool rejected = false;
         try { await GltfImporter.LoadAsync(Path.GetFullPath("output/scenes/required.gltf")); } catch { rejected = true; }
@@ -81,7 +153,7 @@ internal static class SceneProbe
         using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
         var camera = new CameraController(); camera.FrameBounds(asset.Minimum, asset.Maximum, width / (float)height);
         var view = camera.Advance(0, out _, out _);
-        void Trace(int frame, float env = 0, SunLightSettings sun = default, int bounces = 3) => backend.Trace(view, frame, 4, bounces, default, env, raw, normals, surface, guide, signals.Diffuse, signals.Specular, signals.Albedo, signals.Unfiltered, sun);
+        void Trace(int frame, float env = 0, SunLightSettings sun = default, int bounces = 3) => backend.Trace(view, frame, 4, bounces, default, env, raw, normals, surface, guide, signals.Diffuse, signals.Specular, signals.Albedo, signals.Unfiltered, signals.SpecularGuide, sun);
         Trace(0);
         VerifyDebug(debugQueue);
         float energy = Energy(raw.ToArray());

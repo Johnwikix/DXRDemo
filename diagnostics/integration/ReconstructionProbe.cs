@@ -368,7 +368,7 @@ internal static unsafe class ReconstructionProbe
         Console.WriteLine("PASS NRD guide semantics, energy/noise, camera motion/zoom, direct-light-only tracing and reset");
     }
 
-    private static float[] ReadTexture(ID3D12Device5 device, ID3D12Resource source, bool half2,
+    internal static float[] ReadTexture(ID3D12Device5 device, ID3D12Resource source, bool half2,
         ResourceStates sourceState = ResourceStates.NonPixelShaderResource)
     {
         var desc = source.Description;

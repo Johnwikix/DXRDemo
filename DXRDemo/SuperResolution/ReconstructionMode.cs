@@ -10,7 +10,9 @@ public enum ReconstructionMode
     /// <summary>Uses AMD FidelityFX Super Resolution 3.1.</summary>
     Fsr = 4,
     /// <summary>Uses NVIDIA DLSS Super Resolution with preset K.</summary>
-    Dlss = 5
+    Dlss = 5,
+    /// <summary>Uses NVIDIA DLSS Ray Reconstruction (DLSSD) on noisy PBR radiance.</summary>
+    DlssRayReconstruction = 6
 }
 
 /// <summary>Publishes immutable render-thread capability and fallback information to the UI.</summary>

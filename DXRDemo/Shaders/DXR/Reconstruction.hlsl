@@ -29,6 +29,8 @@ Texture2D<float4> PbrSpecular : register(t7);
 Texture2D<float4> PbrAlbedo : register(t8);
 Texture2D<float4> PbrUnfiltered : register(t9); // Primary analytic direct lighting + emission; preserve hard shadows.
 Texture2D<float4> SpecularReconstructed : register(t10);
+Texture2D<float4> PbrSpecularGuide : register(t11); // integrated reflectance RGB, mirror ray world hit distance A
+Texture2D<float4> FloatNormalRoughness : register(t12);
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float> Depth : register(u1);
 RWTexture2D<float2> Motion : register(u2);
@@ -36,6 +38,16 @@ RWTexture2D<float> Reactive : register(u3);
 RWTexture2D<float4> NextHistory : register(u4);
 RWTexture2D<float4> Encoded : register(u5);
 RWTexture2D<float4> PackedSpecular : register(u6);
+RWTexture2D<float> SpecularHitDistance : register(u7);
+
+[numthreads(8, 8, 1)]
+void PrepareRr(uint3 tid : SV_DispatchThreadID)
+{
+    if (any(tid.xy >= uint2(Size.xy))) return;
+    float4 guide = FloatNormalRoughness[tid.xy];
+    PackedSpecular[tid.xy] = float4(normalize(guide.xyz), saturate(guide.w));
+    SpecularHitDistance[tid.xy] = max(PbrSpecularGuide[tid.xy].a, 0);
+}
 
 float2 Project(float3 direction, float3 forward, float3 right, float3 up)
 {

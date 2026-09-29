@@ -21,7 +21,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
 {
     /// <summary>Gets the fixed catalog index of the packaged rainy convenience-store demo.</summary>
     public static int RainyCornerSceneIndex => MeshData.Choices.Length;
-    private static readonly MeshChoice RainyCornerChoice = new("雨后便利店 · Rainy Corner", "RainyCorner.glb", 259670);
+    private static readonly MeshChoice RainyCornerChoice = new("雨后便利店 · Rainy Corner", "RainyCorner.glb", 2019650);
     private static readonly MeshChoice[] DxrDemoChoices = [.. MeshData.Choices, RainyCornerChoice];
     private sealed record Settings(int Scene = 0, RayTraceDenoiserMode Denoiser = RayTraceDenoiserMode.NrdRelax,
         int Bounces = 10, int Samples = 2, Float2 Orbit = default, float Distance = 2.7f, Float2 Mouse = default, int Revision = 0,
@@ -199,7 +199,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         get => Snapshot.Reconstruction;
         set
         {
-            if (value is not (ReconstructionMode.Off or ReconstructionMode.Fsr or ReconstructionMode.XeSS or ReconstructionMode.Dlss))
+            if (value is not (ReconstructionMode.Off or ReconstructionMode.Fsr or ReconstructionMode.XeSS or ReconstructionMode.Dlss or ReconstructionMode.DlssRayReconstruction))
                 throw new ArgumentOutOfRangeException(nameof(value));
             Change(s => s with { Reconstruction = value });
         }
@@ -221,7 +221,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             string reconstruction = sr == null ? "SR INITIALIZING" : sr.Active == ReconstructionMode.Off
                 ? (sr.Requested == ReconstructionMode.Off ? "SR OFF / NATIVE" : $"{sr.Requested} UNAVAILABLE / NATIVE")
                 : $"SR {sr.Active}  {sr.InputWidth}x{sr.InputHeight} -> {sr.OutputWidth}x{sr.OutputHeight}";
-            string denoiser = s.Denoiser == RayTraceDenoiserMode.NrdRelax
+            string denoiser = sr?.Active == ReconstructionMode.DlssRayReconstruction ? "DLSS RAY RECONSTRUCTION" : s.Denoiser == RayTraceDenoiserMode.NrdRelax
                 ? (sr?.NrdActive == true ? "NRD RELAX" : "LEGACY RELAX (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
             return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}\n{reconstruction}";
         }
@@ -293,7 +293,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             {
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
-                    _pbrSignals!.Diffuse, _pbrSignals.Specular, _pbrSignals.Albedo, _pbrSignals.Unfiltered, sun);
+                    _pbrSignals!.Diffuse, _pbrSignals.Specular, _pbrSignals.Albedo, _pbrSignals.Unfiltered, _pbrSignals.SpecularGuide,
+                    sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction);
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
             bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight);

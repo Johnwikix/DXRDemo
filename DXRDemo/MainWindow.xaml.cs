@@ -229,7 +229,7 @@ public sealed partial class MainWindow : WindowEx
             SamplesBox.Value = pass.Samples;
             _settings.ReconstructionSelector.SelectedIndex = pass.ReconstructionMode switch
             {
-                ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, _ => 0
+                ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, ReconstructionMode.DlssRayReconstruction => 4, _ => 0
             };
             _settings.RenderScaleSlider.Value = pass.RenderScalePercent;
             _settings.CameraSpeedBox.Value = pass.Camera.Speed;
@@ -252,7 +252,7 @@ public sealed partial class MainWindow : WindowEx
         if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
         pass.ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex switch
         {
-            1 => ReconstructionMode.Fsr, 2 => ReconstructionMode.XeSS, 3 => ReconstructionMode.Dlss, _ => ReconstructionMode.Off
+            1 => ReconstructionMode.Fsr, 2 => ReconstructionMode.XeSS, 3 => ReconstructionMode.Dlss, 4 => ReconstructionMode.DlssRayReconstruction, _ => ReconstructionMode.Off
         };
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = "正在应用超分设置；首次启用需要初始化 SDK。";
@@ -285,6 +285,8 @@ public sealed partial class MainWindow : WindowEx
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[1]).IsEnabled = status.Supports(ReconstructionMode.Fsr);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[2]).IsEnabled = status.Supports(ReconstructionMode.XeSS);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[3]).IsEnabled = status.Supports(ReconstructionMode.Dlss);
+        ((ComboBoxItem)_settings.ReconstructionSelector.Items[4]).IsEnabled = status.Supports(ReconstructionMode.DlssRayReconstruction);
+        DenoiserSelector.IsEnabled = status.Active != ReconstructionMode.DlssRayReconstruction;
         ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.NrdAvailable;
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;

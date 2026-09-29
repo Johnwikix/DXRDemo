@@ -10,6 +10,7 @@ Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDe
 Directory.CreateDirectory("output");
 if (args.Contains("--scene")) { await SceneProbe.Run(args.SkipWhile(a => a != "--scene").Skip(1).FirstOrDefault()); return; }
 if (args.Contains("--scene-preview")) { await SceneProbe.Preview(args.SkipWhile(a => a != "--scene-preview").Skip(1).First()); return; }
+if (args.Contains("--glass")) { await SceneProbe.Glass(args.SkipWhile(a => a != "--glass").Skip(1).First()); return; }
 if (args.Contains("--sr")) { ReconstructionProbe.Run(); return; }
 if (args.Contains("--nrd-missing")) { ReconstructionProbe.Run(true); return; }
 using var device = GraphicsDevice.GetDefault();

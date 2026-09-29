@@ -1,16 +1,19 @@
 # DXRDemo reconstruction SDKs
 
 These pinned SDK files and the C++ adapter were ported from the local Spectrum
-project. Spectrum itself is unchanged. These SDKs provide super resolution; there
-is no frame generation or DLSS Ray Reconstruction implementation in this adapter.
+project. Spectrum itself is unchanged. These SDKs provide super resolution and
+DLSS Ray Reconstruction (DLSSD); no frame generation is implemented.
 The bridge also supports the separately pinned [NRD denoiser SDK](../NRD/README.md).
 
 - XeSS: `intel/xess`, commit `de0fb9c1c510661c571164e1418ceca8101dab69`.
 - FSR: `GPUOpen-LibrariesAndSDKs/FidelityFX-SDK`, commit `60f4ea81909200d8542eca14dccb2628b763a9a3`.
   The adapter selects a 3.1 provider, never FSR 4 or frame generation.
 - DLSS: `NVIDIA/DLSS`, commit `374959484e79a640feaba44c93ac8cfb0a03f5b5`.
-  The bridge links the static x64 NGX library and uses the release `nvngx_dlss.dll`.
-  All quality slots explicitly request preset K. Driver overrides can still change model selection.
+  The bridge links the static x64 NGX library and packages release `nvngx_dlss.dll`
+  and `nvngx_dlssd.dll`, with the RR headers pinned to the same commit.
+  SR quality slots request preset K; RR requests its own default preset.
+  Driver overrides can still change model selection. RR execution is intentionally
+  unverified at the user's request; see `docs/SUPER_RESOLUTION.md`.
 
 Verify and build from the repository root:
 
@@ -30,7 +33,7 @@ x64 build/publish/MSIX content. Non-x64 builds omit these optional components.
 `SkipReconstructionNativeBuild=true` reuses an existing bridge;
 `EnableVendorReconstruction=false` builds without bundled SR components. Use a
 fresh output directory when disabling them, since stale DLLs remain discoverable.
-The vendor binaries occupy about 160 MiB.
+The vendor binaries occupy about 206 MiB including the RR runtime.
 
 Run the application/probe **EXE**, not `dotnet application.dll`: the FidelityFX
 loader discovers providers relative to the native process executable. A

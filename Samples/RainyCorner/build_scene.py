@@ -115,7 +115,9 @@ def setup():
         'leaf':((.08,.20,.075),.8,0),'paper':((.82,.75,.58),.8,0)
     }
     for name,(color,rough,metal) in palette.items():material(name,color,rough,metal)
-    material('glass',(.45,.72,.76),.08,.08,alpha=.12)
+    glass=material('glass',(.97,.99,1),.06,0)
+    bsdf=next(n for n in glass.node_tree.nodes if n.type=='BSDF_PRINCIPLED')
+    bsdf.inputs['Transmission Weight'].default_value=1;bsdf.inputs['IOR'].default_value=1.5
     material('warm_light',(1,.74,.42),.25,emission=5)
     material('cream_light',(1,.93,.77),.3,emission=3)
     material('cyan_light',(.12,.76,1),.22,emission=4)
@@ -319,8 +321,10 @@ def street():
 def finish():
     ROOT.mkdir(parents=True,exist_ok=True)
     scene['author']='Original procedural scene authored for DXRDemo through Blender MCP'
-    scene['purpose']='PBR, multiple embedded lights, emissive geometry, BLEND glazing, glossy wet-ground validation'
-    scene['glass']='Alpha coverage glass for this renderer; no unsupported transmission extension'
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('rainy_details',ROOT/'refine_scene.py')
+    details=importlib.util.module_from_spec(spec);spec.loader.exec_module(details)
+    details.configure_glass()
     scene.render.filepath=str(ROOT/'RainyCorner-preview.png')
     # Use local Japanese font outlines. Geometry, rather than fonts, is exported in GLB.
     font_path=Path('C:/Windows/Fonts/YuGothM.ttc')
@@ -342,6 +346,7 @@ def finish():
     bpy.ops.wm.save_as_mainfile(filepath=str(ROOT/'RainyCorner.blend'))
     bpy.ops.export_scene.gltf(filepath=str(ROOT/'RainyCorner.glb'),export_format='GLB',use_active_scene=True,
         export_lights=True,export_import_convert_lighting_mode='RAW',export_apply=True,export_animations=False)
+    details.preserve_glass_volume(ROOT/'RainyCorner.glb')
     print('Saved Blender source:',ROOT/'RainyCorner.blend')
 
 if __name__=='__main__':

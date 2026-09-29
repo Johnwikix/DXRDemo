@@ -168,7 +168,13 @@ struct NrdContext {
         Check(api.create(creation, instance), "Create NRD RELAX_DIFFUSE");
         nrd::RelaxSettings settings{};
         settings.enableAntiFirefly = true;
-        if (pbr) settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        if (pbr) {
+            settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+            // Glass shares a flat primary normal across unrelated objects behind the pane.
+            // A 50-pixel default specular prepass erases their detail before temporal accumulation.
+            settings.specularPrepassBlurRadius = 2.0f;
+            settings.specularPhiLuminance = 0.5f;
+        }
         Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
         const auto& desc = *api.description(*instance);
         Pool(permanent, desc.permanentPool, desc.permanentPoolSize);

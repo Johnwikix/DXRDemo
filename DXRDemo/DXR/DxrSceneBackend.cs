@@ -13,7 +13,7 @@ namespace DXRDemo.DXR;
 /// <summary>Traces indexed, instanced PBR scenes with explicitly maintained DXR shaders.</summary>
 internal sealed unsafe class DxrSceneBackend : IDisposable
 {
-    private const int MaxTextures = 1024, OutputCount = 8;
+    private const int MaxTextures = 1024, OutputCount = 9;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _owned = [];
     private readonly DxrShaderTable _table = new();
@@ -224,7 +224,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     internal void Trace(in CameraFrame camera, int frame, int samples, int bounces, Float2 jitter, float environment,
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
         ReadWriteTexture2D<Float4> guide, ReadWriteTexture2D<Float4> diffuse, ReadWriteTexture2D<Float4> specular,
-        ReadWriteTexture2D<Float4> albedo, ReadWriteTexture2D<Float4> unfiltered, SunLightSettings sun = default)
+        ReadWriteTexture2D<Float4> albedo, ReadWriteTexture2D<Float4> unfiltered, ReadWriteTexture2D<Float4> specularGuide,
+        SunLightSettings sun = default, bool rayReconstruction = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
         if (!ReferenceEquals(raw, _boundOutput))
@@ -232,13 +233,14 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             foreach (var old in _outputs) old?.Dispose();
             _outputs[0] = Resource(raw); _outputs[1] = Resource(normal); _outputs[2] = Resource(surface); _outputs[3] = Resource(guide);
             _outputs[4] = Resource(diffuse); _outputs[5] = Resource(specular); _outputs[6] = Resource(albedo); _outputs[7] = Resource(unfiltered);
+            _outputs[8] = Resource(specularGuide);
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
         Constants data = new() { Origin = new(camera.Origin, camera.Near), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
             Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterArea, 0),
-            Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), 0, 0),
+            Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, 0),
             SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0) };
         void* pointer; _constants.Map(0, null, &pointer).CheckError(); *(Constants*)pointer = data; _constants.Unmap(0);
         Begin(); var cmd = _gpu.CommandList;

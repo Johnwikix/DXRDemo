@@ -23,19 +23,19 @@
 | 网格 | TRIANGLES、TRIANGLE_STRIP、TRIANGLE_FAN；索引、法线、切线、顶点颜色、TEXCOORD_0/1；accessor 解码由 SharpGLTF 提供 |
 | 材质 | Metallic-Roughness；基础色、金属度/粗糙度、法线、遮蔽、自发光贴图及因子；双面材质 |
 | 图片 | PNG/JPEG，按用途区分 sRGB/线性；生成 mip 链，显式 ray-cone LOD；读取 wrap/filter |
-| 透明度 | OPAQUE、MASK、BLEND；MASK 参与阴影；BLEND 使用随机覆盖率并提供 SR reactive mask |
+| 透明度/玻璃 | OPAQUE、MASK、BLEND；覆盖率透明与实体透射分开；`KHR_materials_transmission`、`KHR_materials_ior`、`KHR_materials_volume`，含透射/厚度贴图 |
 | 灯光 | `KHR_lights_punctual`：方向光、点光源、聚光灯；颜色、强度、范围、锥角和节点变换 |
 | 常用扩展 | `KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization` |
 | 光照 | GGX 镜面反射、漫反射、直接光、环境照明、自发光三角形采样、MIS、路径继续与 Russian roulette |
-| 降噪/显示 | NRD RELAX_DIFFUSE_SPECULAR、可用的 FSR/XeSS/DLSS SR、线性空间滤波、曝光、SDR/HDR 编码 |
+| 降噪/显示 | NRD RELAX_DIFFUSE_SPECULAR、FSR/XeSS/DLSS SR、DLSSD 光线重建接入（运行验证留给用户）、线性滤波、曝光、SDR/HDR 编码 |
 
 这是静态场景渲染器，不宣称完整支持所有 glTF 扩展。蒙皮和 Morph Target 暂时明确拒绝，节点动画显示静态姿态并提示；点/线图元、UV 集 2 以上暂不支持。
 
 Draco、Meshopt、KTX2/BasisU、WebP 解码尚未接入。有标准回退数据的可选扩展使用回退并提示；不支持的 `extensionsRequired` 会拒绝加载。图片没有 PNG/JPEG 回退时明确报告错误。当前每个 GPU 场景最多 1024 个纹理视图；同一图像用于 sRGB 和线性数据时会占用不同视图/纹理。
 
-BLEND 表示覆盖率透明，不等于 transmission/volume 的玻璃折射。Clearcoat、sheen、transmission/volume、各向异性等扩展，以及 OBJ/FBX 导入器，仍是后续工作。环境照明目前为可调强度的程序化天空，尚未提供 HDRI 文件导入。
+BLEND 表示覆盖率透明；玻璃使用独立的 transmission/IOR/volume 路径。透射包含 Snell 折射、Fresnel 反射、全反射、粗糙微表面和 Beer–Lambert 吸收；封闭几何提供实际穿行厚度，厚度为零时按薄片处理。最多支持七层正确嵌套的实体介质；重叠且不嵌套的体积未完整处理。直射阴影使用透射率和吸收近似，尚未实现折射焦散。Clearcoat、sheen、各向异性以及 OBJ/FBX 导入器仍是后续工作。环境照明目前为可调程序化天空，尚未提供 HDRI 文件导入。
 
-多光源样例位于 `Samples/RainyCorner`，包含通过 Blender MCP 制作的便利店 `.blend` / `.glb`、建模脚本、Blender 参考图和实际 DXR 预览。低 SPP 下随机覆盖率玻璃仍会出现可见颗粒；这不等同于完成透明材质的专用降噪或物理折射。
+多光源样例位于 `Samples/RainyCorner`，通过 Blender MCP 制作，包含 2,019,650 个实例化三角形、3,199 个网格实例、24 个导出材质（含渲染器默认项为 25）和 8 盏灯。瓶罐、包装、货架、五金及街道设备补充了真实几何细节。附 `.blend` / `.glb`、可复现脚本、Blender 参考图和实际 DXR 预览。
 
 ## 相机与线程
 
@@ -50,6 +50,10 @@ BLEND 表示覆盖率透明，不等于 transmission/volume 的玻璃折射。Cl
 主命中插值顶点属性，在世界空间使用逆转置法线；缺少法线时使用面法线，缺少切线时根据三角形 UV 构造切线基。纹理 LOD 使用世界 ray cone 到 UV 的面积换算，避免模型尺度改变贴图清晰度。
 
 导入场景始终经过线性输出管线。带噪漫反射、镜面反射与无需降噪的照明分开保存，NRD 使用真实粗糙度、线性 view Z、相机运动矢量和各 lobe 的次级命中距离。概率 lobe 选择对应 NRD hit-distance reconstruction；天空/超出降噪范围的像素旁路，镜面信号不伪装成漫反射。
+
+玻璃原先的问题来自随机 alpha 覆盖率改变主命中表面，以及透过玻璃的发光/直射背景被错误放入无需降噪的信号。现在单独发射确定性主引导射线，BLEND 后方的随机贡献全部进入滤波，折射信号进入镜面通道；次级距离跨过介质出射面继续累计。NRD 的 PBR 镜面预滤波半径由默认 50 缩至 2 像素。2 SPP 仍可能有平滑和残余噪点，尤其窗后小商品；单层主表面引导尚不能完整描述多层透射的运动。
+
+DLSSD 使用独立的 NGX feature 和评价入口，消费原始带噪线性辐射、漫反射/镜面反照率、单位世界法线/粗糙度、真实镜面射线距离、深度、运动与相机矩阵。启用时旁路 NRD/自定义滤波和单独的 DLSS SR。界面按能力查询启用选项，失败时显示具体 NGX 状态并回退常规管线。此路径只做编译和静态接线检查，按用户要求未运行，详见 [超分与光线重建](SUPER_RESOLUTION.md)。
 
 首个命中点的点光源、聚光灯、方向光和全局太阳逐灯确定性计算，硬阴影与发光在 NRD 后合成，避免间接光的命中距离把阴影边缘模糊或拖出残影。经随机透明遮挡的直接光、环境/发光网格采样、间接反弹仍进入对应 lobe 降噪。合成后的画面再交给 SR，因此低渲染比例下仍受 SR 重建质量影响。多灯成本随灯数增加，尚未使用光源树。
 
@@ -71,11 +75,14 @@ dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --config
 ```powershell
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
 ```
 
 `SceneProbe` 生成可重现的 glTF/GLB、3×3 贴图和重复实例样例。检查相机帧率独立性、模式连续性、重置、导入取消/失败、材质参数、灯光、alpha、纯金属信号、lobe 能量重组、模型尺度与 mip、真实 NRD dispatch 及可用 SR。太阳测试验证开关、角度、强度线性关系，以及双面遮挡片的 225 个可见阴影像素；隔离直接光时，NRD 与关闭降噪的输出最大误差为 0。D3D12 Error/Corruption 消息会使测试失败。截图和日志写入忽略的 `output/`。
+
+`--glass` 对 2,888 个可见玻璃像素比较 512 SPP 参考与 2 SPP 输出：在线性辐射经 `x/(1+x)` 压缩后，RGB RMSE 从 0.351406 降至 0.131150（约 63%）。同时检查材质 ABI、volume 导入、静止相机引导稳定、IOR 改变影响折射结果及 D3D12 调试层。它不会创建或执行 DLSSD feature；误差降低也不等于多层玻璃和运动质量已经完美。
 
 ## 性能与后续工作
 

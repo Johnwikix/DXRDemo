@@ -16,11 +16,12 @@
                     <ComboBoxItem Content="RELAX 风格（时间 + 空间）" />
                     <ComboBoxItem Content="NVIDIA NRD · RELAX（PBR 漫反射 + 镜面反射）" />
                 </ComboBox>
-                <ComboBox x:Name="ReconstructionSelector" x:FieldModifier="internal" Header="超分辨率" HorizontalAlignment="Stretch" SelectedIndex="0" IsEnabled="False" AutomationProperties.AutomationId="ReconstructionSelector">
+                <ComboBox x:Name="ReconstructionSelector" x:FieldModifier="internal" Header="超分辨率 / 光线重建" HorizontalAlignment="Stretch" SelectedIndex="0" IsEnabled="False" AutomationProperties.AutomationId="ReconstructionSelector">
                     <ComboBoxItem Content="关闭 · 原生分辨率" />
                     <ComboBoxItem Content="AMD FSR 3.1" />
                     <ComboBoxItem Content="Intel XeSS" />
                     <ComboBoxItem Content="NVIDIA DLSS" />
+                    <ComboBoxItem Content="NVIDIA DLSS 光线重建（DLSSD）" />
                 </ComboBox>
                 <StackPanel Spacing="4">
                     <Grid>

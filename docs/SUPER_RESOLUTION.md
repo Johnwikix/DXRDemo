@@ -2,7 +2,7 @@
 
 ## Implemented behavior
 
-Settings now offer Off, AMD FSR 3.1, Intel XeSS and NVIDIA DLSS, with a common
+Settings offer Off, AMD FSR 3.1, Intel XeSS, NVIDIA DLSS SR and DLSS Ray Reconstruction, with a common
 1–100% input-resolution control (67% initially). Off remains the default and
 renders at native resolution. At 100%, a supported temporal algorithm operates
 at native resolution for antialiasing. Unsupported algorithms are disabled in
@@ -30,7 +30,8 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    A-trous passes, using the existing normal/material guides. This is a custom
    filter. The additional default **NVIDIA NRD RELAX** mode uses the official SDK
    and bypasses these custom filters; see [NRD integration](NRD.md). None of these
-   modes implements DLSS Ray Reconstruction.
+   modes implements DLSS Ray Reconstruction. The separate DLSSD mode instead
+   consumes the original noisy radiance and bypasses all conventional denoisers.
 4. The real vendor SDK consumes FP16 linear color, R32 depth, RG16F motion and
    R8 reactive masks. Its FP16 output is then encoded to SDR gamma or Rec.2020/PQ.
    The GPU HUD and XAML controls remain at output resolution.
@@ -106,36 +107,40 @@ directory. Starting the DLL with `dotnet.exe` instead can produce
 `diagnostics/integration/output/`. SDK versions, byte hashes and deployment rules
 are in `External/Upscalers/README.md`.
 
-## DLSS Ray Reconstruction (DLSSD): feasible, not implemented here
+## DLSS Ray Reconstruction (DLSSD): implemented, execution deliberately deferred
 
-DLSSD can replace this demo's custom or NRD denoising, but it is a separate integration
-from DLSS Super Resolution. The NVIDIA guide states that enabling RR overrides
-the SR path and consumes noisy radiance plus additional material/geometry guides.
-It should not be run after RELAX or followed by another DLSS SR dispatch.
+The x64 native adapter now creates `NVSDK_NGX_Feature_RayReconstruction` through
+`NGX_D3D12_CREATE_DLSSD_EXT` and evaluates it through `NGX_D3D12_EVALUATE_DLSSD_EXT`.
+The pinned NVIDIA headers, release `nvngx_dlssd.dll`, restoration manifest and
+SHA-256 verification are included in build/publish assets. This is a separate
+feature from the existing DLSS SR context.
 
-This change supplies the reusable low-resolution linear radiance, jitter, depth,
-motion and camera history. The remaining work is:
+The glTF/GLB PBR tracer supplies raw linear radiance, linear diffuse albedo,
+integrated specular reflectance (split-sum approximation), unit world normals
+with linear roughness in alpha, hardware depth, input-pixel motion, jitter and
+reset state. A separate mirror ray supplies world-space secondary specular hit
+distance only while RR is active. The 240-byte C ABI also supplies world-to-view
+and view-to-clip matrices. Resources and descriptor tables are reused; resize or
+mode changes release the feature only after queue completion.
 
-- Add the pinned RR headers and release `nvngx_dlssd.dll`, its capability query,
-  feature creation/evaluation ABI and resource lifecycle.
-- Write linear diffuse and specular albedo, floating-point world/view normals
-  and linear roughness at the same primary sample location. NRD now provides
-  a high-precision normal/roughness guide, while the older RGBA8 normal guide
-  still packs material ID in alpha. The current diffuse meshes can supply their actual constant albedo,
-  roughness 1 and zero specular reflectance; future glass/metal needs real guides.
-- Supply specular hit distance plus the required camera transforms, or specular
-  motion vectors. The current alpha `t/(t+1)` is averaged **primary** hit distance;
-  it is not world-space **secondary specular** hit distance and must not be relabeled.
-  NRD mode supplies a secondary **diffuse** distance, which also is not a specular guide.
-- When RR is active, pass noisy linear radiance directly to RR and bypass both
-  custom/NRD denoisers and DLSS SR. Encode its reconstructed output once. Keep a
-  capability-gated fallback to the selected conventional denoiser plus SR.
-- On RTX hardware, validate guide normalization, matrix conventions, transparent
-  materials, disocclusions, camera cuts, reconstruction sizes and motion quality.
-  Lack of Intel execution support cannot validate this path.
+RR uses unified denoising and reconstruction. It receives no temporal, custom or
+NRD prefilter and is not followed by a DLSS SR dispatch. The selected regular
+denoiser is retained for switching back. Display exposure and encoding follow RR.
+The NGX availability query gates the settings option. Unsupported devices, the
+legacy Stanford mesh tracer, feature-creation failures and evaluation failures
+report an explicit fallback to conventional denoising plus DLSS SR when available,
+otherwise native resolution. NGX errors are included in the status text.
 
-No dummy RR toggle or claimed RR execution is included. The requested NVIDIA
-device tests are deferred; the three requested SR adapters are implemented.
+**At the user's request, no DLSSD feature has been created or evaluated for
+verification.** Native/C# compilation and resource-plumbing review are complete;
+RTX execution, model/driver compatibility, matrix interpretation, motion quality,
+disocclusion and glass quality remain user checks. Previous Intel FSR/XeSS results
+above do not validate RR. `--glass` tests DXR/NRD and never executes DLSSD.
+
+To exercise it manually, open the packaged convenience store on a supported RTX
+device and select “NVIDIA DLSS 光线重建（DLSSD）” under “超分辨率 / 光线重建”.
+Check the status reports DLSSD active, rather than a fallback. It also supports
+requesting 100% input resolution; actual SDK acceptance remains authoritative.
 
 ## Primary references
 

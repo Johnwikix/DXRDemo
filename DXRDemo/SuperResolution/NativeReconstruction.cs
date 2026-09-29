@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Numerics;
 
 namespace DXRDemo.SuperResolution;
 
@@ -14,6 +15,21 @@ internal static unsafe partial class NativeReconstruction
         internal uint Reset;
         internal float NearPlane, FarPlane, VerticalFieldOfView, Padding;
     }
+
+    /// <summary>Supplies noisy radiance, material guides and camera transforms to DLSSD (240 bytes).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RayReconstructionFrame
+    {
+        internal Frame Common;
+        internal nint DiffuseAlbedo, SpecularAlbedo, NormalRoughness, SpecularHitDistance;
+        internal Matrix4x4 WorldToView, ViewToClip;
+    }
+
+    [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "ReconstructionExecuteDlssd")]
+    internal static partial int ExecuteDlssd(nint context, nint commands, RayReconstructionFrame* frame);
+
+    [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "ReconstructionNgxDiagnostic")]
+    internal static partial nint NgxDiagnostic();
 
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "ReconstructionCapabilities")]
     internal static partial uint Capabilities(nint device);
