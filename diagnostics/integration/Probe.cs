@@ -8,6 +8,7 @@ using System.Text.Json;
 
 Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
+if (args.Contains("--sr")) { ReconstructionProbe.Run(); return; }
 using var device = GraphicsDevice.GetDefault();
 using var hardware = new RayTracePass(new DxrMeshBackend());
 using var software = new RayTracePass();

@@ -63,4 +63,5 @@
     <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
     <PackageReference Include="WinUIEx" Version="2.9.2" />
   </ItemGroup>
+  <Import Project="SuperResolution\ReconstructionAssets.targets" />
 </Project>

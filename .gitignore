@@ -361,3 +361,9 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Pinned vendor redistributables and the static NGX import library are source dependencies.
+!External/Upscalers/xess/bin/
+!External/Upscalers/xess/bin/libxess.dll
+!External/Upscalers/dlss/lib/Windows_x86_64/x64/
+!External/Upscalers/dlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib

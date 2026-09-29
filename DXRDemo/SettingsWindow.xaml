@@ -15,6 +15,14 @@
                     <ComboBoxItem Content="时间累积" />
                     <ComboBoxItem Content="RELAX 风格（时间 + 空间）" />
                 </ComboBox>
+                <ComboBox x:Name="ReconstructionSelector" x:FieldModifier="internal" Header="超分辨率" HorizontalAlignment="Stretch" SelectedIndex="0" IsEnabled="False" AutomationProperties.AutomationId="ReconstructionSelector">
+                    <ComboBoxItem Content="关闭 · 原生分辨率" />
+                    <ComboBoxItem Content="AMD FSR 3.1" />
+                    <ComboBoxItem Content="Intel XeSS" />
+                    <ComboBoxItem Content="NVIDIA DLSS" />
+                </ComboBox>
+                <NumberBox x:Name="RenderScaleBox" x:FieldModifier="internal" Header="SR 渲染比例（%）" Minimum="1" Maximum="100" SmallChange="1" Value="67" IsEnabled="False" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="RenderScaleBox" />
+                <TextBlock x:Name="ReconstructionStatusText" x:FieldModifier="internal" Text="正在初始化渲染器；首次启动可能需要编译着色器。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.AutomationId="ReconstructionStatusText" />
                 <Grid ColumnSpacing="16">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                     <NumberBox x:Name="SamplesBox" x:FieldModifier="internal" Header="每像素采样 SPP" Minimum="1" Maximum="16" SmallChange="1" Value="2" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="SamplesBox" />

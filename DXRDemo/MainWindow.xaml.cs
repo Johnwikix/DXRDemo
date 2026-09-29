@@ -2,6 +2,7 @@ using ComputeSharp;
 using DXRDemo.Hdr;
 using DXRDemo.Shaders;
 using DXRDemo.Shaders.RayTrace;
+using DXRDemo.SuperResolution;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -19,6 +20,9 @@ public sealed partial class MainWindow : WindowEx
     private readonly SettingsWindow _settings = new();
     private readonly HashSet<IShaderPass> _initializedPasses = [];
     private readonly DispatcherTimer _recheckTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly DispatcherTimer _renderScaleTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    private int _pendingRenderScale = 67;
+    private ReconstructionStatus? _lastReconstructionStatus;
     private ComboBox ShaderSelector => _settings.ShaderSelector;
     private ComboBox ModelSelector => _settings.ModelSelector;
     private ComboBox DenoiserSelector => _settings.DenoiserSelector;
@@ -53,6 +57,13 @@ public sealed partial class MainWindow : WindowEx
         DenoiserSelector.SelectionChanged += OnDenoiserSelected;
         MaxBouncesBox.ValueChanged += OnMaxBouncesChanged;
         SamplesBox.ValueChanged += OnSamplesChanged;
+        _settings.ReconstructionSelector.SelectionChanged += OnReconstructionChanged;
+        _settings.RenderScaleBox.ValueChanged += OnRenderScaleChanged;
+        _renderScaleTimer.Tick += (_, _) =>
+        {
+            _renderScaleTimer.Stop();
+            if (_activePass is RayTracePass pass) pass.RenderScalePercent = _pendingRenderScale;
+        };
         HdrToggle.Toggled += OnHdrToggled;
         ModelSelector.SelectionChanged += (_, _) =>
         {
@@ -85,7 +96,7 @@ public sealed partial class MainWindow : WindowEx
         AppWindow.Changed += OnAppWindowChanged;
 
         // Safety-net output recheck (HDR state can change without a window event)
-        _recheckTimer.Tick += (_, _) => UpdateWindowBoundsAndRecheckOutput();
+        _recheckTimer.Tick += (_, _) => { UpdateWindowBoundsAndRecheckOutput(); RefreshReconstructionUi(); };
         _recheckTimer.Start();
 
         // HDR detection is deferred until the window is activated: DisplayInformation
@@ -187,11 +198,48 @@ public sealed partial class MainWindow : WindowEx
             DenoiserSelector.SelectedIndex = (int)pass.DenoiserMode;
             MaxBouncesBox.Value = pass.MaxBounces;
             SamplesBox.Value = pass.Samples;
+            _settings.ReconstructionSelector.SelectedIndex = pass.ReconstructionMode switch
+            {
+                ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, _ => 0
+            };
+            _settings.RenderScaleBox.Value = pass.RenderScalePercent;
         }
         finally
         {
             _syncingRayTraceParams = false;
         }
+    }
+
+    private void OnReconstructionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
+        pass.ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex switch
+        {
+            1 => ReconstructionMode.Fsr, 2 => ReconstructionMode.XeSS, 3 => ReconstructionMode.Dlss, _ => ReconstructionMode.Off
+        };
+        _settings.RenderScaleBox.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
+        _settings.ReconstructionStatusText.Text = "正在应用超分设置；首次启用需要初始化 SDK。";
+    }
+
+    private void OnRenderScaleChanged(NumberBox sender, NumberBoxValueChangedEventArgs e)
+    {
+        if (_syncingRayTraceParams || double.IsNaN(e.NewValue)) return;
+        _pendingRenderScale = (int)Math.Round(e.NewValue);
+        _renderScaleTimer.Stop();
+        _renderScaleTimer.Start();
+    }
+
+    private void RefreshReconstructionUi()
+    {
+        if (_activePass is not RayTracePass pass || pass.ReconstructionStatus is not ReconstructionStatus status ||
+            ReferenceEquals(_lastReconstructionStatus, status)) return;
+        _lastReconstructionStatus = status;
+        _settings.ReconstructionSelector.IsEnabled = true;
+        ((ComboBoxItem)_settings.ReconstructionSelector.Items[1]).IsEnabled = status.Supports(ReconstructionMode.Fsr);
+        ((ComboBoxItem)_settings.ReconstructionSelector.Items[2]).IsEnabled = status.Supports(ReconstructionMode.XeSS);
+        ((ComboBoxItem)_settings.ReconstructionSelector.Items[3]).IsEnabled = status.Supports(ReconstructionMode.Dlss);
+        _settings.RenderScaleBox.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
+        _settings.ReconstructionStatusText.Text = status.Message;
     }
 
     private void OnDenoiserSelected(object sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs e)
@@ -453,6 +501,7 @@ public sealed partial class MainWindow : WindowEx
         if (_disposed) return;
         _disposed = true;
         _recheckTimer.Stop();
+        _renderScaleTimer.Stop();
         _settings.AllowClose = true;
         _settings.Close();
         _hdrTracker?.Dispose();

@@ -1,5 +1,12 @@
 # DXR Demo — WinUI 3 + DirectX 12 Raytracing Path Tracer
 
+当前三角形模型渲染器已支持 **FSR 3.1 / XeSS / DLSS 超分辨率**：在设置中选择算法与
+1–100% 渲染比例，不支持的算法会禁用，初始化失败会显示原生分辨率回退。
+默认仍关闭 SR。x64 构建还需要 PowerShell 7 与 Visual Studio C++ v145 工具集；
+厂商 SDK 已固定版本并附带许可证，构建时会校验和编译原生桥接。
+管线、Intel 离屏验证及 DLSS 光线重建可行性见 [超分说明](docs/SUPER_RESOLUTION.md)。
+下文球体管线描述保留为最初版本的技术记录，当前默认场景为 Stanford 三角形模型。
+
 DXR Demo 是一个基于 WinUI 3 的实时 DirectX 12 光线追踪（DXR）演示程序。它使用 [Vortice](https://github.com/amerkoleci/Vortice.Windows)（C# 的 DirectX 绑定，非 SharpDX）从零实现了完整的 DXR 渲染管线，渲染一个 Monte Carlo 路径追踪场景（5 个球体：绿色 Lambertian、银色金属、带内气泡的玻璃球、巨型地面）。
 
 A real-time DirectX 12 Raytracing (DXR) demo built on WinUI 3, implementing the full DXR pipeline from scratch with [Vortice](https://github.com/amerkoleci/Vortice.Windows) (C# DirectX bindings, not SharpDX). It renders a Monte Carlo path-traced scene with 5 spheres: a green Lambertian sphere, a silver metal sphere, a glass sphere with an inner bubble, and a giant ground plane.

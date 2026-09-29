@@ -1,5 +1,12 @@
 # Model / HDR / settings integration validation
 
+The `--sr` option now exercises the real FSR/XeSS/DLSS adapters, temporal guides,
+scale/denoiser/HDR transitions and fallback. Run the built **IntegrationProbe.exe**
+so the FidelityFX loader discovers providers beside the executable. The native
+bridge builds automatically; `SkipReconstructionNativeBuild=true` reuses it.
+Intel results and the DLSSD feasibility assessment are in
+[`docs/SUPER_RESOLUTION.md`](../../docs/SUPER_RESOLUTION.md).
+
 Both apps now load the same packaged Stanford Bunny (69,451 triangles), Armadillo
 (345,944) and Dragon (871,414). Each app has its own settings window; the main
 window's **设置** button or **F1** opens it. Closing settings hides that window and

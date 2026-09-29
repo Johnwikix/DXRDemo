@@ -6,8 +6,10 @@ namespace DXRDemo.Shaders.RayTrace;
 [GeneratedComputeShaderDescriptor]
 public readonly partial struct MeshPathTraceShader(
     int width, int height, int samples, int maxBounces, int frame, Float2 orbit, float distance,
+    int temporal, Float2 jitter,
     ReadOnlyBuffer<Float4> triangles, ReadOnlyBuffer<Float4> nodes,
-    ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals) : IComputeShader
+    ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
+    ReadWriteTexture2D<Float4> surfaces) : IComputeShader
 {
     private static float Random(ref uint state)
     {
@@ -101,10 +103,14 @@ public readonly partial struct MeshPathTraceShader(
         float distanceSum = 0;
         Float3 primaryNormal = Float3.Zero;
         float primaryMaterial = 3;
+        Float4 primarySurface = Float4.Zero;
         for (int sample = 0; sample < samples; sample++)
         {
-            float sx = ((pixel.X + Random(ref rng)) / width * 2 - 1) * (width / (float)height) * 0.5f;
-            float sy = (1 - (pixel.Y + Random(ref rng)) / height * 2) * 0.5f;
+            // 时域 SR 每帧共用一个采样位置，保留路径随机数；关闭 SR 时维持原有采样。
+            float offsetX = Random(ref rng), offsetY = Random(ref rng);
+            if (temporal != 0) { offsetX = 0.5f + jitter.X; offsetY = 0.5f + jitter.Y; }
+            float sx = ((pixel.X + offsetX) / width * 2 - 1) * (width / (float)height) * 0.5f;
+            float sy = (1 - (pixel.Y + offsetY) / height * 2) * 0.5f;
             Float3 ro = origin;
             Float3 rd = Hlsl.Normalize(forward + right * sx + up * sy);
             Float3 throughput = new(1,1,1);
@@ -115,14 +121,26 @@ public readonly partial struct MeshPathTraceShader(
                 bool mesh = HitMesh(ro,rd,1000,false,out meshT,out id);
                 float groundT = rd.Y < -1e-8f ? -ro.Y / rd.Y : 1000;
                 bool ground = groundT > 0.0001f && groundT < meshT;
-                if (!mesh && !ground) { if (bounce == 0) distanceSum += 1; color += throughput * Sky(rd); break; }
+                if (!mesh && !ground)
+                {
+                    if (bounce == 0)
+                    {
+                        distanceSum += 1;
+                        if (sample == 0) primarySurface = new Float4(rd, -1);
+                    }
+                    color += throughput * Sky(rd); break;
+                }
                 float t = ground ? groundT : meshT;
                 Float3 normal = ground ? new Float3(0,1,0) : Hlsl.Normalize(Hlsl.Cross(triangles[id*3+1].XYZ,triangles[id*3+2].XYZ));
                 if (Hlsl.Dot(normal,rd) > 0) normal = -normal;
                 if (bounce == 0)
                 {
                     distanceSum += t / (t + 1);
-                    if (sample == 0) { primaryNormal = normal; primaryMaterial = ground ? 1 : 0; }
+                    if (sample == 0)
+                    {
+                        primaryNormal = normal; primaryMaterial = ground ? 1 : 0;
+                        primarySurface = new Float4(ro + rd * t, t);
+                    }
                 }
                 Float3 albedo = ground ? new Float3(0.7f,0.7f,0.7f) : new Float3(0.65f,0.3f,0.12f);
                 Float3 point = ro + rd * t;
@@ -143,5 +161,6 @@ public readonly partial struct MeshPathTraceShader(
         }
         output[pixel] = new Float4(sum / samples, distanceSum / samples);
         normals[pixel] = new Float4(primaryNormal * 0.5f + 0.5f, primaryMaterial / 255.0f);
+        if (temporal != 0) surfaces[pixel] = primarySurface;
     }
 }

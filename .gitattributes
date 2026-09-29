@@ -3,6 +3,9 @@
 ###############################################################################
 * text=auto
 
+# Preserve upstream bytes: Restore.ps1 validates SHA-256 for SDK headers and binaries.
+External/Upscalers/** -text
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #

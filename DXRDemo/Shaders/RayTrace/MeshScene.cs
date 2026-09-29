@@ -42,7 +42,8 @@ public interface IMeshTraceBackend : IDisposable
     string Name { get; }
     void Initialize(GraphicsDevice device);
     void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
-        Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals);
+        Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default);
 }
 
 public sealed class SoftwareMeshBackend : IMeshTraceBackend
@@ -53,7 +54,8 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
     public string Name => "COMPUTESHARP / SM BVH";
     public void Initialize(GraphicsDevice device) => _device = device;
     public void Trace(MeshData mesh, int width, int height, int samples, int bounces, int frame,
-        Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals)
+        Float2 orbit, float distance, ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
+        ReadWriteTexture2D<Float4>? surfaces = null, Float2 jitter = default)
     {
         if (!ReferenceEquals(mesh, _mesh))
         {
@@ -62,7 +64,8 @@ public sealed class SoftwareMeshBackend : IMeshTraceBackend
             _nodes = _device.AllocateReadOnlyBuffer(mesh.Nodes);
             _mesh = mesh;
         }
-        _device.For(width, height, new MeshPathTraceShader(width, height, samples, bounces, frame, orbit, distance, _triangles!, _nodes!, output, normals));
+        _device.For(width, height, new MeshPathTraceShader(width, height, samples, bounces, frame, orbit, distance,
+            surfaces != null ? 1 : 0, jitter, _triangles!, _nodes!, output, normals, surfaces ?? output));
     }
     public void Dispose() { _triangles?.Dispose(); _nodes?.Dispose(); }
 }

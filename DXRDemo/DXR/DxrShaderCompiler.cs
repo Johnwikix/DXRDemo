@@ -127,6 +127,15 @@ public sealed class DxrShaderCompiler : IDisposable
     }
 
     public void CompileLibrary(string entryHlsl)
+        => Compile(entryHlsl, "lib_6_5", null);
+
+    /// <summary>Compiles a compute entry point for reconstruction preparation or output encoding.</summary>
+    /// <param name="entryHlsl">The HLSL source path.</param>
+    /// <param name="entryPoint">The compute shader entry point.</param>
+    public void CompileCompute(string entryHlsl, string entryPoint)
+        => Compile(entryHlsl, "cs_6_0", entryPoint);
+
+    private void Compile(string entryHlsl, string profile, string? entryPoint)
     {
         if (!File.Exists(entryHlsl))
             throw new FileNotFoundException("HLSL not found.", entryHlsl);
@@ -140,11 +149,16 @@ public sealed class DxrShaderCompiler : IDisposable
         {
             var psi = new ProcessStartInfo(dxcPath)
             {
-                Arguments = $"\"-T\" \"lib_6_5\" \"-Fo\" \"{outFile}\" \"-I\" \"{dir}\" \"{entryHlsl}\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+
+            psi.ArgumentList.Add("-T"); psi.ArgumentList.Add(profile);
+            psi.ArgumentList.Add("-Fo"); psi.ArgumentList.Add(outFile);
+            psi.ArgumentList.Add("-I"); psi.ArgumentList.Add(dir);
+            if (entryPoint != null) { psi.ArgumentList.Add("-E"); psi.ArgumentList.Add(entryPoint); }
+            psi.ArgumentList.Add(entryHlsl);
 
             using var proc = Process.Start(psi);
             if (proc == null)
