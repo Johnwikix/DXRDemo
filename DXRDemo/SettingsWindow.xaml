@@ -57,7 +57,7 @@
             <TextBlock x:Name="HdrStatusText" x:FieldModifier="internal" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             <ToggleSwitch x:Name="DiagnosticsToggle" x:FieldModifier="internal" Header="GPU 诊断信息" IsOn="True" OnContent="显示" OffContent="隐藏" AutomationProperties.AutomationId="DiagnosticsToggle" />
             <TextBlock Text="RENDER 为渲染帧率，SUBMIT 为成功提交呈现的帧率；显示器实际刷新率由系统决定。FRAME 为完整渲染循环的平均耗时，包含同步、降噪和呈现。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            <Button x:Name="ResolutionButton" x:FieldModifier="internal" Content="场景分辨率设为 1280 × 720" AutomationProperties.AutomationId="ResolutionButton" />
+            <Button x:Name="ResolutionButton" x:FieldModifier="internal" Content="场景分辨率设为 1920 × 1080" AutomationProperties.AutomationId="ResolutionButton" />
             <TextBlock x:Name="ErrorText" x:FieldModifier="internal" TextWrapping="Wrap" IsTextSelectionEnabled="True" AutomationProperties.LiveSetting="Polite" />
             <TextBlock Text="Stanford 模型来源与使用条款见 Assets/Models/SOURCES.md。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>

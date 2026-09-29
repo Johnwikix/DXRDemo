@@ -27,6 +27,8 @@ public sealed partial class MainWindow : WindowEx
     private readonly HashSet<IShaderPass> _initializedPasses = [];
     private readonly DispatcherTimer _recheckTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly DispatcherTimer _renderScaleTimer = new() { Interval = TimeSpan.FromMilliseconds(200) };
+    private readonly DispatcherTimer _settingsSaveTimer = new() { Interval = TimeSpan.FromSeconds(2) };
+    private AppSettings? _savedSettings;
     private int _pendingRenderScale = 67;
     private ReconstructionStatus? _lastReconstructionStatus;
     private ComboBox ShaderSelector => _settings.ShaderSelector;
@@ -62,7 +64,7 @@ public sealed partial class MainWindow : WindowEx
         InitializeComponent();
         Title = "DXR Demo";
         AppWindow.TitleBar.PreferredTheme = TitleBarTheme.UseDefaultAppMode;
-        AppWindow.ResizeClient(new SizeInt32(1280, 720));
+        AppWindow.ResizeClient(new SizeInt32(1920, 1080));
         MinWidth = 480; MinHeight = 320;
         ShaderSelector.SelectionChanged += OnShaderSelected;
         DenoiserSelector.SelectionChanged += OnDenoiserSelected;
@@ -95,8 +97,8 @@ public sealed partial class MainWindow : WindowEx
                 pass.ExternalLightingEnabled = !_settings.ModelLightingOnlyToggle.IsOn;
         };
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
-        _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1280,
-            720 + (int)Math.Round((RootGrid.ActualHeight - ViewportFocus.ActualHeight) * DpiScale)));
+        _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1920,
+            1080 + (int)Math.Round((RootGrid.ActualHeight - ViewportFocus.ActualHeight) * DpiScale)));
         // Create the GPU device and shader panel
         _device = GraphicsDevice.GetDefault();
         _factory = new ShaderFactory();
@@ -104,9 +106,10 @@ public sealed partial class MainWindow : WindowEx
         _shaderPanel = new HdrShaderPanel(_device);
         PanelHost.Children.Add(_shaderPanel);
 
-        // Populate shader selector
+        // Populate shader selector and restore the persisted shader
         ShaderSelector.ItemsSource = ShaderFactory.Catalog;
-        ShaderSelector.SelectedIndex = 0;
+        _savedSettings = AppSettingsStore.Load();
+        ShaderSelector.SelectedIndex = FindShaderIndex(_savedSettings?.ShaderId);
 
         // Mouse tracking
         _shaderPanel.PointerMoved += OnPointerMoved;
@@ -136,7 +139,13 @@ public sealed partial class MainWindow : WindowEx
         HdrToggle.IsEnabled = false;
         ApplyHdrMode();
 
+        // Restore persisted settings (all handlers are wired and the initial shader is active by now),
+        // then keep the settings file in sync while the app runs.
+        ApplyPersistedSettings();
+        WireSettingsPersistence();
+
         // Cleanup
+        Closed += (_, _) => SaveSettingsNow();
         Closed += (_, _) => Dispose();
     }
 
@@ -312,6 +321,100 @@ public sealed partial class MainWindow : WindowEx
 
         pass.Samples = (int)Math.Round(args.NewValue);
     }
+
+    private static int FindShaderIndex(string? shaderId)
+    {
+        if (shaderId is not null)
+        {
+            var catalog = ShaderFactory.Catalog;
+            for (int i = 0; i < catalog.Count; i++)
+                if (catalog[i].Id == shaderId) return i;
+        }
+        return 0;
+    }
+
+    // Pushes the persisted values into the controls; the regular change handlers then
+    // forward them to the active pass, so no manual pass sync is needed here.
+    private void ApplyPersistedSettings()
+    {
+        if (_savedSettings is not { } s) return;
+
+        if (s.SceneIndex is int scene and >= 0) ModelSelector.SelectedIndex = scene;
+        if (s.DenoiserMode is int denoiser and >= 0 and <= 3) DenoiserSelector.SelectedIndex = denoiser;
+        if (s.ReconstructionMode is int reconstruction and >= 0 and <= 4) _settings.ReconstructionSelector.SelectedIndex = reconstruction;
+        if (s.RenderScalePercent is int scale and >= 1 and <= 100) _settings.RenderScaleSlider.Value = scale;
+        if (s.Samples is double samples and >= 1) SamplesBox.Value = samples;
+        if (s.MaxBounces is double bounces and >= 1) MaxBouncesBox.Value = bounces;
+        if (s.CameraSpeed is double speed and > 0) _settings.CameraSpeedBox.Value = speed;
+        if (s.EnvironmentIntensity is double environment and >= 0) _settings.EnvironmentBox.Value = environment;
+        if (s.Exposure is double exposure) _settings.ExposureBox.Value = exposure;
+        if (s.SunAzimuth is double azimuth and >= 0 and <= 360) _settings.SunAzimuthBox.Value = azimuth;
+        if (s.SunElevation is double elevation and >= -90 and <= 90) _settings.SunElevationBox.Value = elevation;
+        if (s.SunIntensity is double intensity and >= 0) _settings.SunIntensityBox.Value = intensity;
+        if (s.SunEnabled is { } sun) _settings.SunToggle.IsOn = sun;
+        if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
+        if (s.HdrEnabled is { } hdr)
+        {
+            _hdrAutoEnabled = true; // suppress first-detection auto-enable so the saved choice wins
+            HdrToggle.IsOn = hdr;
+        }
+        if (s.ShowDiagnostics is { } diagnostics) _settings.DiagnosticsToggle.IsOn = diagnostics;
+        if (s.CameraMode is int cameraMode and >= 0 and <= 1) CameraModeSelector.SelectedIndex = cameraMode;
+    }
+
+    private void WireSettingsPersistence()
+    {
+        _settingsSaveTimer.Tick += (_, _) => { _settingsSaveTimer.Stop(); SaveSettingsNow(); };
+
+        ShaderSelector.SelectionChanged += (_, _) => QueueSettingsSave();
+        ModelSelector.SelectionChanged += (_, _) => QueueSettingsSave();
+        DenoiserSelector.SelectionChanged += (_, _) => QueueSettingsSave();
+        CameraModeSelector.SelectionChanged += (_, _) => QueueSettingsSave();
+        _settings.ReconstructionSelector.SelectionChanged += (_, _) => QueueSettingsSave();
+        _settings.RenderScaleSlider.ValueChanged += (_, _) => QueueSettingsSave();
+        SamplesBox.ValueChanged += (_, _) => QueueSettingsSave();
+        MaxBouncesBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.CameraSpeedBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.EnvironmentBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.ExposureBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.SunAzimuthBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.SunElevationBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.SunIntensityBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.SunToggle.Toggled += (_, _) => QueueSettingsSave();
+        _settings.ModelLightingOnlyToggle.Toggled += (_, _) => QueueSettingsSave();
+        HdrToggle.Toggled += (_, _) => QueueSettingsSave();
+        _settings.DiagnosticsToggle.Toggled += (_, _) => QueueSettingsSave();
+    }
+
+    private void QueueSettingsSave()
+    {
+        _settingsSaveTimer.Stop();
+        _settingsSaveTimer.Start();
+    }
+
+    private AppSettings CaptureSettings() => new()
+    {
+        ShaderId = (ShaderSelector.SelectedItem as ShaderAuthoringInfo)?.Id,
+        SceneIndex = ModelSelector.SelectedIndex,
+        DenoiserMode = DenoiserSelector.SelectedIndex,
+        ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex,
+        RenderScalePercent = (int)Math.Round(_settings.RenderScaleSlider.Value),
+        Samples = SamplesBox.Value,
+        MaxBounces = MaxBouncesBox.Value,
+        CameraSpeed = _settings.CameraSpeedBox.Value,
+        EnvironmentIntensity = _settings.EnvironmentBox.Value,
+        Exposure = _settings.ExposureBox.Value,
+        SunEnabled = _settings.SunToggle.IsOn,
+        SunAzimuth = _settings.SunAzimuthBox.Value,
+        SunElevation = _settings.SunElevationBox.Value,
+        SunIntensity = _settings.SunIntensityBox.Value,
+        ModelLightingOnly = _settings.ModelLightingOnlyToggle.IsOn,
+        HdrEnabled = HdrToggle.IsOn,
+        ShowDiagnostics = _settings.DiagnosticsToggle.IsOn,
+        CameraMode = CameraModeSelector.SelectedIndex,
+    };
+
+    private void SaveSettingsNow() => AppSettingsStore.Save(CaptureSettings());
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
@@ -613,6 +716,19 @@ public sealed partial class MainWindow : WindowEx
     private void OnSettingsShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
     {
         _settings.Activate(); e.Handled = true;
+    }
+
+    private void OnToggleFullscreen(object sender, RoutedEventArgs e) => ToggleFullscreen();
+    private void OnFullscreenShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e)
+    {
+        ToggleFullscreen(); e.Handled = true;
+    }
+
+    private void ToggleFullscreen()
+    {
+        bool enteringFullscreen = AppWindow.Presenter.Kind != AppWindowPresenterKind.FullScreen;
+        AppWindow.SetPresenter(enteringFullscreen ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
+        FullscreenButton.Content = enteringFullscreen ? "退出全屏" : "全屏";
     }
 
     // Keeps the current-output HDR state in sync with the window position (multi-monitor).
