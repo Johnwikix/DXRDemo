@@ -339,18 +339,20 @@ public sealed partial class MainWindow : WindowEx
     {
         if (_savedSettings is not { } s) return;
 
-        if (s.SceneIndex is int scene and >= 0) ModelSelector.SelectedIndex = scene;
-        if (s.DenoiserMode is int denoiser and >= 0 and <= 3) DenoiserSelector.SelectedIndex = denoiser;
-        if (s.ReconstructionMode is int reconstruction and >= 0 and <= 4) _settings.ReconstructionSelector.SelectedIndex = reconstruction;
-        if (s.RenderScalePercent is int scale and >= 1 and <= 100) _settings.RenderScaleSlider.Value = scale;
-        if (s.Samples is double samples and >= 1) SamplesBox.Value = samples;
-        if (s.MaxBounces is double bounces and >= 1) MaxBouncesBox.Value = bounces;
-        if (s.CameraSpeed is double speed and > 0) _settings.CameraSpeedBox.Value = speed;
-        if (s.EnvironmentIntensity is double environment and >= 0) _settings.EnvironmentBox.Value = environment;
-        if (s.Exposure is double exposure) _settings.ExposureBox.Value = exposure;
-        if (s.SunAzimuth is double azimuth and >= 0 and <= 360) _settings.SunAzimuthBox.Value = azimuth;
-        if (s.SunElevation is double elevation and >= -90 and <= 90) _settings.SunElevationBox.Value = elevation;
-        if (s.SunIntensity is double intensity and >= 0) _settings.SunIntensityBox.Value = intensity;
+        RestoreSelection(ModelSelector, s.SceneIndex);
+        RestoreSelection(DenoiserSelector, s.DenoiserMode);
+        RestoreSelection(_settings.ReconstructionSelector, s.ReconstructionMode);
+        if (s.RenderScalePercent is int scale &&
+            scale >= _settings.RenderScaleSlider.Minimum && scale <= _settings.RenderScaleSlider.Maximum)
+            _settings.RenderScaleSlider.Value = scale;
+        RestoreNumber(SamplesBox, s.Samples);
+        RestoreNumber(MaxBouncesBox, s.MaxBounces);
+        RestoreNumber(_settings.CameraSpeedBox, s.CameraSpeed);
+        RestoreNumber(_settings.EnvironmentBox, s.EnvironmentIntensity);
+        RestoreNumber(_settings.ExposureBox, s.Exposure);
+        RestoreNumber(_settings.SunAzimuthBox, s.SunAzimuth);
+        RestoreNumber(_settings.SunElevationBox, s.SunElevation);
+        RestoreNumber(_settings.SunIntensityBox, s.SunIntensity);
         if (s.SunEnabled is { } sun) _settings.SunToggle.IsOn = sun;
         if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
         if (s.HdrEnabled is { } hdr)
@@ -359,7 +361,33 @@ public sealed partial class MainWindow : WindowEx
             HdrToggle.IsOn = hdr;
         }
         if (s.ShowDiagnostics is { } diagnostics) _settings.DiagnosticsToggle.IsOn = diagnostics;
-        if (s.CameraMode is int cameraMode and >= 0 and <= 1) CameraModeSelector.SelectedIndex = cameraMode;
+        RestoreSelection(CameraModeSelector, s.CameraMode);
+    }
+
+    private static void RestoreSelection(ComboBox selector, int? index)
+    {
+        // 导入场景不跨会话保留；.NET 10 中的整数边界检查不分配临时集合。
+        if (index is int value && (uint)value < (uint)selector.Items.Count)
+            selector.SelectedIndex = value;
+    }
+
+    private static void RestoreNumber(NumberBox control, double? value)
+    {
+        if (value is double number && double.IsFinite(number) && number >= control.Minimum && number <= control.Maximum)
+            control.Value = number;
+    }
+
+    private static double? CaptureNumber(NumberBox control)
+    {
+        double value = control.Value;
+        return double.IsFinite(value) && value >= control.Minimum && value <= control.Maximum ? value : null;
+    }
+
+    private int? CaptureSceneIndex()
+    {
+        int index = ModelSelector.SelectedIndex;
+        // 未保存导入文件路径，不能把仅在当前会话有效的场景索引写入下次启动的设置。
+        return index >= 0 && index <= RayTracePass.RainyCornerSceneIndex ? index : null;
     }
 
     private void WireSettingsPersistence()
@@ -395,19 +423,19 @@ public sealed partial class MainWindow : WindowEx
     private AppSettings CaptureSettings() => new()
     {
         ShaderId = (ShaderSelector.SelectedItem as ShaderAuthoringInfo)?.Id,
-        SceneIndex = ModelSelector.SelectedIndex,
+        SceneIndex = CaptureSceneIndex(),
         DenoiserMode = DenoiserSelector.SelectedIndex,
         ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex,
         RenderScalePercent = (int)Math.Round(_settings.RenderScaleSlider.Value),
-        Samples = SamplesBox.Value,
-        MaxBounces = MaxBouncesBox.Value,
-        CameraSpeed = _settings.CameraSpeedBox.Value,
-        EnvironmentIntensity = _settings.EnvironmentBox.Value,
-        Exposure = _settings.ExposureBox.Value,
+        Samples = CaptureNumber(SamplesBox),
+        MaxBounces = CaptureNumber(MaxBouncesBox),
+        CameraSpeed = CaptureNumber(_settings.CameraSpeedBox),
+        EnvironmentIntensity = CaptureNumber(_settings.EnvironmentBox),
+        Exposure = CaptureNumber(_settings.ExposureBox),
         SunEnabled = _settings.SunToggle.IsOn,
-        SunAzimuth = _settings.SunAzimuthBox.Value,
-        SunElevation = _settings.SunElevationBox.Value,
-        SunIntensity = _settings.SunIntensityBox.Value,
+        SunAzimuth = CaptureNumber(_settings.SunAzimuthBox),
+        SunElevation = CaptureNumber(_settings.SunElevationBox),
+        SunIntensity = CaptureNumber(_settings.SunIntensityBox),
         ModelLightingOnly = _settings.ModelLightingOnlyToggle.IsOn,
         HdrEnabled = HdrToggle.IsOn,
         ShowDiagnostics = _settings.DiagnosticsToggle.IsOn,

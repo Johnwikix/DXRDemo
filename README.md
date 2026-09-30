@@ -60,6 +60,8 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **HDR10 输出**：实时检测显示能力并切换 SDR / HDR；HDR 失败回退 SDR
 - **GPU 诊断信息** HUD：RENDER / SUBMIT / FRAME 计时
 - **设置持久化**：`%LOCALAPPDATA%\DXRDemo\settings.json`（unpackaged，使用 `System.Text.Json` source generator）
+  - 恢复时校验下拉索引、数值范围与有限性；无效字段保留当前默认值，导入场景的临时索引不跨会话保存。
+  - 保存到同目录临时文件并原子替换，上一份完整设置保留为 `settings.json.bak`；主文件损坏时读取备份，两份都不可用时使用默认设置。
 
 ---
 
@@ -104,7 +106,9 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 
 生成产物：`bin\x64\{Debug|Release}\net10.0-windows10.0.22621.0\DXRDemo.exe`，同级还有 `dxc.exe / dxcompiler.dll / dxil.dll` 和 `Assets\Models\`（含预烘焙 Stanford 模型与 `RainyCorner.glb`）。
 
-> **Publish 提示**：csproj 已包含 `CopyAppPriAndXbfToPublish` 目标，把 `*.pri / *.xbf` 复制到 publish 目录，避免解包发布时 `0xc000027b` 启动异常。不要再加 `WindowsPackageType=None`，那会让启动失败。
+仓库的 `global.json` 选择已安装的 .NET 10 稳定 SDK。Debug 和 Release 必须分别构建；确认构建成功后再运行对应目录的程序，避免运行残留的旧产物。
+
+> **Publish 提示**：csproj 已包含 `CopyAppPriAndXbfToPublish` 目标，把 `*.pri / *.xbf` 复制到 publish 目录。部署时保留整个输出目录；`0xc000027b` 也可能由托管异常触发，例如恢复已经失效的场景索引。
 
 ---
 
@@ -264,7 +268,11 @@ DXRDemo/                                  解决方案根
 
 ```powershell
 # 主应用 Release 构建（覆盖参数兼容本机 Windows SDK）
-dotnet build DXRDemo/DXRDemo.csproj -c Release -p:Platform=x64 -p:WindowsSdkPackageVersion=10.0.22621.57 -p:WindowsPackageType=None
+dotnet build DXRDemo/DXRDemo.csproj -c Release -p:Platform=x64 -p:WindowsSdkPackageVersion=10.0.22621.57
+
+# 设置文件回归（损坏 JSON、备份恢复、序列化/IO 失败、原子替换）
+dotnet build diagnostics/settings/SettingsProbe.csproj -c Release --configfile diagnostics/performance/NuGet.Config
+dotnet run --project diagnostics/settings/SettingsProbe.csproj -c Release --no-build --no-restore
 
 # 集成探针（含场景、玻璃、SR、NRD、模型回归）
 dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/performance/NuGet.Config
