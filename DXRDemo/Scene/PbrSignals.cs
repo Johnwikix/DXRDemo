@@ -7,6 +7,7 @@ internal sealed class PbrSignals : IDisposable
 {
     internal readonly ReadWriteTexture2D<Float4> Diffuse, Specular, Albedo, Unfiltered, SpecularGuide;
     internal readonly ReadWriteTexture2D<Float4> DiffuseSh, SpecularSh, GlassSurface, DiffuseFactor, SpecularFactor;
+    internal readonly ReadWriteTexture2D<Float4> GlassFallback, GlassNormal;
     internal PbrSignals(GraphicsDevice device, int width, int height)
     {
         Diffuse = device.AllocateReadWriteTexture2D<Float4>(width, height);
@@ -19,10 +20,13 @@ internal sealed class PbrSignals : IDisposable
         GlassSurface = device.AllocateReadWriteTexture2D<Float4>(width, height);
         DiffuseFactor = device.AllocateReadWriteTexture2D<Float4>(width, height);
         SpecularFactor = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        GlassFallback = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        GlassNormal = device.AllocateReadWriteTexture2D<Float4>(width, height);
     }
     public void Dispose()
     {
         Diffuse.Dispose(); Specular.Dispose(); Albedo.Dispose(); Unfiltered.Dispose(); SpecularGuide.Dispose();
         DiffuseSh.Dispose(); SpecularSh.Dispose(); GlassSurface.Dispose(); DiffuseFactor.Dispose(); SpecularFactor.Dispose();
+        GlassFallback.Dispose(); GlassNormal.Dispose();
     }
 }

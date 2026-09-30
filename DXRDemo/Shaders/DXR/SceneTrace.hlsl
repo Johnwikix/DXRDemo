@@ -41,6 +41,8 @@ RWTexture2D<float4> SpecularSh : register(u14);
 RWTexture2D<float4> GlassSurface : register(u15); // Closest glass position; w=-(ray distance+1), sky=-1.
 RWTexture2D<float4> DiffuseFactor : register(u16);
 RWTexture2D<float4> SpecularFactor : register(u17);
+RWTexture2D<float4> GlassFallback : register(u18); // Contribution without a denoised opaque-cache lookup.
+RWTexture2D<float4> GlassNormal : register(u19); // World normal + closest glass instance ID (one-based).
 
 float Random(inout uint state) {
     uint old = state; state = old * 747796405u + 2891336453u;
@@ -338,8 +340,10 @@ void RenderPixel(bool transparentPass) {
         }
     }
     if(transparentPass && !glass) {
-        Raw[pixel]=OpaqueColor[pixel]; GlassSurface[pixel]=OpaqueSurface[pixel]; return;
+        Raw[pixel]=OpaqueColor[pixel]; GlassSurface[pixel]=OpaqueSurface[pixel];
+        GlassFallback[pixel]=0; GlassNormal[pixel]=0; return;
     }
+    float3 cachedSum=0;
     float hitD=0,hitS=NRD_FrontEnd_SpecHitDistAveraging_Begin(),countD=0;
     uint pathCount=(uint)Control.x*(transparentPass?2u:1u);
     for(uint sample=0;sample<pathCount;sample++) {
@@ -369,7 +373,8 @@ void RenderPixel(bool transparentPass) {
             else if(s.front==0 && s.transmission>0 && s.thickness>0) throughput*=exp(-Absorption(m)*hit.t); // Camera starts inside glass.
             float3 cached;
             if(transparentPass && bounce>0 && s.transmission==0 && SampleOpaque(s,-rd,cached)) {
-                AccumulatePath(throughput*cached,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS); break;
+                float3 value=throughput*cached; cachedSum+=value;
+                AccumulatePath(value,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS); break;
             }
             float emissionWeight=bounce==0||previousTransmission||Environment.z<=0?1:Weight(previousPdf,hit.t*hit.t/max(Environment.z*abs(dot(s.g,-rd)),1e-10));
             float3 radiance=s.emission*emissionWeight;
@@ -467,7 +472,13 @@ void RenderPixel(bool transparentPass) {
     // Legacy BLEND may reveal emissive/direct-lit backgrounds stochastically: none of that may bypass denoising.
     if(coverage) { sumS=total; sumD=sumE=0; }
     Raw[pixel]=float4(all(isfinite(total))?max(total,0):0,1);
-    if(transparentPass) { GlassSurface[pixel]=float4(primarySurface.xyz,-(primarySurface.w+1)); return; }
+    if(transparentPass) {
+        GlassSurface[pixel]=float4(primarySurface.xyz,-(primarySurface.w+1));
+        float3 fallback=max(total-cachedSum*inv,0);
+        GlassFallback[pixel]=float4(all(isfinite(fallback))?fallback:0,1);
+        GlassNormal[pixel]=float4(primaryNormal,guide.instance+1);
+        return;
+    }
     Normals[pixel]=float4(primaryNormal*.5+.5,min(primaryMaterial,254)/255.0);
     Surfaces[pixel]=primarySurface;
     NormalRoughness[pixel]=float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
@@ -477,6 +488,7 @@ void RenderPixel(bool transparentPass) {
     DiffuseSh[pixel]=float4(coverage?0:momentD,0); SpecularSh[pixel]=float4(coverage?0:momentS,0);
     DiffuseFactor[pixel]=float4(factorD,1); SpecularFactor[pixel]=float4(factorS,1);
     GlassSurface[pixel]=primarySurface;
+    GlassFallback[pixel]=0; GlassNormal[pixel]=0;
     Albedo[pixel]=float4(primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
     SpecularGuide[pixel]=float4(specularAlbedo,mirrorDistance);
 }

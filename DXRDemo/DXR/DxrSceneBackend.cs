@@ -13,7 +13,7 @@ namespace DXRDemo.DXR;
 /// <summary>Traces indexed, instanced PBR scenes with explicitly maintained DXR shaders.</summary>
 internal sealed unsafe class DxrSceneBackend : IDisposable
 {
-    private const int MaxTextures = 1024, OutputCount = 14;
+    private const int MaxTextures = 1024, OutputCount = 16;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _owned = [];
     private readonly DxrShaderTable _table = new();
@@ -78,7 +78,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         { new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All) };
         for (uint i = 0; i < 7; i++) parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 9, 0, 0),
-            new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 5, 13, 0),
+            new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 7, 13, 0),
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, MaxTextures, 0, 1),
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 0, 2)), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.Sampler, MaxTextures, 0, 1)), ShaderVisibility.All));
@@ -291,6 +291,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             _outputs[8] = Resource(signals.SpecularGuide);
             _outputs[9] = Resource(signals.DiffuseSh); _outputs[10] = Resource(signals.SpecularSh); _outputs[11] = Resource(signals.GlassSurface);
             _outputs[12] = Resource(signals.DiffuseFactor); _outputs[13] = Resource(signals.SpecularFactor);
+            _outputs[14] = Resource(signals.GlassFallback); _outputs[15] = Resource(signals.GlassNormal);
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
@@ -373,6 +374,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.DispatchRays(new(new(_lightingTable.GPUVirtualAddress + 128, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
             new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)_reservoirWidth, (uint)_reservoirHeight, 1));
         cmd.ResourceBarrierUnorderedAccessView(output); cmd.ResourceBarrierUnorderedAccessView(_outputs[11]!);
+        cmd.ResourceBarrierUnorderedAccessView(_outputs[14]!); cmd.ResourceBarrierUnorderedAccessView(_outputs[15]!);
         End();
         // Restore the opaque output after the glass fence; other UAV bindings are unchanged.
         _gpu.Device.CreateUnorderedAccessView(_outputs[0], null, null, start);

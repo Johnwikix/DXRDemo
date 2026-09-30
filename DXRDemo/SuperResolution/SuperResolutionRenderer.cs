@@ -16,7 +16,7 @@ namespace DXRDemo.SuperResolution;
 /// <summary>Owns linear denoising, vendor reconstruction and encoding on a synchronized render-thread queue.</summary>
 internal sealed unsafe class SuperResolutionRenderer : IDisposable
 {
-    private const int SrvCount = 20, UavCount = 10, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
+    private const int SrvCount = 26, UavCount = 12, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _pipelineResources = [];
     private readonly List<IDisposable> _sizeResources = [];
@@ -25,7 +25,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private string _nrdMessage = "";
     private readonly string _availabilityMessage = "";
     private ID3D12RootSignature _root = null!;
-    private ID3D12PipelineState _prepare = null!, _prepareGuides = null!, _encode = null!;
+    private ID3D12PipelineState _prepare = null!, _resolveGlass = null!, _encode = null!;
     private ID3D12PipelineState _prepareNrd = null!, _composeNrd = null!;
     private ID3D12PipelineState _prepareRr = null!;
     private ID3D12DescriptorHeap _heap = null!;
@@ -37,8 +37,11 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private ID3D12Resource _viewZ = null!, _nrdOutput = null!;
     private ID3D12Resource _nrdSpecInput = null!, _nrdSpecOutput = null!;
     private ID3D12Resource _nrdDiffShInput = null!, _nrdSpecShInput = null!, _nrdDiffShOutput = null!, _nrdSpecShOutput = null!;
-    private ID3D12Resource _glassColor = null!;
-    private readonly ID3D12Resource?[] _pbrInputs = new ID3D12Resource?[10];
+    private ID3D12Resource _glassColor = null!, _glassRaw = null!;
+    private readonly ID3D12Resource[] _glassHistory = new ID3D12Resource[2];
+    private readonly ID3D12Resource[] _glassSurfaceHistory = new ID3D12Resource[2];
+    private readonly ID3D12Resource[] _glassNormalHistory = new ID3D12Resource[2];
+    private readonly ID3D12Resource?[] _pbrInputs = new ID3D12Resource?[12];
     private ID3D12Resource _rrNormals = null!, _rrHitDistance = null!;
     private readonly ID3D12Resource[] _history = new ID3D12Resource[2];
     private ID3D12Resource? _raw, _normals, _surfaces;
@@ -94,6 +97,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource Motion => _motion;
     internal ID3D12Resource LinearOutput => _output;
     internal ID3D12Resource DenoisedColor => _glassComposed ? _glassColor : _color;
+    internal ID3D12Resource GlassUnfilteredColor => _glassRaw;
     internal ID3D12Resource NrdViewZ => _viewZ;
     /// <summary>Gets the most recently written linear denoiser history for offscreen regression checks.</summary>
     internal ID3D12Resource DenoiserHistory => _history[(int)((_frame - 1) % 2)];
@@ -168,6 +172,13 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                         _nrdDiffShInput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecShInput = Texture(width, height, Format.R16G16B16A16_Float);
                         _nrdDiffShOutput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecShOutput = Texture(width, height, Format.R16G16B16A16_Float);
                         _glassColor = Texture(width, height, Format.R16G16B16A16_Float);
+                        _glassRaw = Texture(width, height, Format.R16G16B16A16_Float);
+                        for (int i = 0; i < 2; i++)
+                        {
+                            _glassHistory[i] = Texture(width, height, Format.R32G32B32A32_Float);
+                            _glassSurfaceHistory[i] = Texture(width, height, Format.R32G32B32A32_Float);
+                            _glassNormalHistory[i] = Texture(width, height, Format.R16G16B16A16_Float);
+                        }
                     }
                 }
             }
@@ -224,7 +235,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                  new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, UavCount, 0, 0)), ShaderVisibility.All)])));
         string file = Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "Reconstruction.hlsl");
         _prepare = Compile(file, "Prepare");
-        _prepareGuides = Compile(file, "PrepareGuides");
+        _resolveGlass = Compile(file, "ResolveGlass");
         _encode = Compile(file, "Encode");
         _prepareNrd = Compile(file, "PrepareNrd");
         _composeNrd = Compile(file, "ComposeNrd");
@@ -314,6 +325,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             _pbrInputs[0] = Resource(pbr.Diffuse); _pbrInputs[1] = Resource(pbr.Specular); _pbrInputs[2] = Resource(pbr.Albedo); _pbrInputs[3] = Resource(pbr.Unfiltered); _pbrInputs[4] = Resource(pbr.SpecularGuide);
             _pbrInputs[5] = Resource(pbr.DiffuseSh); _pbrInputs[6] = Resource(pbr.SpecularSh); _pbrInputs[7] = Resource(pbr.GlassSurface);
             _pbrInputs[8] = Resource(pbr.DiffuseFactor); _pbrInputs[9] = Resource(pbr.SpecularFactor);
+            _pbrInputs[10] = Resource(pbr.GlassFallback); _pbrInputs[11] = Resource(pbr.GlassNormal);
         }
         else if (directLight != null) _pbrInputs[3] = Resource(directLight);
         _boundRaw = raw;
@@ -379,7 +391,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         int historySlot = (int)(_frame % 2);
         Srv(0, 0, _raw!); Srv(0, 1, _normals!); Srv(0, 2, _surfaces!); Srv(0, 3, _history[1 - historySlot]);
         if (pbr != null)
-            for (int set = 0; set < SetCount; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : 8 + i, _pbrInputs[i]!);
+            for (int set = 0; set < SetCount; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
         else if (directLight != null) { Srv(1, 9, _pbrInputs[3]!); Srv(2, 9, _pbrInputs[3]!); }
         Uav(0, 0, _color); Uav(0, 1, _depth); Uav(0, 2, _motion); Uav(0, 3, _reactive); Uav(0, 4, _history[historySlot]);
         Uav(4, 5, encoded);
@@ -460,19 +472,35 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 if (pbr != null && transparentBackend != null)
                 {
                     Transition(_pbrInputs[7]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Transition(_glassColor, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_pbrInputs[10]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_pbrInputs[11]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassRaw, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     End(); // The glass queue reads the completed current-frame NRD result.
-                    transparentBackend.ComposeTransparent(_color, _glassColor);
+                    transparentBackend.ComposeTransparent(_color, _glassRaw);
                     Begin();
                     Transition(_pbrInputs[7]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_glassColor, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_pbrInputs[10]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_pbrInputs[11]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassRaw, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassColor, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassSurfaceHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassNormalHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     input = _glassColor;
                     _glassComposed = true;
                     Srv(5, 2, _surfaces!); Uav(5, 2, _motion); Uav(5, 3, _reactive);
+                    Srv(5, 22, _glassHistory[1 - historySlot]); Srv(5, 23, _glassSurfaceHistory[1 - historySlot]);
+                    Srv(5, 24, _glassNormalHistory[1 - historySlot]); Srv(5, 25, _glassRaw);
+                    Uav(5, 0, _glassColor); Uav(5, 4, _glassHistory[historySlot]);
+                    Uav(5, 10, _glassSurfaceHistory[historySlot]); Uav(5, 11, _glassNormalHistory[historySlot]);
                     Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_reactive, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Bind(5, _prepareGuides, 1);
+                    Bind(5, _resolveGlass, 1);
                     _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
+                    Transition(_glassColor, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassSurfaceHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassNormalHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_motion, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_reactive, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                 }

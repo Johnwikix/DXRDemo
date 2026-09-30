@@ -54,14 +54,38 @@ internal static class SceneProbe
         }
         Trace(47,2); var noisy=raw.ToArray();
         using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
+        double[] noisySum=new double[width*height*3],noisySquare=new double[width*height*3];
+        double[] stableSum=new double[width*height*3],stableSquare=new double[width*height*3];
+        double Compress(double value)=>Math.Max(value,0)/(1+Math.Max(value,0));
         for(int frame=0;frame<48;frame++)
         {
             Trace(frame,2,true);Require(sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
                 HdrRenderParameters.Default,1.0/60,guide,view,signals,-2,transparentBackend:backend),"Glass NRD execution failed");
+            if(frame>=32)
+            {
+                var before=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
+                var after=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
+                for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)
+                {
+                    int k=p*3+c;double a=Compress(before[p*4+c]),b=Compress(after[p*4+c]);
+                    noisySum[k]+=a;noisySquare[k]+=a*a;stableSum[k]+=b;stableSquare[k]+=b*b;
+                }
+            }
         }
         Require(sr.Status.NrdActive,"Glass validation ran a fallback");
         var denoised=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
-        double rawError=0,filteredError=0;double Compress(double value)=>Math.Max(value,0)/(1+Math.Max(value,0));
+        double rawVariance=0,stableVariance=0,rawMean=0,stableMean=0;
+        for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)
+        {
+            int k=p*3+c;double a=noisySum[k]/16,b=stableSum[k]/16;
+            rawVariance+=Math.Max(0,noisySquare[k]/16-a*a);stableVariance+=Math.Max(0,stableSquare[k]/16-b*b);
+            rawMean+=a;stableMean+=b;
+        }
+        double rawRms=Math.Sqrt(rawVariance/(pixels*3)),stableRms=Math.Sqrt(stableVariance/(pixels*3));
+        Console.WriteLine($"Glass stationary noise: raw RMS={rawRms:F6}, resolved RMS={stableRms:F6}, mapped mean={stableMean/rawMean:F5}");
+        Require(stableRms<rawRms*.7,"Glass cache misses bypass temporal stabilization");
+        Require(stableMean/rawMean is >.85 and <1.15,"Glass stabilization changes mean mapped brightness");
+        double rawError=0,filteredError=0;
         for(int y=0;y<height;y++)for(int x=0;x<width;x++)if(mask[y*width+x])
         {
             int p=y*width+x;Float4 v=noisy[y,x];
@@ -72,6 +96,63 @@ internal static class SceneProbe
         Directory.CreateDirectory("output/scenes");Save(target,"output/scenes/glass-nrd.png");
         Console.WriteLine($"Glass: {pixels} pixels, 512-SPP reference, 2-SPP raw RMSE={rawError:F6}, NRD RMSE={filteredError:F6}");
         Require(filteredError<rawError*.9,"Glass denoising does not reduce noise");
+        void SuperResolvedNoise(ReconstructionMode mode)
+        {
+            if(!sr.Status.Supports(mode))return;
+            sr.Configure(mode,67,width,height,true,true);
+            int w=sr.InputWidth,h=sr.InputHeight;
+            using var input=device.AllocateReadWriteTexture2D<Float4>(w,h);
+            using var inputNormals=device.AllocateReadWriteTexture2D<Rgba32,Float4>(w,h);
+            using var inputSurface=device.AllocateReadWriteTexture2D<Float4>(w,h);
+            using var inputGuide=device.AllocateReadWriteTexture2D<Float4>(w,h);
+            using var inputSignals=new PbrSignals(device,w,h);
+            double[] sums=new double[w*h*3],squares=new double[w*h*3],resolvedSums=new double[w*h*3],resolvedSquares=new double[w*h*3];
+            var interior=new bool[w*h];int measuredPixels=0;
+            void Frame(int frame)
+            {
+                Float2 jitter=sr.Jitter();backend.Trace(view,frame,2,10,jitter,0,input,inputNormals,inputSurface,inputGuide,inputSignals,opaqueForNrd:true);
+                Require(sr.Execute(input,inputNormals,inputSurface,target,default,2.7f,jitter,RayTraceDenoiserMode.NrdRelax,
+                    HdrRenderParameters.Default,1.0/60,inputGuide,view,inputSignals,-2,transparentBackend:backend),sr.Status.Message);
+            }
+            for(int frame=0;frame<48;frame++)
+            {
+                Frame(frame);if(frame<32)continue;
+                if(frame==32)
+                {
+                    var glass=inputSignals.GlassSurface.ToArray();
+                    for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++)
+                    {
+                        bool valid=true;for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++)valid&=glass[y+dy,x+dx].W<-1;
+                        if(valid){interior[y*w+x]=true;measuredPixels++;}
+                    }
+                }
+                var before=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
+                var after=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
+                for(int p=0;p<interior.Length;p++)if(interior[p])for(int c=0;c<3;c++)
+                {
+                    int k=p*3+c;double a=Compress(before[p*4+c]),b=Compress(after[p*4+c]);
+                    sums[k]+=a;squares[k]+=a*a;resolvedSums[k]+=b;resolvedSquares[k]+=b*b;
+                }
+            }
+            Require(measuredPixels>100,"Actual SR glass noise fixture is empty");
+            double aVariance=0,bVariance=0,aMean=0,bMean=0;
+            for(int p=0;p<interior.Length;p++)if(interior[p])for(int c=0;c<3;c++)
+            {
+                int k=p*3+c;double a=sums[k]/16,b=resolvedSums[k]/16;
+                aVariance+=Math.Max(0,squares[k]/16-a*a);bVariance+=Math.Max(0,resolvedSquares[k]/16-b*b);aMean+=a;bMean+=b;
+            }
+            double aRms=Math.Sqrt(aVariance/(measuredPixels*3)),bRms=Math.Sqrt(bVariance/(measuredPixels*3));
+            Console.WriteLine($"Glass {mode} 67% noise: raw RMS={aRms:F6}, resolved RMS={bRms:F6}, mapped mean={bMean/aMean:F5}, {measuredPixels} pixels");
+            Require(sr.Status.NrdActive&&sr.Active==mode,"Actual glass SR silently fell back");
+            Require(bRms<aRms*.85,"Glass SR cache misses bypass temporal stabilization");
+            Require(bMean/aMean is >.85 and <1.15,"Glass SR stabilization changes mean mapped brightness");
+            Save(target,$"output/scenes/glass-nrd-{mode}-67.png");
+            sr.Reset();Frame(0);
+            var resetRaw=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
+            var resetResolved=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
+            Require(resetRaw.Zip(resetResolved,(a,b)=>Math.Abs(a-b)).Max()<.001,"Glass reset retained old radiance");
+        }
+        SuperResolvedNoise(ReconstructionMode.Fsr);SuperResolvedNoise(ReconstructionMode.XeSS);
         sr.Configure(ReconstructionMode.Off,100,width,height,false,true);
         Trace(47,2);
         sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.None,

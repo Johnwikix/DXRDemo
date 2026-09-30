@@ -8,7 +8,11 @@ control deliberately uses pane guides and must reproduce
 blur. Each available FSR/XeSS/DLSS provider runs at 67% and 100%; unsupported
 providers are explicitly skipped. Images are saved under `output/glass-sr/`.
 `--glass ../../Samples/RainyCorner/RainyCorner.glb` separately checks non-unit IOR
-and noise against a 512-SPP reference in the actual refractive scene. Current
+and noise against a 512-SPP reference in the actual refractive scene. It also
+measures frame-to-frame glass noise before/after resolve at native size and at
+67% FSR/XeSS input size, checks mapped brightness, and verifies history reset.
+The noise regression fails when glass cache misses bypass temporal accumulation.
+Current
 metrics and limitations are recorded in [NRD verification](../../docs/NRD.md).
 The custom RELAX mode has been removed; current denoisers are Off, Temporal and
 official NRD. Old verification counts below are historical.

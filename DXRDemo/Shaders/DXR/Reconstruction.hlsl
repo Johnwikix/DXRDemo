@@ -37,6 +37,12 @@ Texture2D<float4> PbrDiffuseFactor : register(t16);
 Texture2D<float4> PbrSpecularFactor : register(t17);
 Texture2D<float4> DiffuseShReconstructed : register(t18);
 Texture2D<float4> SpecularShReconstructed : register(t19);
+Texture2D<float4> PbrGlassFallback : register(t20);
+Texture2D<float4> PbrGlassNormal : register(t21); // World normal and one-based instance ID (also identifies its material).
+Texture2D<float4> GlassHistory : register(t22); // Linear radiance and accumulated sample count.
+Texture2D<float4> GlassPreviousSurface : register(t23); // World position and -(instance ID + 1), 0 outside glass.
+Texture2D<float4> GlassPreviousNormal : register(t24);
+Texture2D<float4> GlassRaw : register(t25);
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float> Depth : register(u1);
 RWTexture2D<float2> Motion : register(u2);
@@ -47,6 +53,8 @@ RWTexture2D<float4> PackedSpecular : register(u6);
 RWTexture2D<float> SpecularHitDistance : register(u7);
 RWTexture2D<float4> PackedDiffuseSh : register(u8);
 RWTexture2D<float4> PackedSpecularSh : register(u9);
+RWTexture2D<float4> NextGlassSurface : register(u10);
+RWTexture2D<float4> NextGlassNormal : register(u11);
 
 [numthreads(8, 8, 1)]
 void PrepareRr(uint3 tid : SV_DispatchThreadID)
@@ -137,8 +145,36 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
     Color[p] = float4(min(value, 65000), variance);
 }
 
+float3 GlassSignal(int2 p)
+{
+    // Vendor SR needs the jittered, already-denoised opaque detail unchanged.
+    // Only the uncached contribution needs another history; native output also needs glass TAA.
+    return max(Lighting.z != 0 ? PbrGlassFallback[p].rgb : GlassRaw[p].rgb, 0);
+}
+
+bool ReprojectGlass(float2 pixel, float previousZ, float4 normal, out float4 history)
+{
+    float2 position = pixel - Jitter.zw - .5;
+    int2 base = int2(floor(position)); float2 fraction = frac(position);
+    history = 0; float weights = 0;
+    [unroll] for (int y = 0; y < 2; y++) [unroll] for (int x = 0; x < 2; x++)
+    {
+        int2 q = base + int2(x, y);
+        if (any(q < 0) || any(q >= int2(Size.xy))) continue;
+        float4 surface = GlassPreviousSurface[q], oldNormal = GlassPreviousNormal[q], tap = GlassHistory[q];
+        float z = dot(surface.xyz - PreviousOrigin.xyz, PreviousForward.xyz);
+        if (surface.w >= 0 || tap.w < 1 || -surface.w != normal.w || dot(oldNormal.xyz, normal.xyz) < .97
+            || abs(z - previousZ) > max(.005, previousZ * .005)) continue;
+        float weight = (x == 0 ? 1 - fraction.x : fraction.x) * (y == 0 ? 1 - fraction.y : fraction.y);
+        history += tap * weight; weights += weight;
+    }
+    history /= max(weights, 1e-8);
+    history.w *= weights;
+    return weights > .05;
+}
+
 [numthreads(8, 8, 1)]
-void PrepareGuides(uint3 tid : SV_DispatchThreadID)
+void ResolveGlass(uint3 tid : SV_DispatchThreadID)
 {
     int2 p = tid.xy;
     if (any(p >= int2(Size.xy))) return;
@@ -148,12 +184,43 @@ void PrepareGuides(uint3 tid : SV_DispatchThreadID)
     float3 currentDirection = sky ? surface.xyz : surface.xyz - CameraOrigin.xyz;
     float3 previousDirection = sky ? surface.xyz : surface.xyz - PreviousOrigin.xyz;
     float previousZ = dot(previousDirection, PreviousForward.xyz);
-    float2 motion = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz)
+    float2 previousPixel = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz);
+    float2 motion = previousPixel
         - Project(currentDirection, CameraForward.xyz, CameraRight.xyz, CameraUp.xyz);
     Motion[p] = Control.x != 0 || previousZ <= 0 ? 0 : clamp(motion, -32700, 32700);
     // Keep the opaque background depth, patch closest-glass MV after composition as in NRD-Sample.
     // Deterministically traced first reflection/refraction lobes can retain SR history.
     Reactive[p] = glass ? 0.1 : PbrAlbedo[p].a;
+    float4 normal = PbrGlassNormal[p];
+    // Keep instance/material identity in FP32 history; normals can safely use FP16.
+    NextGlassSurface[p] = float4(surface.xyz, glass ? -normal.w : 0);
+    NextGlassNormal[p] = float4(normal.xyz, 0);
+    float3 current = GlassSignal(p), value = current;
+    float count = glass ? 1 : 0;
+    if (glass && Control.x == 0 && previousZ > 0)
+    {
+        float4 history;
+        if (ReprojectGlass(previousPixel, previousZ, normal, history))
+        {
+            float3 lo = current, hi = current;
+            [unroll] for (int y = -1; y <= 1; y++) [unroll] for (int x = -1; x <= 1; x++)
+            {
+                int2 q = clamp(p + int2(x, y), 0, int2(Size.xy) - 1);
+                float4 qNormal = PbrGlassNormal[q];
+                if (PbrGlassSurface[q].w >= -1 || qNormal.w != normal.w || dot(qNormal.xyz, normal.xyz) < .8) continue;
+                float3 tap = GlassSignal(q); lo = min(lo, tap); hi = max(hi, tap);
+            }
+            // Temporal accumulation only: the neighborhood bounds reject stale history,
+            // without averaging neighboring colors across detail behind the pane.
+            float maxHistory = length(motion) > .25 ? 7 : 63;
+            count = min(history.w, maxHistory) + 1;
+            value = lerp(clamp(history.rgb, lo, hi), current, 1 / count);
+        }
+    }
+    NextHistory[p] = float4(glass ? value : 0, count);
+    float3 color = GlassRaw[p].rgb;
+    if (glass) color = Lighting.z != 0 ? max(color - PbrGlassFallback[p].rgb, 0) + value : value;
+    Color[p] = float4(min(max(color, 0), 65000), 1);
 }
 
 float3 DiffuseAlbedo(int2 pixel)

@@ -30,7 +30,10 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    PBR scenes use its SH variant with material demodulation, SG resolve and
    re-jittering before SR. Glass is composited after opaque denoising, using
    current-frame reprojection and traced cache misses; its closest-surface motion
-   replaces background motion for SR. The custom RELAX/A-trous implementation
+   replaces background motion for SR. Traced fallback lighting has a separate
+   glass history, validated by instance, normal and depth. Cached opaque detail
+   stays in the current frame for SR; native output accumulates the complete
+   glass radiance. The custom RELAX/A-trous implementation
    has been removed; see [NRD integration](NRD.md). None of these
    modes implements DLSS Ray Reconstruction. The separate DLSSD mode instead
    consumes the original noisy radiance and bypasses all conventional denoisers.
