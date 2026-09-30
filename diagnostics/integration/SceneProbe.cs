@@ -56,20 +56,32 @@ internal static class SceneProbe
         using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
         double[] noisySum=new double[width*height*3],noisySquare=new double[width*height*3];
         double[] stableSum=new double[width*height*3],stableSquare=new double[width*height*3];
+        double[] linearSum=new double[width*height*3];
+        double earlyRms=0;
         double Compress(double value)=>Math.Max(value,0)/(1+Math.Max(value,0));
-        for(int frame=0;frame<48;frame++)
+        const int accumulationFrames=256;
+        for(int frame=0;frame<accumulationFrames;frame++)
         {
             Trace(frame,2,true);Require(sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
                 HdrRenderParameters.Default,1.0/60,guide,view,signals,-2,transparentBackend:backend),"Glass NRD execution failed");
-            if(frame>=32)
+            var before=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
+            for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)linearSum[p*3+c]+=before[p*4+c];
+            if(frame is >=32 and <48 || frame>=accumulationFrames-16)
             {
-                var before=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
                 var after=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
                 for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)
                 {
                     int k=p*3+c;double a=Compress(before[p*4+c]),b=Compress(after[p*4+c]);
                     noisySum[k]+=a;noisySquare[k]+=a*a;stableSum[k]+=b;stableSquare[k]+=b*b;
                 }
+            }
+            if(frame==47)
+            {
+                double variance=0;
+                for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)
+                {int k=p*3+c;double temporalMean=stableSum[k]/16;variance+=Math.Max(0,stableSquare[k]/16-temporalMean*temporalMean);}
+                earlyRms=Math.Sqrt(variance/(pixels*3));
+                Array.Clear(noisySum);Array.Clear(noisySquare);Array.Clear(stableSum);Array.Clear(stableSquare);
             }
         }
         Require(sr.Status.NrdActive,"Glass validation ran a fallback");
@@ -82,9 +94,19 @@ internal static class SceneProbe
             rawMean+=a;stableMean+=b;
         }
         double rawRms=Math.Sqrt(rawVariance/(pixels*3)),stableRms=Math.Sqrt(stableVariance/(pixels*3));
-        Console.WriteLine($"Glass stationary noise: raw RMS={rawRms:F6}, resolved RMS={stableRms:F6}, mapped mean={stableMean/rawMean:F5}");
+        Console.WriteLine($"Glass stationary noise: raw RMS={rawRms:F6}, resolved RMS={stableRms:F6}, 48-frame RMS={earlyRms:F6}, mapped mean={stableMean/rawMean:F5}");
         Require(stableRms<rawRms*.7,"Glass cache misses bypass temporal stabilization");
+        Require(stableRms<earlyRms*.5,"Stationary glass stops converging after its old 64-frame limit");
         Require(stableMean/rawMean is >.85 and <1.15,"Glass stabilization changes mean mapped brightness");
+        var runningMean=ReconstructionProbe.ReadTexture(native,sr.GlassAccumulation,false);
+        double averageError=0;
+        for(int p=0;p<mask.Length;p++)if(mask[p])for(int c=0;c<3;c++)
+        {
+            Require(runningMean[p*4+3]==accumulationFrames,"Glass sample count is capped or unexpectedly reset");
+            averageError=Math.Max(averageError,Math.Abs(runningMean[p*4+c]-linearSum[p*3+c]/accumulationFrames));
+        }
+        Require(averageError<.00001,"Glass accumulation clips or reprojects the stationary running mean");
+        Console.WriteLine($"Glass {accumulationFrames}-frame running mean: max error={averageError:E3}, no clipped or reprojected history");
         double rawError=0,filteredError=0;
         for(int y=0;y<height;y++)for(int x=0;x<width;x++)if(mask[y*width+x])
         {
@@ -107,6 +129,9 @@ internal static class SceneProbe
             using var inputGuide=device.AllocateReadWriteTexture2D<Float4>(w,h);
             using var inputSignals=new PbrSignals(device,w,h);
             double[] sums=new double[w*h*3],squares=new double[w*h*3],resolvedSums=new double[w*h*3],resolvedSquares=new double[w*h*3];
+            double[] fallbackSum=new double[w*h*3],historySum=new double[w*h*3],historySquare=new double[w*h*3];
+            var stableInstance=new bool[w*h];var instance=new float[w*h];
+            double earlyFallbackRms=0;
             var interior=new bool[w*h];int measuredPixels=0;
             void Frame(int frame)
             {
@@ -114,9 +139,17 @@ internal static class SceneProbe
                 Require(sr.Execute(input,inputNormals,inputSurface,target,default,2.7f,jitter,RayTraceDenoiserMode.NrdRelax,
                     HdrRenderParameters.Default,1.0/60,inputGuide,view,inputSignals,-2,transparentBackend:backend),sr.Status.Message);
             }
-            for(int frame=0;frame<48;frame++)
+            for(int frame=0;frame<accumulationFrames;frame++)
             {
-                Frame(frame);if(frame<32)continue;
+                Frame(frame);
+                var fallback=inputSignals.GlassFallback.ToArray();var glassNormals=inputSignals.GlassNormal.ToArray();
+                for(int y=0;y<h;y++)for(int x=0;x<w;x++)
+                {
+                    int p=y*w+x;float id=glassNormals[y,x].W;
+                    if(frame==0){instance[p]=id;stableInstance[p]=id>0;}else stableInstance[p]&=id==instance[p];
+                    Float4 v=fallback[y,x];fallbackSum[p*3]+=v.X;fallbackSum[p*3+1]+=v.Y;fallbackSum[p*3+2]+=v.Z;
+                }
+                if(!(frame is >=32 and <48 || frame>=accumulationFrames-16))continue;
                 if(frame==32)
                 {
                     var glass=inputSignals.GlassSurface.ToArray();
@@ -128,21 +161,45 @@ internal static class SceneProbe
                 }
                 var before=ReconstructionProbe.ReadTexture(native,sr.GlassUnfilteredColor,true);
                 var after=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
+                var history=ReconstructionProbe.ReadTexture(native,sr.GlassAccumulation,false);
                 for(int p=0;p<interior.Length;p++)if(interior[p])for(int c=0;c<3;c++)
                 {
                     int k=p*3+c;double a=Compress(before[p*4+c]),b=Compress(after[p*4+c]);
                     sums[k]+=a;squares[k]+=a*a;resolvedSums[k]+=b;resolvedSquares[k]+=b*b;
+                    double f=Compress(history[p*4+c]);historySum[k]+=f;historySquare[k]+=f*f;
+                }
+                if(frame==47)
+                {
+                    double variance=0;
+                    for(int p=0;p<interior.Length;p++)if(interior[p])for(int c=0;c<3;c++)
+                    {int k=p*3+c;double m=historySum[k]/16;variance+=Math.Max(0,historySquare[k]/16-m*m);}
+                    earlyFallbackRms=Math.Sqrt(variance/(measuredPixels*3));
+                    Array.Clear(sums);Array.Clear(squares);Array.Clear(resolvedSums);Array.Clear(resolvedSquares);
+                    Array.Clear(historySum);Array.Clear(historySquare);
                 }
             }
             Require(measuredPixels>100,"Actual SR glass noise fixture is empty");
-            double aVariance=0,bVariance=0,aMean=0,bMean=0;
+            double aVariance=0,bVariance=0,aMean=0,bMean=0,fallbackVariance=0;
             for(int p=0;p<interior.Length;p++)if(interior[p])for(int c=0;c<3;c++)
             {
                 int k=p*3+c;double a=sums[k]/16,b=resolvedSums[k]/16;
                 aVariance+=Math.Max(0,squares[k]/16-a*a);bVariance+=Math.Max(0,resolvedSquares[k]/16-b*b);aMean+=a;bMean+=b;
+                double f=historySum[k]/16;fallbackVariance+=Math.Max(0,historySquare[k]/16-f*f);
             }
             double aRms=Math.Sqrt(aVariance/(measuredPixels*3)),bRms=Math.Sqrt(bVariance/(measuredPixels*3));
+            double fallbackRms=Math.Sqrt(fallbackVariance/(measuredPixels*3));
             Console.WriteLine($"Glass {mode} 67% noise: raw RMS={aRms:F6}, resolved RMS={bRms:F6}, mapped mean={bMean/aMean:F5}, {measuredPixels} pixels");
+            var accumulated=ReconstructionProbe.ReadTexture(native,sr.GlassAccumulation,false);
+            double maxMeanError=0;int accumulatedPixels=0;
+            for(int p=0;p<interior.Length;p++)if(interior[p]&&stableInstance[p])
+            {
+                Require(accumulated[p*4+3]==accumulationFrames,"SR jitter resets or caps stable-instance glass history");
+                accumulatedPixels++;
+                for(int c=0;c<3;c++)maxMeanError=Math.Max(maxMeanError,Math.Abs(accumulated[p*4+c]-fallbackSum[p*3+c]/accumulationFrames));
+            }
+            Require(accumulatedPixels>100&&maxMeanError<.00001,"SR fallback accumulation is not an unbiased running mean");
+            Console.WriteLine($"Glass {mode} fallback convergence: 48-frame RMS={earlyFallbackRms:F6}, {accumulationFrames}-frame RMS={fallbackRms:F6}, mean max error={maxMeanError:E3}, {accumulatedPixels} stable pixels");
+            Require(fallbackRms<earlyFallbackRms*.5,"SR glass fallback stops converging after 64 frames");
             Require(sr.Status.NrdActive&&sr.Active==mode,"Actual glass SR silently fell back");
             Require(bRms<aRms*.85,"Glass SR cache misses bypass temporal stabilization");
             Require(bMean/aMean is >.85 and <1.15,"Glass SR stabilization changes mean mapped brightness");

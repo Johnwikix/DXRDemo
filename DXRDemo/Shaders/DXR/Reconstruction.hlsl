@@ -16,6 +16,7 @@ cbuffer FrameConstants : register(b0)
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
     float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
     float4 Lighting;        // separate primary direct light in the packaged mesh path
+    float4 GlassControl;    // reset glass on any unjittered camera or explicit history change
 };
 
 Texture2D<float4> Raw : register(t0);
@@ -39,9 +40,9 @@ Texture2D<float4> DiffuseShReconstructed : register(t18);
 Texture2D<float4> SpecularShReconstructed : register(t19);
 Texture2D<float4> PbrGlassFallback : register(t20);
 Texture2D<float4> PbrGlassNormal : register(t21); // World normal and one-based instance ID (also identifies its material).
-Texture2D<float4> GlassHistory : register(t22); // Linear radiance and accumulated sample count.
-Texture2D<float4> GlassPreviousSurface : register(t23); // World position and -(instance ID + 1), 0 outside glass.
-Texture2D<float4> GlassPreviousNormal : register(t24);
+Texture2D<float4> GlassHistory : register(t22); // Linear running mean, approximate frame count for diagnostics.
+Texture2D<uint2> GlassSampleCounts : register(t23); // Exact 64-bit count, low/high words; no history-length cap.
+Texture2D<float4> GlassCompensation : register(t24); // Compensated mean update error, one-based instance ID.
 Texture2D<float4> GlassRaw : register(t25);
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float> Depth : register(u1);
@@ -53,8 +54,8 @@ RWTexture2D<float4> PackedSpecular : register(u6);
 RWTexture2D<float> SpecularHitDistance : register(u7);
 RWTexture2D<float4> PackedDiffuseSh : register(u8);
 RWTexture2D<float4> PackedSpecularSh : register(u9);
-RWTexture2D<float4> NextGlassSurface : register(u10);
-RWTexture2D<float4> NextGlassNormal : register(u11);
+RWTexture2D<uint2> NextGlassSampleCounts : register(u10);
+RWTexture2D<float4> NextGlassCompensation : register(u11);
 
 [numthreads(8, 8, 1)]
 void PrepareRr(uint3 tid : SV_DispatchThreadID)
@@ -152,27 +153,6 @@ float3 GlassSignal(int2 p)
     return max(Lighting.z != 0 ? PbrGlassFallback[p].rgb : GlassRaw[p].rgb, 0);
 }
 
-bool ReprojectGlass(float2 pixel, float previousZ, float4 normal, out float4 history)
-{
-    float2 position = pixel - Jitter.zw - .5;
-    int2 base = int2(floor(position)); float2 fraction = frac(position);
-    history = 0; float weights = 0;
-    [unroll] for (int y = 0; y < 2; y++) [unroll] for (int x = 0; x < 2; x++)
-    {
-        int2 q = base + int2(x, y);
-        if (any(q < 0) || any(q >= int2(Size.xy))) continue;
-        float4 surface = GlassPreviousSurface[q], oldNormal = GlassPreviousNormal[q], tap = GlassHistory[q];
-        float z = dot(surface.xyz - PreviousOrigin.xyz, PreviousForward.xyz);
-        if (surface.w >= 0 || tap.w < 1 || -surface.w != normal.w || dot(oldNormal.xyz, normal.xyz) < .97
-            || abs(z - previousZ) > max(.005, previousZ * .005)) continue;
-        float weight = (x == 0 ? 1 - fraction.x : fraction.x) * (y == 0 ? 1 - fraction.y : fraction.y);
-        history += tap * weight; weights += weight;
-    }
-    history /= max(weights, 1e-8);
-    history.w *= weights;
-    return weights > .05;
-}
-
 [numthreads(8, 8, 1)]
 void ResolveGlass(uint3 tid : SV_DispatchThreadID)
 {
@@ -192,32 +172,32 @@ void ResolveGlass(uint3 tid : SV_DispatchThreadID)
     // Deterministically traced first reflection/refraction lobes can retain SR history.
     Reactive[p] = glass ? 0.1 : PbrAlbedo[p].a;
     float4 normal = PbrGlassNormal[p];
-    // Keep instance/material identity in FP32 history; normals can safely use FP16.
-    NextGlassSurface[p] = float4(surface.xyz, glass ? -normal.w : 0);
-    NextGlassNormal[p] = float4(normal.xyz, 0);
     float3 current = GlassSignal(p), value = current;
-    float count = glass ? 1 : 0;
-    if (glass && Control.x == 0 && previousZ > 0)
+    uint2 samples = glass ? uint2(1, 0) : uint2(0, 0);
+    float3 error = 0;
+    if (glass && GlassControl.x == 0)
     {
-        float4 history;
-        if (ReprojectGlass(previousPixel, previousZ, normal, history))
+        uint2 oldSamples = GlassSampleCounts[p];
+        float4 oldCompensation = GlassCompensation[p];
+        if (any(oldSamples != 0) && oldCompensation.w == normal.w)
         {
-            float3 lo = current, hi = current;
-            [unroll] for (int y = -1; y <= 1; y++) [unroll] for (int x = -1; x <= 1; x++)
-            {
-                int2 q = clamp(p + int2(x, y), 0, int2(Size.xy) - 1);
-                float4 qNormal = PbrGlassNormal[q];
-                if (PbrGlassSurface[q].w >= -1 || qNormal.w != normal.w || dot(qNormal.xyz, normal.xyz) < .8) continue;
-                float3 tap = GlassSignal(q); lo = min(lo, tap); hi = max(hi, tap);
-            }
-            // Temporal accumulation only: the neighborhood bounds reject stale history,
-            // without averaging neighboring colors across detail behind the pane.
-            float maxHistory = length(motion) > .25 ? 7 : 63;
-            count = min(history.w, maxHistory) + 1;
-            value = lerp(clamp(history.rgb, lo, hi), current, 1 / count);
+            samples.x = oldSamples.x + 1;
+            samples.y = oldSamples.y + (samples.x == 0 ? 1 : 0);
+            float count = float(samples.y) * 4294967296.0 + float(samples.x);
+            float3 oldMean = GlassHistory[p].rgb;
+            // The camera is fixed: read this pixel directly, with no repeated resampling
+            // or neighborhood clipping. Each frame has equal weight, including after 64 frames.
+            // Preserve tiny late updates rather than rounding them away in a long FP32 history.
+            precise float3 update = (current - oldMean) / count - oldCompensation.rgb;
+            precise float3 mean = oldMean + update;
+            precise float3 remainder = (mean - oldMean) - update;
+            value = mean; error = remainder;
         }
     }
+    float count = float(samples.y) * 4294967296.0 + float(samples.x);
     NextHistory[p] = float4(glass ? value : 0, count);
+    NextGlassSampleCounts[p] = samples;
+    NextGlassCompensation[p] = float4(error, glass ? normal.w : 0);
     float3 color = GlassRaw[p].rgb;
     if (glass) color = Lighting.z != 0 ? max(color - PbrGlassFallback[p].rgb, 0) + value : value;
     Color[p] = float4(min(max(color, 0), 65000), 1);

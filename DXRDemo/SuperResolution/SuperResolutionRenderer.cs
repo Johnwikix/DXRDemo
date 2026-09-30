@@ -39,8 +39,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private ID3D12Resource _nrdDiffShInput = null!, _nrdSpecShInput = null!, _nrdDiffShOutput = null!, _nrdSpecShOutput = null!;
     private ID3D12Resource _glassColor = null!, _glassRaw = null!;
     private readonly ID3D12Resource[] _glassHistory = new ID3D12Resource[2];
-    private readonly ID3D12Resource[] _glassSurfaceHistory = new ID3D12Resource[2];
-    private readonly ID3D12Resource[] _glassNormalHistory = new ID3D12Resource[2];
+    private readonly ID3D12Resource[] _glassSampleCounts = new ID3D12Resource[2];
+    private readonly ID3D12Resource[] _glassCompensation = new ID3D12Resource[2];
     private readonly ID3D12Resource?[] _pbrInputs = new ID3D12Resource?[12];
     private ID3D12Resource _rrNormals = null!, _rrHitDistance = null!;
     private readonly ID3D12Resource[] _history = new ID3D12Resource[2];
@@ -98,6 +98,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource LinearOutput => _output;
     internal ID3D12Resource DenoisedColor => _glassComposed ? _glassColor : _color;
     internal ID3D12Resource GlassUnfilteredColor => _glassRaw;
+    /// <summary>Gets the glass running mean and frame count for convergence regression checks.</summary>
+    internal ID3D12Resource GlassAccumulation => _glassHistory[(int)((_frame - 1) % 2)];
     internal ID3D12Resource NrdViewZ => _viewZ;
     /// <summary>Gets the most recently written linear denoiser history for offscreen regression checks.</summary>
     internal ID3D12Resource DenoiserHistory => _history[(int)((_frame - 1) % 2)];
@@ -176,8 +178,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                         for (int i = 0; i < 2; i++)
                         {
                             _glassHistory[i] = Texture(width, height, Format.R32G32B32A32_Float);
-                            _glassSurfaceHistory[i] = Texture(width, height, Format.R32G32B32A32_Float);
-                            _glassNormalHistory[i] = Texture(width, height, Format.R16G16B16A16_Float);
+                            _glassSampleCounts[i] = Texture(width, height, Format.R32G32_UInt);
+                            _glassCompensation[i] = Texture(width, height, Format.R32G32B32A32_Float);
                         }
                     }
                 }
@@ -372,6 +374,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         BindInputs(raw, normals, surfaces, nrdNormals, pbr, directLight);
         ID3D12Resource encoded = BindTarget(target);
         CameraFrame camera = cameraFrame ?? CameraFrame.FromOrbit(orbit.X, orbit.Y, distance);
+        // .NET 10: 值类型相机比较无分配；SR 采样抖动不属于镜头变化。
+        bool resetGlass = _reset || camera != _previousCamera;
         if (_reset) { _previousCamera = camera; _previousJitter = jitter; }
         Constants data = new()
         {
@@ -383,7 +387,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Control = new(_reset ? 1 : 0, (int)denoiser, Math.Min(_frame, 31), 0),
             Output = new(hdr.IsHdrEnabled ? 1 : 0, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, exposure),
             Projection = new(MathF.Tan(camera.VerticalFov * .5f), camera.Near, camera.Far, pbr != null ? 1 : 0),
-            Lighting = new(directLight != null ? 1 : 0, 0, Active != ReconstructionMode.Off ? 1 : 0, 0)
+            Lighting = new(directLight != null ? 1 : 0, 0, Active != ReconstructionMode.Off ? 1 : 0, 0),
+            GlassControl = new(resetGlass ? 1 : 0, 0, 0, 0)
         };
         *(Constants*)_constantPointer = data;
         data.Lighting.Y = transparentBackend != null ? 1 : 0;
@@ -484,23 +489,23 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     Transition(_glassRaw, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_glassColor, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_glassHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Transition(_glassSurfaceHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Transition(_glassNormalHistory[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassSampleCounts[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Transition(_glassCompensation[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     input = _glassColor;
                     _glassComposed = true;
                     Srv(5, 2, _surfaces!); Uav(5, 2, _motion); Uav(5, 3, _reactive);
-                    Srv(5, 22, _glassHistory[1 - historySlot]); Srv(5, 23, _glassSurfaceHistory[1 - historySlot]);
-                    Srv(5, 24, _glassNormalHistory[1 - historySlot]); Srv(5, 25, _glassRaw);
+                    Srv(5, 22, _glassHistory[1 - historySlot]); Srv(5, 23, _glassSampleCounts[1 - historySlot]);
+                    Srv(5, 24, _glassCompensation[1 - historySlot]); Srv(5, 25, _glassRaw);
                     Uav(5, 0, _glassColor); Uav(5, 4, _glassHistory[historySlot]);
-                    Uav(5, 10, _glassSurfaceHistory[historySlot]); Uav(5, 11, _glassNormalHistory[historySlot]);
+                    Uav(5, 10, _glassSampleCounts[historySlot]); Uav(5, 11, _glassCompensation[historySlot]);
                     Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_reactive, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Bind(5, _resolveGlass, 1);
                     _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
                     Transition(_glassColor, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_glassHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_glassSurfaceHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_glassNormalHistory[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassSampleCounts[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    Transition(_glassCompensation[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_motion, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                     Transition(_reactive, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                 }
@@ -650,7 +655,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     {
         internal Vector4 Origin, Forward, Right, Up, PreviousOrigin, PreviousForward, PreviousRight, PreviousUp;
         internal Vector4 Size, Jitter, Control, Output;
-        internal Vector4 Projection, Lighting;
+        internal Vector4 Projection, Lighting, GlassControl;
     }
 
 }

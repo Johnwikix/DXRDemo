@@ -46,7 +46,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 
 ### 降噪 / 超分
 
-- **降噪**：关闭、时间累积、**NVIDIA NRD · RELAX** 三档；PBR 使用官方 RELAX_DIFFUSE_SPECULAR_SH、材质去调制、SG resolve 和 SR 前的 re-jittering。玻璃在不透明表面降噪后合成，使用当前帧重投影、独立运动矢量和带几何校验的玻璃时间历史，稳定缓存未命中的光照。旧 RELAX 风格实现已移除，旧设置自动迁移到 NRD。
+- **降噪**：关闭、时间累积、**NVIDIA NRD · RELAX** 三档；PBR 使用官方 RELAX_DIFFUSE_SPECULAR_SH、材质去调制、SG resolve 和 SR 前的 re-jittering。玻璃在不透明表面降噪后合成，使用当前帧重投影和独立运动矢量；静止镜头下玻璃持续累积，不设帧数上限，镜头变化立即重置，SR 采样抖动不触发重置。旧 RELAX 风格实现已移除，旧设置自动迁移到 NRD。
 - **超分辨率 / 光线重建**：原生分辨率、AMD FSR 3.1、Intel XeSS、NVIDIA DLSS SR、**NVIDIA DLSS Ray Reconstruction（DLSSD，已在 RTX 上完成运行验证）**；统一 **1–100% 渲染比例**滑块（默认 67%）；不支持的算法在 UI 中禁用；初始化失败显示具体回退原因
 - NR 与 NRD 正交：可单独开 NRD、可与 FSR/XeSS/DLSS SR 组合；启用 DLSSD 时旁路 NRD 和常规降噪
 

@@ -43,11 +43,14 @@ The corrected sequence follows the NRD README and its transparent sample:
 5. Resolve glass history explicitly. With SR, accumulate only lighting that did
    not come from the denoised opaque cache; cached, re-jittered detail stays in the
    current frame. At native resolution, accumulate the complete glass radiance.
-   Bilinear history lookup validates the closest instance (and its material),
-   normal and depth. Current-neighborhood bounds reject stale history without
-   averaging neighboring colors. Static history is limited to 64 samples,
-   reduced to 8 when motion exceeds 0.25 input pixels. Camera cuts, lighting/scene
-   changes, sample/bounce changes and size/mode transitions use the existing reset.
+   A stationary camera uses a same-pixel running mean with no history-length cap,
+   bilinear history resampling or neighborhood clipping. Each frame receives
+   weight `1 / frameCount`; two integer words retain the exact 64-bit count and
+   compensated FP32 updates preserve small late contributions. Any change to the
+   unjittered camera position, basis, FOV or clipping planes resets glass on that
+   frame. SR sampling jitter does not reset it. A pixel that changes glass instance
+   also starts fresh. Lighting/scene changes, sample/bounce changes and size/mode
+   transitions retain the existing explicit reset.
 6. Keep opaque depth for SR, but patch motion to the closest glass layer, as in
    the NRD transparent sample. Motion remains current-to-previous and unjittered.
    Glass uses a 0.1 reactive value so stable detail can retain temporal history.
@@ -56,15 +59,21 @@ NRD and SR have the same logical input/render resolution. SG resolve runs there
 before the vendor upscaler; it does not claim to create display-resolution guides.
 The first glass composition revision omitted the history for traced cache misses,
 which left low-SPP reflection/refraction noise visible. The glass resolve now
-stabilizes that contribution independently of the opaque NRD history. Curved/
+stabilizes that contribution independently of the opaque NRD history. The later
+64/8-frame capped revision still had a noise floor: resampling and clipping the
+mean every frame prevented progressive convergence. The current accumulator
+keeps the stationary mean intact and discards it immediately when the camera
+changes. Curved/
 refractive glass still follows the actual optical path;
 the closest-glass motion is a heuristic rather than exact refractive scene flow.
 
 Opaque and transparent guides are separate textures. The transparent guide stores
 the closest glass position with `w = -(rayDistance + 1)`; sky remains `w = -1`.
-Glass history stores instance identity in its FP32 position buffer, with a
-separate normal buffer. It cannot reuse a neighboring pane's history merely
-because the panes share a material. Reset prevents old lighting from surviving.
+Glass history stores a linear mean, integer frame count and FP32 compensation
+with instance identity. It cannot reuse another pane's history merely because
+the panes share a material. Reset prevents old lighting from surviving. Replacing
+the old position/normal histories uses the same total texture bytes per pixel;
+the render loop does not allocate managed buffers.
 Queues finish before borrowed textures/descriptors are reused. Cache SRVs are
 cleared after the glass fence, and linear denoised color remains a non-pixel SRV
 after execution, including the glass output.
@@ -120,7 +129,7 @@ a negative control, which reproduces the loss of detail.
 | Pipeline | Normalized contrast | Frame RMS |
 |---|---:|---:|
 | Incorrect pane guides, NRD | 0.02734 | — |
-| Corrected NRD, native 100% | 0.99929 | 0.00077 |
+| Corrected NRD, native 100% | 0.99980 | 0.00071 |
 | Corrected NRD + FSR 67% | 0.99790 | 0.00092 |
 | Corrected NRD + FSR 100% | 1.00296 | 0.00121 |
 | Corrected NRD + XeSS 67% | 0.99250 | 0.00561 |
@@ -128,25 +137,36 @@ a negative control, which reproduces the loss of detail.
 
 - All positive glass cases execute 13 official NRD dispatches. Guide readback
   verifies opaque depth and closest-glass motion separately; independent camera
-  projection checks unjittered motion. History reset and SR resize also pass,
+  projection checks unjittered motion. Translation (including a tiny change),
+  rotation, roll, FOV and clipping-plane changes all reset glass on the first
+  changed frame; stationary frames resume accumulation. SR jitter preserves the
+  count. Explicit history reset and SR resize also pass,
   with no D3D12 Error/Corruption messages. A split transmission texture checks
   that opaque texels remain in the NRD guides; metallic non-transmitting areas
   are also retained. That check fails before the material-aware primary query.
 - `--glass ../../Samples/RainyCorner/RainyCorner.glb` checks the actual refractive
   scene against an independently sampled 512-SPP reference. Across 2,991 glass
   pixels, RGB RMSE after `c / (1 + c)` compression is **0.217002** for raw 2 SPP
-  and **0.083975** for the composed NRD result (previously **0.100277** without
-  glass history). Non-unit IOR changes refraction;
+  and **0.076389** for the composed NRD result after 256 frames (previously
+  **0.083975** with capped glass history and **0.100277** without it).
+  Non-unit IOR changes refraction;
   transmission/volume import and stable primary guides pass.
-- The actual-scene noise regression measures the last 16 of 48 frames, after
+- The actual-scene noise regression compares frames 33–48 and 241–256, after
   the same `c / (1 + c)` RGB mapping. At native 320×240, across 2,991 glass pixels,
-  per-pixel temporal RMS falls from **0.051364** in the single-frame composition
-  to **0.006472** after glass resolve; mapped mean ratio is **1.00644**. This
-  regression fails on the previous composition, whose input/output RMS are equal.
-  FSR and XeSS at 67% both reduce input-space RMS from **0.067893** to **0.052579**
-  over 897 glass-interior pixels (214×160 input, before vendor SR); mapped mean
-  ratio is **0.97425**. Reset matches the current raw glass composition. These
-  SR figures measure the fallback resolve at input size, not display-space RMS.
+  resolved temporal RMS continues falling from **0.005891** to **0.001617**;
+  late single-frame raw RMS is **0.051466**, with mapped mean ratio **1.05396**.
+  Every tested glass pixel reaches 256 accumulated frames. Against an independent
+  CPU average of the raw glass compositions, maximum linear mean error is
+  **7.963e-8**. Counts and this arithmetic-mean check fail with the old capped,
+  clipped or repeatedly reprojected history.
+- FSR and XeSS at 67% both continue reducing fallback-history RMS from
+  **0.010725** at 48 frames to **0.005235** at 256. Across 878 pixels with an
+  unchanged glass instance, counts reach 256 despite changing SR jitter;
+  maximum error against the CPU fallback mean is **3.983e-8**. The complete
+  input-space color, which retains current jittered cache detail, has late RMS
+  **0.051422** versus raw **0.067169** over 897 glass-interior pixels; mapped mean
+  ratio is **1.04996**. These figures are before vendor SR at 214×160 input,
+  not display-space noise. Reset matches the current raw glass composition.
 - `--scene`, `--sr` and `--lighting` pass: transactional scene loading, packaged
   startup, camera/reset, hard shadows, ReSTIR and photon caustics, plus 60
   FSR/XeSS × five-scale × three-denoiser × SDR/HDR combinations. Odd dimensions,

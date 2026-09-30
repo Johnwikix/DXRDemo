@@ -31,7 +31,11 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    re-jittering before SR. Glass is composited after opaque denoising, using
    current-frame reprojection and traced cache misses; its closest-surface motion
    replaces background motion for SR. Traced fallback lighting has a separate
-   glass history, validated by instance, normal and depth. Cached opaque detail
+   glass history with an uncapped same-pixel running mean and 64-bit frame count.
+   Every unjittered camera change resets it immediately; sampling jitter does
+   not. Instance changes and explicit scene/lighting/settings resets also start
+   fresh. Compensated updates retain small contributions in a long history,
+   without neighborhood clipping or history resampling. Cached opaque detail
    stays in the current frame for SR; native output accumulates the complete
    glass radiance. The custom RELAX/A-trous implementation
    has been removed; see [NRD integration](NRD.md). None of these

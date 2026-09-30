@@ -87,15 +87,41 @@ internal static class GlassReconstructionProbe
             SceneProbe.Save(target, $"output/glass-sr/{mode}-{scale}.png");
             Require(contrast is > .80 and < 1.2, "NRD/SR erased detail behind glass or changed its energy");
             Require(fluctuation < .04, "Static glass shimmers across the jitter sequence");
+            float[] accumulation = ReconstructionProbe.ReadTexture(native, sr.GlassAccumulation, false);
             Float4[,] opaqueGuide = surface.ToArray(), glassGuide = signals.GlassSurface.ToArray();
             int cx = w / 2, cy = h / 2;
+            Require(accumulation[(cy * w + cx) * 4 + 3] == frames, "SR sampling jitter resets stationary glass accumulation");
             Require(Math.Abs(opaqueGuide[cy, cx].Z) < .001 && Math.Abs(glassGuide[cy, cx].Z - 1) < .001 && glassGuide[cy, cx].W < -1,
                 "Opaque NRD guides and closest-glass SR guides are not separated");
             Frame(frames, view with { Origin = view.Origin + new Vector3(.01f, 0, 0) });
             float[] motion = ReconstructionProbe.ReadTexture(native, sr.Motion, true);
             float expectedMotion = .01f * h / (4 * MathF.Tan(view.VerticalFov * .5f));
             Require(Math.Abs(motion[(cy * w + cx) * 2] - expectedMotion) < .015f, "SR motion follows the background instead of the closest glass");
+            void FreshGlass()
+            {
+                var history = ReconstructionProbe.ReadTexture(native, sr.GlassAccumulation, false);
+                var rawGlass = ReconstructionProbe.ReadTexture(native, sr.GlassUnfilteredColor, true);
+                var resolvedGlass = ReconstructionProbe.ReadTexture(native, sr.DenoisedColor, true);
+                Require(history[(cy * w + cx) * 4 + 3] == 1, "Camera change retained glass sample count");
+                Require(rawGlass.Zip(resolvedGlass, (a, b) => Math.Abs(a - b)).Max() < .001, "Camera change retained glass radiance");
+            }
+            FreshGlass();
+            CameraFrame changed = view with { Origin = view.Origin + new Vector3(.000001f, 0, 0) };
+            Frame(frames + 1, changed); FreshGlass();
+            Frame(frames + 2, changed);
+            accumulation = ReconstructionProbe.ReadTexture(native, sr.GlassAccumulation, false);
+            Require(accumulation[(cy * w + cx) * 4 + 3] == 2, "Glass did not resume accumulation after camera stopped");
+            changed = CameraFrame.Look(changed.Origin, new(.001f, 0, -1), view.VerticalFov, view.Near, view.Far);
+            Frame(frames + 3, changed); FreshGlass();
+            changed = changed with { VerticalFov = changed.VerticalFov + .001f };
+            Frame(frames + 4, changed); FreshGlass();
+            var roll = Matrix4x4.CreateRotationZ(.001f);
+            changed = changed with { Right = Vector3.TransformNormal(changed.Right, roll), Up = Vector3.TransformNormal(changed.Up, roll) };
+            Frame(frames + 5, changed); FreshGlass();
+            changed = changed with { Near = .02f, Far = 101 };
+            Frame(frames + 6, changed); FreshGlass();
             sr.Reset(); Frame(0, view);
+            FreshGlass();
             for (ulong i = 0; i < debug.NumStoredMessagesAllowedByRetrievalFilter; i++)
             {
                 var message = debug.GetMessage(i);
@@ -172,7 +198,7 @@ internal static class GlassReconstructionProbe
             Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
         }
         Console.WriteLine("PASS transmission-map opaque texels and metallic surface remain in NRD guides.");
-        Console.WriteLine("PASS glass detail, jitter stability, separate guides, unjittered closest-glass motion, history reset and SR resize; no D3D12 errors.");
+        Console.WriteLine("PASS glass detail, jitter stability, separate guides, closest-glass motion, camera translation/rotation/roll/FOV/projection resets, resumed accumulation and SR resize; no D3D12 errors.");
     }
 
     private static SceneAsset Fixture()
