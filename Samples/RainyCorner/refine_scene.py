@@ -213,6 +213,11 @@ def configure_glass():
 def export():
     configure_glass()
     scene['detail_revision']=1
+    # Apply the physical assembly pass on both new builds and subsequent exports.
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('rainy_assembly',ROOT/'repair_scene.py')
+    assembly=importlib.util.module_from_spec(spec);spec.loader.exec_module(assembly)
+    assembly.apply()
     depsgraph=bpy.context.evaluated_depsgraph_get();count=0
     for obj in scene.objects:
         if obj.type not in {'MESH','CURVE','FONT'}:continue

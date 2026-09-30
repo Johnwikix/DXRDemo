@@ -1,0 +1,137 @@
+{
+  "revision": 2,
+  "ground_surface_m": 0.032,
+  "contact_tolerance_m": 0.0002,
+  "contacts": [
+    {
+      "object": "RC Guardrail ground plate",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Guardrail ground plate.001",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Guardrail ground plate.002",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Guardrail ground plate.003",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.001",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.002",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.003",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.004",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.005",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.006",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bin grounded rubber foot.007",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Umbrella grounded drip tray",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC AC grounded mounting foot",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC AC grounded mounting foot.001",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC AC grounded mounting foot.002",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC AC grounded mounting foot.003",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bicycle rear tire",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bicycle front tire",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Bicycle kickstand ground shoe",
+      "gap_m": 0.0
+    },
+    {
+      "object": "RC Vending ground foot",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.001",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.002",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.003",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.004",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.005",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.006",
+      "gap_m": -0.0
+    },
+    {
+      "object": "RC Vending ground foot.007",
+      "gap_m": -0.0
+    }
+  ],
+  "bin_wall_clearance_m": 0.29,
+  "chain_links": 102,
+  "chain_pitch_m": 0.012677088108913827,
+  "chainline_m": -0.091,
+  "basket_mounts": [
+    {
+      "joint": "RC Bicycle basket axle mounted carrier stay",
+      "gap_m": 0.0
+    },
+    {
+      "joint": "RC Bicycle basket axle mounted carrier stay.001",
+      "gap_m": 0.0
+    }
+  ],
+  "puddles_removed": true,
+  "vending_point_lights": 0,
+  "vertical_emissive_strips": 4,
+  "embedded_punctual_lights": 3
+}
