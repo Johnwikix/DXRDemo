@@ -11,12 +11,12 @@ namespace DXRDemo.Shaders.RayTrace;
 
 public enum RayTraceDenoiserMode
 {
-    None, TemporalOnly, Relax,
-    /// <summary>Uses the complete NVIDIA NRD RELAX diffuse denoiser for the diffuse-only mesh renderer.</summary>
-    NrdRelax
+    None = 0, TemporalOnly = 1,
+    /// <summary>Uses official NRD RELAX: diffuse for meshes, diffuse/specular SH for PBR scenes.</summary>
+    NrdRelax = 2
 }
 
-/// <summary>Both trace backends feed the same HDR encoder and temporal / SVGF-style filters.</summary>
+/// <summary>Both trace backends feed the same HDR encoder, temporal reference and official NRD denoisers.</summary>
 public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
 {
     /// <summary>Gets the fixed catalog index of the packaged rainy convenience-store demo.</summary>
@@ -45,8 +45,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     private bool _disposed;
     private volatile bool _loading;
     private ReadWriteTexture2D<Float4>? _raw;
-    private ReadWriteTexture2D<Rgba64, Float4>? _signal, _historyA, _historyB, _filterA, _filterB;
-    private ReadWriteTexture2D<R16, float>? _momentA, _momentB;
+    private ReadWriteTexture2D<Rgba64, Float4>? _signal, _historyA;
     private ReadWriteTexture2D<Rgba32, Float4>? _normal;
     private ReadWriteTexture2D<Float4>? _surfaces;
     private ReadWriteTexture2D<Float4>? _normalRoughness;
@@ -222,13 +221,13 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 ? (sr.Requested == ReconstructionMode.Off ? "SR OFF / NATIVE" : $"{sr.Requested} UNAVAILABLE / NATIVE")
                 : $"SR {sr.Active}  {sr.InputWidth}x{sr.InputHeight} -> {sr.OutputWidth}x{sr.OutputHeight}";
             string denoiser = sr?.Active == ReconstructionMode.DlssRayReconstruction ? "DLSS RAY RECONSTRUCTION" : s.Denoiser == RayTraceDenoiserMode.NrdRelax
-                ? (sr?.NrdActive == true ? "NRD RELAX" : "LEGACY RELAX (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
+                ? (sr?.NrdActive == true ? "NRD RELAX" : "TEMPORAL (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
             return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}\n{reconstruction}";
         }
     }
     public string Id => "ray-trace";
     public string DisplayName => "Path trace";
-    public string Description => "Stanford meshes, HDR10 and temporal / SVGF-style denoising.";
+    public string Description => "Stanford meshes, HDR10 and NVIDIA NRD RELAX denoising.";
     public ShaderAuthor Author { get; } = new("RT Demo", null, "See Assets/Models/SOURCES.md for model terms");
     public string? OriginalUrl => null;
     public ShaderCapabilities Capabilities => ShaderCapabilities.UsesMouse | ShaderCapabilities.UsesResolution;
@@ -274,7 +273,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         }
         bool temporal = _reconstruction is { LinearPipelineActive: true };
         bool nrd = _reconstruction?.Status.NrdActive == true;
-        RayTraceDenoiserMode denoiserMode = s.Denoiser == RayTraceDenoiserMode.NrdRelax && !nrd ? RayTraceDenoiserMode.Relax : s.Denoiser;
+        RayTraceDenoiserMode denoiserMode = s.Denoiser == RayTraceDenoiserMode.NrdRelax && !nrd ? RayTraceDenoiserMode.TemporalOnly : s.Denoiser;
         int inputWidth = temporal ? _reconstruction!.InputWidth : width;
         int inputHeight = temporal ? _reconstruction!.InputHeight : height;
         EnsureTextures(inputWidth, inputHeight, temporal, nrd || pbr, pbr);
@@ -294,11 +293,10 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             {
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
-                    _pbrSignals!.Diffuse, _pbrSignals.Specular, _pbrSignals.Albedo, _pbrSignals.Unfiltered, _pbrSignals.SpecularGuide,
-                    sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut);
+                    _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd);
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
-            bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight);
+            bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight, pbr && nrd ? _sceneBackend : null);
             _previousSettings = s; _lastRenderTime = time;
             _frame = Math.Min(_frame + 1, int.MaxValue - 1);
             return produced;
@@ -318,18 +316,6 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             new(camera.Right.X,camera.Right.Y,camera.Right.Z), new(camera.Up.X,camera.Up.Y,camera.Up.Z), MathF.Tan(camera.VerticalFov*.5f)));
         if (denoiserMode == RayTraceDenoiserMode.TemporalOnly)
             device.ForEach(texture, new NaiveTemporalAccumulationShader(_frame, _signal!, _historyA!));
-        else if (denoiserMode == RayTraceDenoiserMode.Relax)
-        {
-            Float2 res = new(width, height);
-            device.ForEach(_historyB!, new TemporalAccumulationShader(_frame, res, _signal!, _historyA!, _momentA!, _momentB!));
-            device.ForEach(_filterA!, new SpatialFilterShader(0, res, _historyB!, _signal!, _normal!));
-            device.ForEach(_filterB!, new SpatialFilterShader(1, res, _filterA!, _signal!, _normal!));
-            device.ForEach(_filterA!, new SpatialFilterShader(2, res, _filterB!, _signal!, _normal!));
-            device.ForEach(_filterB!, new SpatialFilterShader(3, res, _filterA!, _signal!, _normal!));
-            device.ForEach(texture, new SpatialFilterShader(4, res, _filterB!, _signal!, _normal!));
-            (_historyA, _historyB) = (_historyB, _historyA);
-            (_momentA, _momentB) = (_momentB, _momentA);
-        }
         _frame = Math.Min(_frame + 1, int.MaxValue - 1);
         return true;
     }
@@ -351,24 +337,17 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         }
         _signal = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
         _historyA = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        _historyB = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        _filterA = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        _filterB = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        _momentA = device.AllocateReadWriteTexture2D<R16, float>(width, height);
-        _momentB = device.AllocateReadWriteTexture2D<R16, float>(width, height);
         _width = width; _height = height; _frame = 0;
     }
     private void DisposeTextures()
     {
-        _raw?.Dispose(); _normal?.Dispose(); _signal?.Dispose(); _historyA?.Dispose(); _historyB?.Dispose();
-        _filterA?.Dispose(); _filterB?.Dispose(); _momentA?.Dispose(); _momentB?.Dispose();
+        _raw?.Dispose(); _normal?.Dispose(); _signal?.Dispose(); _historyA?.Dispose();
         _surfaces?.Dispose(); _surfaces = null;
         _normalRoughness?.Dispose(); _normalRoughness = null;
         _pbrSignals?.Dispose(); _pbrSignals = null;
         _directLight?.Dispose(); _directLight = null;
         _raw = null; _normal = null;
-        _signal = _historyA = _historyB = _filterA = _filterB = null;
-        _momentA = _momentB = null;
+        _signal = _historyA = null;
     }
     public void Dispose() { if (_disposed) return; _disposed = true; _demoCancellation.Cancel(); _demoCancellation.Dispose(); Interlocked.Exchange(ref _pendingImport, null)?.Completion.TrySetCanceled(); _reconstruction?.Dispose(); _sceneBackend?.Dispose(); DisposeTextures(); _backend.Dispose(); }
 }

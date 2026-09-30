@@ -6,7 +6,7 @@ namespace DXRDemo.Shaders.RayTrace;
 /// Naive temporal accumulation pass: exact running mean of the last <c>n</c> frames,
 /// <c>acc = (cur + hist * (n - 1)) / n</c> with <c>n = min(frame + 1, MaxHistoryFrames)</c>.
 /// No confidence test, no history clamping, no variance estimation — the simplest possible
-/// temporal mean, kept as a reference mode to compare against the SVGF/RELAX pipeline.
+/// temporal mean, kept as a reference mode to compare against NVIDIA NRD RELAX.
 ///
 /// The history texture is updated in place (each thread reads and writes its own pixel only,
 /// so there is no cross-thread hazard) and the accumulated result is returned as the target

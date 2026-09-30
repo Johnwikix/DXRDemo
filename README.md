@@ -46,7 +46,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 
 ### 降噪 / 超分
 
-- **降噪**：关闭、时间累积、RELAX 风格（时间 + 空间）、**NVIDIA NRD · RELAX**（PBR 漫反射 + 镜面反射）四档；NRD 使用真实粗糙度、线性 view-Z、相机运动矢量、各 lobe 的次级命中距离
+- **降噪**：关闭、时间累积、**NVIDIA NRD · RELAX** 三档；PBR 使用官方 RELAX_DIFFUSE_SPECULAR_SH、材质去调制、SG resolve 和 SR 前的 re-jittering。玻璃在不透明表面降噪后合成，使用当前帧重投影及独立的玻璃运动矢量。旧 RELAX 风格实现已移除，旧设置自动迁移到 NRD。
 - **超分辨率 / 光线重建**：原生分辨率、AMD FSR 3.1、Intel XeSS、NVIDIA DLSS SR、**NVIDIA DLSS Ray Reconstruction（DLSSD，已在 RTX 上完成运行验证）**；统一 **1–100% 渲染比例**滑块（默认 67%）；不支持的算法在 UI 中禁用；初始化失败显示具体回退原因
 - NR 与 NRD 正交：可单独开 NRD、可与 FSR/XeSS/DLSS SR 组合；启用 DLSSD 时旁路 NRD 和常规降噪
 
@@ -136,7 +136,7 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 
 - **渲染程序**（`ShaderSelector`）：当前唯一条目 `RT Demo`（DXR Path Trace，Hailuo-3 / DXR）
 - **场景模型**：内置 Bunny / Armadillo / Dragon / 雨后便利店 / 当前已导入的 GLB
-- **降噪**：关闭 / 时间累积 / RELAX 风格 / NRD · RELAX
+- **降噪**：关闭 / 时间累积 / NRD · RELAX
 - **超分辨率 / 光线重建**：关闭 / FSR 3.1 / XeSS / DLSS / DLSSD；不支持的算法自动禁用
 - **SR 渲染比例**：1–100% 滑块（默认 67%，200 ms 防抖）
 - **每像素采样 SPP**：1–16（默认 2）
@@ -193,7 +193,7 @@ DXRDemo/                                  解决方案根
 │   │   ├── DXR/                          # 原始 5-球体 HLSL
 │   │   │   ├── RayTrace.hlsl             # RayGen / ClosestHit / Intersection / Miss
 │   │   │   ├── SceneData.hlsli           # 共享结构
-│   │   │   ├── Reconstruction.hlsl       # 自定义时间 + A-trous 滤波
+│   │   │   ├── Reconstruction.hlsl       # 时间累积、NRD SH resolve、SR 引导与编码
 │   │   │   ├── SceneTrace.hlsl           # glTF/GLB PBR 路径追踪
 │   │   │   └── Minimal.hlsl
 │   │   └── RayTrace/                     # ComputeSharp 着色器
@@ -202,9 +202,7 @@ DXRDemo/                                  解决方案根
 │   │       ├── MeshPathTraceShader.cs    # 软件 BVH 三角形追踪
 │   │       ├── MeshEncodeShader.cs       # mesh 编码
 │   │       ├── MeshScene.cs              # 内置 Stanford 模型选择与加载
-│   │       ├── TemporalAccumulationShader.cs
-│   │       ├── NaiveTemporalAccumulationShader.cs
-│   │       └── SpatialFilterShader.cs
+│   │       └── NaiveTemporalAccumulationShader.cs
 │   ├── SuperResolution/                  # 降噪 + 厂商 SR 路径
 │   │   ├── SuperResolutionRenderer.cs    # NRD + FSR / XeSS / DLSS / DLSSD 接线
 │   │   ├── NativeNrd.cs / NativeReconstruction.cs   # C# → C++/CLI / 原生 DLL 绑定

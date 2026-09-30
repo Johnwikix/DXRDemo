@@ -126,8 +126,12 @@ struct NrdFrame {
     ID3D12Resource* specularOutput;
     float denoisingRange;
     uint32_t reserved;
+    ID3D12Resource* diffuseSh;
+    ID3D12Resource* specularSh;
+    ID3D12Resource* diffuseShOutput;
+    ID3D12Resource* specularShOutput;
 };
-static_assert(sizeof(NrdFrame) == 288);
+static_assert(sizeof(NrdFrame) == 320);
 
 struct NrdContext {
     NrdApi api;
@@ -140,6 +144,7 @@ struct NrdContext {
     uint8_t* mapped = nullptr;
     uint32_t width = 0, height = 0, stride = 0, descriptorsPerSet = 0, constantStride = 0, maxSets = 0;
     uint32_t dispatchCount = 0;
+    bool sh = false;
     ~NrdContext() {
         if (mapped) constants->Unmap(0, nullptr);
         if (instance) api.destroy(*instance);
@@ -162,18 +167,14 @@ struct NrdContext {
         }
     }
     void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h, bool pbr = false) {
-        device = gpu; width = w; height = h;
-        nrd::DenoiserDesc denoiser{denoiserId, pbr ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR : nrd::Denoiser::RELAX_DIFFUSE};
+        device = gpu; width = w; height = h; sh = pbr;
+        nrd::DenoiserDesc denoiser{denoiserId, pbr ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : nrd::Denoiser::RELAX_DIFFUSE};
         nrd::InstanceCreationDesc creation{}; creation.denoisers = &denoiser; creation.denoisersNum = 1;
         Check(api.create(creation, instance), "Create NRD RELAX_DIFFUSE");
         nrd::RelaxSettings settings{};
         settings.enableAntiFirefly = true;
         if (pbr) {
             settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
-            // Glass shares a flat primary normal across unrelated objects behind the pane.
-            // A 50-pixel default specular prepass erases their detail before temporal accumulation.
-            settings.specularPrepassBlurRadius = 2.0f;
-            settings.specularPhiLuminance = 0.5f;
         }
         Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
         const auto& desc = *api.description(*instance);
@@ -242,13 +243,19 @@ struct NrdContext {
         Check(api.dispatches(*instance, &denoiserId, 1, dispatches, dispatchCount), "Get NRD dispatches");
         if (dispatchCount > maxSets) throw std::runtime_error("NRD descriptor capacity exceeded");
         Texture external[unsigned(nrd::ResourceType::MAX_NUM)]{};
-        external[unsigned(nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST)].resource = frame.color;
+        external[unsigned(sh ? nrd::ResourceType::IN_DIFF_SH0 : nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST)].resource = frame.color;
         external[unsigned(nrd::ResourceType::IN_NORMAL_ROUGHNESS)].resource = frame.normalRoughness;
         external[unsigned(nrd::ResourceType::IN_VIEWZ)].resource = frame.viewZ;
         external[unsigned(nrd::ResourceType::IN_MV)].resource = frame.motion;
-        external[unsigned(nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST)].resource = frame.output;
-        external[unsigned(nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST)].resource = frame.specular;
-        external[unsigned(nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST)].resource = frame.specularOutput;
+        external[unsigned(sh ? nrd::ResourceType::OUT_DIFF_SH0 : nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST)].resource = frame.output;
+        external[unsigned(sh ? nrd::ResourceType::IN_SPEC_SH0 : nrd::ResourceType::IN_SPEC_RADIANCE_HITDIST)].resource = frame.specular;
+        external[unsigned(sh ? nrd::ResourceType::OUT_SPEC_SH0 : nrd::ResourceType::OUT_SPEC_RADIANCE_HITDIST)].resource = frame.specularOutput;
+        if (sh) {
+            external[unsigned(nrd::ResourceType::IN_DIFF_SH1)].resource = frame.diffuseSh;
+            external[unsigned(nrd::ResourceType::IN_SPEC_SH1)].resource = frame.specularSh;
+            external[unsigned(nrd::ResourceType::OUT_DIFF_SH1)].resource = frame.diffuseShOutput;
+            external[unsigned(nrd::ResourceType::OUT_SPEC_SH1)].resource = frame.specularShOutput;
+        }
         ID3D12DescriptorHeap* heaps[] = {heap.Get()}; commands->SetDescriptorHeaps(1, heaps);
         for (uint32_t i = 0; i < dispatchCount; i++) {
             const auto& dispatch = dispatches[i]; auto& pipeline = pipelines.at(dispatch.pipelineIndex);

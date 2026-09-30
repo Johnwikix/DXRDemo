@@ -11,6 +11,7 @@ if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DXR_DXC_PATH")))
 Directory.CreateDirectory("output");
 if (args.Contains("--lighting-scene")) { await LightingProbe.SceneAblation(args.SkipWhile(a => a != "--lighting-scene").Skip(1).FirstOrDefault() ?? "baseline"); return; }
 if (args.Contains("--lighting")) { LightingProbe.Run(); return; }
+if (args.Contains("--glass-sr")) { GlassReconstructionProbe.Run(); return; }
 if (args.Contains("--scene")) { await SceneProbe.Run(args.SkipWhile(a => a != "--scene").Skip(1).FirstOrDefault()); return; }
 if (args.Contains("--scene-preview")) { await SceneProbe.Preview(args.SkipWhile(a => a != "--scene-preview").Skip(1).First()); return; }
 if (args.Contains("--glass")) { await SceneProbe.Glass(args.SkipWhile(a => a != "--glass").Skip(1).First()); return; }

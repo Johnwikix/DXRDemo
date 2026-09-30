@@ -1,5 +1,18 @@
 # Model / HDR / settings integration validation
 
+`IntegrationProbe.exe --glass-sr` checks the actual NRD/SR glass composition with
+a fine stripe fixture: detail contrast, frame-to-frame RMS over the jitter
+sequence, opaque/transparent guide separation, closest-glass motion, reset and
+resize, plus opaque transmission-map texels and metallic materials. A negative
+control deliberately uses pane guides and must reproduce
+blur. Each available FSR/XeSS/DLSS provider runs at 67% and 100%; unsupported
+providers are explicitly skipped. Images are saved under `output/glass-sr/`.
+`--glass ../../Samples/RainyCorner/RainyCorner.glb` separately checks non-unit IOR
+and noise against a 512-SPP reference in the actual refractive scene. Current
+metrics and limitations are recorded in [NRD verification](../../docs/NRD.md).
+The custom RELAX mode has been removed; current denoisers are Off, Temporal and
+official NRD. Old verification counts below are historical.
+
 `IntegrationProbe.exe --lighting` exercises ReSTIR DI and refractive photon caustics
 with synthetic fixtures and the D3D12 debug layer. It checks many-light and emissive
 area-light energy, history/camera cuts, lobe reconstruction, glass focusing, IOR=1,
@@ -51,8 +64,9 @@ generated descriptor. Its fence completes before the denoiser reads those UAVs.
 The ported HDR renderer uses a dedicated render thread and `Present(0, DoNotWait)`
 (plus `AllowTearing` when available); it does not wait for XAML rendering or vsync.
 
-The denoiser is the existing custom temporal / SVGF/RELAX-inspired implementation,
-not NVIDIA's NRD SDK. The mesh HDR encoder transforms linear Rec.709 to Rec.2020
+The historical verification below used the former custom SVGF/RELAX-inspired
+implementation. Current rendering uses NVIDIA NRD; the old implementation is
+removed. The mesh HDR encoder transforms linear Rec.709 to Rec.2020
 and encodes ST.2084 into the HDR10 swap chain. The inherited filters operate on
 encoded normalized radiance. Material ids are packed into UNORM8 and decoded
 before edge filtering; camera, scene, size, samples, bounces, denoiser and HDR

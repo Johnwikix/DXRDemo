@@ -13,7 +13,7 @@ namespace DXRDemo.DXR;
 /// <summary>Traces indexed, instanced PBR scenes with explicitly maintained DXR shaders.</summary>
 internal sealed unsafe class DxrSceneBackend : IDisposable
 {
-    private const int MaxTextures = 1024, OutputCount = 9;
+    private const int MaxTextures = 1024, OutputCount = 14;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _owned = [];
     private readonly DxrShaderTable _table = new();
@@ -77,25 +77,28 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         var parameters = new List<RootParameter1>
         { new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All) };
         for (uint i = 0; i < 7; i++) parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(i, 0), ShaderVisibility.All));
-        parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, OutputCount, 0, 0),
-            new DescriptorRange1(DescriptorRangeType.ShaderResourceView, MaxTextures, 0, 1)), ShaderVisibility.All));
+        parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 9, 0, 0),
+            new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 5, 13, 0),
+            new DescriptorRange1(DescriptorRangeType.ShaderResourceView, MaxTextures, 0, 1),
+            new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 0, 2)), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.Sampler, MaxTextures, 0, 1)), ShaderVisibility.All));
         for (uint i = 9; i < 13; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         _root = _gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())); _owned.Add(_root);
         using var compiler = new DxrShaderCompiler();
         compiler.CompileLibrary(Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "SceneTrace.hlsl"));
         _pipeline = _gpu.Device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
-        [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("PhotonGen"), new("ClearPhotonGrid"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
+        [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("TransparentRayGen"), new("PhotonGen"), new("ClearPhotonGrid"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
          new(new HitGroupDescription("HitGroup_Sphere", HitGroupType.Triangles, anyHitShaderImport: "AnyHit", closestHitShaderImport: "ClosestHit")),
          new(new GlobalRootSignature(_root)), new(new RaytracingPipelineConfig(1)), new(new RaytracingShaderConfig(28, 8))]));
         _owned.Add(_pipeline);
         using (var props = _pipeline.QueryInterface<ID3D12StateObjectProperties>())
         {
             _table.Build(_gpu.Device, props);
-            _lightingTable = DxrResources.CreateUploadBuffer(_gpu.Device, 128); _owned.Add(_lightingTable);
-            void* records; _lightingTable.Map(0, null, &records).CheckError(); NativeMemory.Clear(records, 128);
+            _lightingTable = DxrResources.CreateUploadBuffer(_gpu.Device, 192); _owned.Add(_lightingTable);
+            void* records; _lightingTable.Map(0, null, &records).CheckError(); NativeMemory.Clear(records, 192);
             NativeMemory.Copy((void*)props.GetShaderIdentifier("ClearPhotonGrid"), records, 32);
             NativeMemory.Copy((void*)props.GetShaderIdentifier("PhotonGen"), (byte*)records + 64, 32);
+            NativeMemory.Copy((void*)props.GetShaderIdentifier("TransparentRayGen"), (byte*)records + 128, 32);
             _lightingTable.Unmap(0);
         }
         _constants = DxrResources.CreateUploadBuffer(_gpu.Device, 512); _owned.Add(_constants);
@@ -199,7 +202,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             scene.Tlas = BuildAcceleration(scene, new BuildRaytracingAccelerationStructureInputs { Type = RaytracingAccelerationStructureType.TopLevel,
                 Flags = RaytracingAccelerationStructureBuildFlags.PreferFastTrace, DescriptorsCount = (uint)asset.Instances.Length,
                 Layout = ElementsLayout.Array, InstanceDescriptions = instanceBuffer.GPUVirtualAddress });
-            scene.Heap = scene.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, MaxTextures + OutputCount, DescriptorHeapFlags.ShaderVisible)));
+            scene.Heap = scene.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, MaxTextures + OutputCount + 3, DescriptorHeapFlags.ShaderVisible)));
             scene.Samplers = scene.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.Sampler, MaxTextures, DescriptorHeapFlags.ShaderVisible)));
             scene.DescriptorHeaps = [scene.Heap, scene.Samplers];
             var nullView = new ShaderResourceViewDescription { Format = Format.R8G8B8A8_UNorm, ViewDimension = ShaderResourceViewDimension.Texture2D,
@@ -216,6 +219,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
                     MinLOD = 0, MaxLOD = min is 9728 or 9729 ? 0 : float.MaxValue, MaxAnisotropy = 1, ComparisonFunction = ComparisonFunction.Always };
                 _gpu.Device.CreateSampler(ref samplerDescription, scene.Samplers.GetCPUDescriptorHandleForHeapStart() + i * samplerStride);
             }
+            for (int i = 0; i < 3; i++)
+                _gpu.Device.CreateShaderResourceView(null, nullView, scene.Heap.GetCPUDescriptorHandleForHeapStart() + (MaxTextures + OutputCount + i) * _stride);
             for (int i = 0; i < asset.Textures.Length; i++) { cancellation.ThrowIfCancellationRequested(); UploadTexture(scene, asset.Textures[i], i); }
             cancellation.ThrowIfCancellationRequested();
             // 已完成的 fence 保护旧场景释放；候选场景完全成功后才替换。
@@ -264,9 +269,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
 
     internal void Trace(in CameraFrame camera, int frame, int samples, int bounces, Float2 jitter, float environment,
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
-        ReadWriteTexture2D<Float4> guide, ReadWriteTexture2D<Float4> diffuse, ReadWriteTexture2D<Float4> specular,
-        ReadWriteTexture2D<Float4> albedo, ReadWriteTexture2D<Float4> unfiltered, ReadWriteTexture2D<Float4> specularGuide,
-        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false)
+        ReadWriteTexture2D<Float4> guide, PbrSignals signals,
+        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
         if (raw.Width != _reservoirWidth || raw.Height != _reservoirHeight)
@@ -283,8 +287,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         {
             foreach (var old in _outputs) old?.Dispose();
             _outputs[0] = Resource(raw); _outputs[1] = Resource(normal); _outputs[2] = Resource(surface); _outputs[3] = Resource(guide);
-            _outputs[4] = Resource(diffuse); _outputs[5] = Resource(specular); _outputs[6] = Resource(albedo); _outputs[7] = Resource(unfiltered);
-            _outputs[8] = Resource(specularGuide);
+            _outputs[4] = Resource(signals.Diffuse); _outputs[5] = Resource(signals.Specular); _outputs[6] = Resource(signals.Albedo); _outputs[7] = Resource(signals.Unfiltered);
+            _outputs[8] = Resource(signals.SpecularGuide);
+            _outputs[9] = Resource(signals.DiffuseSh); _outputs[10] = Resource(signals.SpecularSh); _outputs[11] = Resource(signals.GlassSurface);
+            _outputs[12] = Resource(signals.DiffuseFactor); _outputs[13] = Resource(signals.SpecularFactor);
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
@@ -297,7 +303,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             Lighting = new(RestirEnabled ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
             CausticSettings = new(CausticsEnabled && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,
                 MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12) };
-        bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 &&
+        data.Up.W = opaqueForNrd ? 1 : 0;
+        bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 && data.Up.W == _previous.Up.W &&
             data.Environment == _previous.Environment && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
             data.Control.X == _previous.Control.X && data.Control.Y == _previous.Control.Y && data.Lighting.X == _previous.Lighting.X &&
             data.CausticSettings == _previous.CausticSettings && data.Forward.W == _previous.Forward.W &&
@@ -339,6 +346,42 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         End();
         if (rebuildPhotons) { _photonFrame = data; _photonsValid = true; PhotonBuildCount++; }
         _previous = data; _previousFrame = frame; _historyValid = true; _reservoirWrite = 1 - _reservoirWrite;
+    }
+
+    /// <summary>Composes glass from the current denoised opaque frame, falling back to traced lighting on cache misses.</summary>
+    internal void ComposeTransparent(ID3D12Resource opaqueColor, ID3D12Resource output)
+    {
+        var scene = _scene ?? throw new InvalidOperationException("Upload scene before composing glass.");
+        // .NET 10: 复用原生资源和已上传帧常量；此阶段只改写输出描述符，不分配帧缓冲。
+        var start = scene.Heap.GetCPUDescriptorHandleForHeapStart();
+        _gpu.Device.CreateUnorderedAccessView(output, null, null, start);
+        _gpu.Device.CreateShaderResourceView(opaqueColor, null, start + (MaxTextures + OutputCount) * _stride);
+        _gpu.Device.CreateShaderResourceView(_outputs[2], null, start + (MaxTextures + OutputCount + 1) * _stride);
+        _gpu.Device.CreateShaderResourceView(_outputs[3], null, start + (MaxTextures + OutputCount + 2) * _stride);
+        Begin(); var cmd = _gpu.CommandList;
+        cmd.SetDescriptorHeaps(2, scene.DescriptorHeaps); cmd.SetComputeRootSignature(_root);
+        cmd.SetComputeRootConstantBufferView(0, _constants.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(1, scene.Tlas.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(2, scene.Vertices.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(3, scene.Indices.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(4, scene.Instances.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(5, scene.Materials.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(6, scene.Lights.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(7, scene.Emitters.GPUVirtualAddress);
+        cmd.SetComputeRootDescriptorTable(8, scene.Heap.GetGPUDescriptorHandleForHeapStart()); cmd.SetComputeRootDescriptorTable(9, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
+        cmd.SetComputeRootUnorderedAccessView(10, _reservoirs[_reservoirWrite]!.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(11, _reservoirs[1 - _reservoirWrite]!.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(12, _photons.GPUVirtualAddress); cmd.SetComputeRootUnorderedAccessView(13, _photonGrid.GPUVirtualAddress);
+        cmd.SetPipelineState1(_pipeline);
+        cmd.DispatchRays(new(new(_lightingTable.GPUVirtualAddress + 128, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
+            new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)_reservoirWidth, (uint)_reservoirHeight, 1));
+        cmd.ResourceBarrierUnorderedAccessView(output); cmd.ResourceBarrierUnorderedAccessView(_outputs[11]!);
+        End();
+        // Restore the opaque output after the glass fence; other UAV bindings are unchanged.
+        _gpu.Device.CreateUnorderedAccessView(_outputs[0], null, null, start);
+        // The next opaque pass writes these guides as UAVs. Clear borrowed SRVs after the fence,
+        // so descriptor-table validation cannot retain an SRV alias across frames or resizes.
+        var nullView = new ShaderResourceViewDescription { Format = Format.R32G32B32A32_Float,
+            ViewDimension = ShaderResourceViewDimension.Texture2D, Shader4ComponentMapping = ShaderComponentMapping.Default,
+            Texture2D = new() { MipLevels = 1 } };
+        for (int i = 0; i < 3; i++) _gpu.Device.CreateShaderResourceView(null, nullView, start + (MaxTextures + OutputCount + i) * _stride);
     }
     public void Dispose()
     {

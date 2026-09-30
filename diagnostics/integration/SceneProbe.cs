@@ -36,7 +36,7 @@ internal static class SceneProbe
         using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
         var camera=new CameraController();camera.FrameBounds(asset.Minimum,asset.Maximum,width/(float)height);camera.Rotate(.50f,.23f);camera.Zoom(3);
         var view=camera.Advance(0,out _,out _);
-        void Trace(int frame,int spp)=>backend.Trace(view,frame,spp,10,default,0,raw,normals,surface,guide,signals.Diffuse,signals.Specular,signals.Albedo,signals.Unfiltered,signals.SpecularGuide);
+        void Trace(int frame,int spp,bool opaque=false)=>backend.Trace(view,frame,spp,10,default,0,raw,normals,surface,guide,signals,opaqueForNrd:opaque);
         Trace(0,2); var first=surface.ToArray();Trace(1,2);var second=surface.ToArray();
         Require(first.Cast<Float4>().SequenceEqual(second.Cast<Float4>()),"Refractive primary geometry flickers between frames");
         var n=normals.ToArray();var mask=new bool[width*height];int pixels=0;
@@ -52,14 +52,15 @@ internal static class SceneProbe
             Trace(1000+frame,16);var values=raw.ToArray();
             for(int y=0;y<height;y++)for(int x=0;x<width;x++){int p=(y*width+x)*3;var v=values[y,x];reference[p]+=v.X/32;reference[p+1]+=v.Y/32;reference[p+2]+=v.Z/32;}
         }
+        Trace(47,2); var noisy=raw.ToArray();
         using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
         for(int frame=0;frame<48;frame++)
         {
-            Trace(frame,2);Require(sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
-                HdrRenderParameters.Default,1.0/60,guide,view,signals,-2),"Glass NRD execution failed");
+            Trace(frame,2,true);Require(sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
+                HdrRenderParameters.Default,1.0/60,guide,view,signals,-2,transparentBackend:backend),"Glass NRD execution failed");
         }
         Require(sr.Status.NrdActive,"Glass validation ran a fallback");
-        var denoised=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);var noisy=raw.ToArray();
+        var denoised=ReconstructionProbe.ReadTexture(native,sr.DenoisedColor,true);
         double rawError=0,filteredError=0;double Compress(double value)=>Math.Max(value,0)/(1+Math.Max(value,0));
         for(int y=0;y<height;y++)for(int x=0;x<width;x++)if(mask[y*width+x])
         {
@@ -72,6 +73,7 @@ internal static class SceneProbe
         Console.WriteLine($"Glass: {pixels} pixels, 512-SPP reference, 2-SPP raw RMSE={rawError:F6}, NRD RMSE={filteredError:F6}");
         Require(filteredError<rawError*.9,"Glass denoising does not reduce noise");
         sr.Configure(ReconstructionMode.Off,100,width,height,false,true);
+        Trace(47,2);
         sr.Execute(raw,normals,surface,target,default,2.7f,default,RayTraceDenoiserMode.None,
             HdrRenderParameters.Default,1.0/60,guide,view,signals,-2);
         Save(target,"output/scenes/glass-raw-2spp.png");
@@ -151,7 +153,7 @@ internal static class SceneProbe
         using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
         var camera = new CameraController(); camera.FrameBounds(asset.Minimum, asset.Maximum, width / (float)height);
         var view = camera.Advance(0, out _, out _);
-        void Trace(int frame, float env = 0, SunLightSettings sun = default, int bounces = 3) => backend.Trace(view, frame, 4, bounces, default, env, raw, normals, surface, guide, signals.Diffuse, signals.Specular, signals.Albedo, signals.Unfiltered, signals.SpecularGuide, sun);
+        void Trace(int frame, float env = 0, SunLightSettings sun = default, int bounces = 3) => backend.Trace(view, frame, 4, bounces, default, env, raw, normals, surface, guide, signals, sun);
         Trace(0);
         VerifyDebug(debugQueue);
         float energy = Energy(raw.ToArray());
@@ -162,12 +164,13 @@ internal static class SceneProbe
         Trace(0, .3f);
         Require(Energy(signals.Specular.ToArray()) > 0, "Specular lobe missing");
         Require(Energy(signals.Diffuse.ToArray()) > 0, "Diffuse lobe missing");
-        var rawPixels = raw.ToArray(); var dPixels = signals.Diffuse.ToArray(); var sPixels = signals.Specular.ToArray(); var aPixels = signals.Albedo.ToArray(); var ePixels = signals.Unfiltered.ToArray();
+        var rawPixels = raw.ToArray(); var dPixels = signals.Diffuse.ToArray(); var sPixels = signals.Specular.ToArray(); var aPixels = signals.DiffuseFactor.ToArray(); var ePixels = signals.Unfiltered.ToArray();
+        var specFactors = signals.SpecularFactor.ToArray();
         double difference = 0;
         for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
         {
             var d = dPixels[y,x]; var s = sPixels[y,x]; var a = aPixels[y,x]; var e = ePixels[y,x]; var r = rawPixels[y,x];
-            difference = Math.Max(difference, Math.Abs(d.X * Math.Max(a.X,.001f) + s.X + e.X - r.X));
+            difference = Math.Max(difference, Math.Abs(d.X * a.X + s.X * specFactors[y,x].X + e.X - r.X));
         }
         Require(difference < .0001, "Lobe decomposition does not reconstruct raw radiance");
         backend.SetScene(asset with { Lights = [] }); Trace(0);
@@ -248,7 +251,7 @@ internal static class SceneProbe
         Require(shadowError<.0001,$"NRD changes deterministic sun/shadow edges: {shadowError}");
         Console.WriteLine($"PASS: sun toggle, angles, linear intensity; {shadowPixels} shadow pixels, NRD shadow max error={shadowError:E2}.");
         backend.SetScene(asset);
-        foreach (var mode in new[] { RayTraceDenoiserMode.None, RayTraceDenoiserMode.TemporalOnly, RayTraceDenoiserMode.Relax, RayTraceDenoiserMode.NrdRelax })
+        foreach (var mode in new[] { RayTraceDenoiserMode.None, RayTraceDenoiserMode.TemporalOnly, RayTraceDenoiserMode.NrdRelax })
         {
             sr.Configure(ReconstructionMode.Off, 100, width, height, mode == RayTraceDenoiserMode.NrdRelax, true);
             Require(sr.LinearPipelineActive, sr.Status.Message);
@@ -258,9 +261,12 @@ internal static class SceneProbe
             Save(target, $"output/scenes/{mode}.png");
             Require(Energy(raw.ToArray()) > 0, "Empty image");
         }
-        Console.WriteLine($"PASS: DXR PBR energy={energy:F6}, lobe error={difference:E2}, metal, explicit lights, 4 reconstruction modes, actual NRD {sr.NrdDispatchCount} dispatches.");
+        Console.WriteLine($"PASS: DXR PBR energy={energy:F6}, lobe error={difference:E2}, metal, explicit lights, 3 denoisers, actual NRD {sr.NrdDispatchCount} dispatches.");
 
         using var pass = (RayTracePass)DXRDemo.Shaders.ShaderCatalog.All[0].Factory(); pass.Initialize(device, default);
+        var packagedDocument = await GltfImporter.LoadAsync(Path.Combine(AppContext.BaseDirectory, "Assets", "Models", "RainyCorner.glb"));
+        var packagedAsset = packagedDocument.Scenes[packagedDocument.DefaultScene];
+        string packagedLightCount = $"{packagedAsset.Lights.Length} LIGHTS";
         Require(pass.SceneIndex == RayTracePass.RainyCornerSceneIndex && !pass.ExternalLightingEnabled && pass.Exposure == -2,
             "The application does not start with the packaged night demo");
         for (int attempt = 0; attempt < 300 && pass.ReconstructionStatus?.NrdActive != true; attempt++)
@@ -268,7 +274,7 @@ internal static class SceneProbe
             pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
             await Task.Delay(10);
         }
-        Require(pass.ReconstructionStatus?.NrdActive == true && pass.DiagnosticText.Contains("8 LIGHTS"), "Packaged startup scene did not render");
+        Require(pass.ReconstructionStatus?.NrdActive == true && pass.DiagnosticText.Contains(packagedLightCount), "Packaged startup scene did not render: " + pass.ReconstructionStatus?.Message + " / " + pass.DiagnosticText);
         Save(target, "output/scenes/default-demo.png");
         pass.ExternalLightingEnabled = true; pass.Exposure = 0;
         Task<SceneDocument> loading = pass.ImportAsync(external ?? fixture);
@@ -281,7 +287,7 @@ internal static class SceneProbe
         pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
         pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
         pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
-        Require(pass.DiagnosticText.Contains("8 LIGHTS"), "Cannot return to packaged demo after an import");
+        Require(pass.DiagnosticText.Contains(packagedLightCount), "Cannot return to packaged demo after an import");
         pass.SceneIndex = previousScene;
         Console.WriteLine("PASS: packaged GLB startup, default selection, persistent demo list and scene switching after import.");
         bool failed = false;

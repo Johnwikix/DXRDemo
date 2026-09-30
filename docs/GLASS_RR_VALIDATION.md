@@ -2,6 +2,10 @@
 
 2026-09-29，本机 Intel Arc 140T，Windows x64 Release。
 
+以下为历史验证记录。2026-09-30 已改为不透明表面 NRD SH 降噪、SG
+resolve/re-jittering 和降噪后玻璃合成，并移除自实现 RELAX；当前玻璃细节、
+抖动与透射贴图回归结果见 [NRD 验证](NRD.md#current-glass-and-pipeline-verification-on-intel-arc-140t-2026-09-30)。
+
 ## 交付内容
 
 - 默认便利店 GLB：2,019,650 个三角形（含实例）、233 个共享网格、3,199 个网格实例、8 盏灯。

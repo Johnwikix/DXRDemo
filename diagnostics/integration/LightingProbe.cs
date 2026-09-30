@@ -43,10 +43,10 @@ internal static class LightingProbe
         for(int frame=0;frame<frames;frame++)
         {
             Float2 jitter=reconstruction?.Jitter()??default;
-            backend.Trace(view,frame,2,10,jitter,0,raw,normal,surface,guide,signals.Diffuse,signals.Specular,signals.Albedo,signals.Unfiltered,signals.SpecularGuide,rayReconstruction:rr);
+            backend.Trace(view,frame,2,10,jitter,0,raw,normal,surface,guide,signals,rayReconstruction:rr,opaqueForNrd:nrd);
             if(reconstruction!=null)
                 Require(reconstruction.Execute(raw,normal,surface,target!,default,2.7f,jitter,nrd?RayTraceDenoiserMode.NrdRelax:RayTraceDenoiserMode.None,
-                    HdrRenderParameters.Default,1.0/60,guide,view,signals,-2),reconstruction.Status.Message);
+                    HdrRenderParameters.Default,1.0/60,guide,view,signals,-2,transparentBackend:nrd?backend:null),reconstruction.Status.Message);
         }
         if(nrd) Require(reconstruction!.Status.NrdActive,"NRD capture used a fallback");
         if(rr) Require(reconstruction!.Active==reconstructionMode,"DLSSD capture used a fallback");
@@ -82,7 +82,7 @@ internal static class LightingProbe
         var view = CameraFrame.Look(new(0, 4, 3.5f), new(0, -4, -3.5f), .8f, .001f, 100);
         SunLightSettings lightOverride=default;
         void Trace(int frame, bool reset = false) => backend.Trace(view, frame, 1, 1, default, 0, raw, normal, surface, guide,
-            signals.Diffuse, signals.Specular, signals.Albedo, signals.Unfiltered, signals.SpecularGuide,sun:lightOverride,resetHistory: reset);
+            signals,sun:lightOverride,resetHistory: reset);
         // Flat, parallel storefront glazing must not turn continuous transmitted light into photon splats.
         // Compare raw wet-ground radiance, before any denoiser, on the actual production backend.
         var paneScene=MakeScene(false,1);
@@ -140,10 +140,11 @@ internal static class LightingProbe
         view = view with { Origin = view.Origin + new Vector3(.2f, 0, 0) };
         Trace(80, true); var cut = raw.ToArray(); Trace(80); var repeated = raw.ToArray();
         Require(cut.Cast<Float4>().SequenceEqual(repeated.Cast<Float4>()), "Camera-cut reset reused history");
-        var d = signals.Diffuse.ToArray(); var s = signals.Specular.ToArray(); var a = signals.Albedo.ToArray(); var e = signals.Unfiltered.ToArray();
+        var d = signals.Diffuse.ToArray(); var s = signals.Specular.ToArray(); var a = signals.DiffuseFactor.ToArray(); var e = signals.Unfiltered.ToArray();
+        var specFactors = signals.SpecularFactor.ToArray();
         double lobeError = 0;
         for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
-            lobeError = Math.Max(lobeError, Math.Abs(d[y,x].X * Math.Max(a[y,x].X,.001f) + s[y,x].X + e[y,x].X - repeated[y,x].X));
+            lobeError = Math.Max(lobeError, Math.Abs(d[y,x].X * a[y,x].X + s[y,x].X * specFactors[y,x].X + e[y,x].X - repeated[y,x].X));
         Require(lobeError < .0001, "ReSTIR lobe signals no longer reconstruct raw radiance");
         Console.WriteLine($"PASS ReSTIR: 128 lights, energy ratio={energyRatio:F5}, averaged/initial MSE={finalError/initialError:F5}, classic={classicMs:F3} ms, ReSTIR={restirMs:F3} ms, cut/reset, NRD lobe error={lobeError:E2}");
 
@@ -189,10 +190,10 @@ internal static class LightingProbe
         lightOverride=default; Trace(27);
         Require(backend.PhotonBuildCount==buildsBefore+4,"Disabled sun leaves photons behind");
         Console.WriteLine("PASS photon cache: static frames/camera cut reuse the map; sun toggle/intensity rebuild it");
-        var causticRaw=raw.ToArray(); d=signals.Diffuse.ToArray(); s=signals.Specular.ToArray(); a=signals.Albedo.ToArray(); e=signals.Unfiltered.ToArray();
+        var causticRaw=raw.ToArray(); d=signals.Diffuse.ToArray(); s=signals.Specular.ToArray(); a=signals.DiffuseFactor.ToArray(); e=signals.Unfiltered.ToArray(); specFactors=signals.SpecularFactor.ToArray();
         double causticLobeError=0;
         for(int y=0;y<height;y++)for(int x=0;x<width;x++)
-            causticLobeError=Math.Max(causticLobeError,Math.Abs(d[y,x].X*Math.Max(a[y,x].X,.001f)+s[y,x].X+e[y,x].X-causticRaw[y,x].X));
+            causticLobeError=Math.Max(causticLobeError,Math.Abs(d[y,x].X*a[y,x].X+s[y,x].X*specFactors[y,x].X+e[y,x].X-causticRaw[y,x].X));
         Require(causticLobeError<.0001,"Caustic diffuse/specular signals do not reconstruct raw radiance");
         backend.CausticsEnabled = false; Trace(0); var straight = raw.ToArray();
         backend.SetScene(glass with { Instances = [glass.Instances[0]] }); Trace(0); var unobstructed = raw.ToArray();
@@ -241,7 +242,7 @@ internal static class LightingProbe
         using (var smallGuide = device.AllocateReadWriteTexture2D<Float4>(32, 24))
         using (var smallSignals = new PbrSignals(device, 32, 24))
             backend.Trace(view, 2, 1, 1, default, 0, smallRaw, smallNormal, smallSurface, smallGuide,
-                smallSignals.Diffuse, smallSignals.Specular, smallSignals.Albedo, smallSignals.Unfiltered, smallSignals.SpecularGuide);
+                smallSignals);
         Trace(3);
         for (ulong i = 0; i < debug.NumStoredMessages; i++)
         {

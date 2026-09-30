@@ -26,10 +26,12 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    without false translation parallax. The opaque scene uses a zero reactive mask.
 3. SR-specific denoising stays in linear Rec.709 floating point. Temporal mode
    reprojects history, rejects disocclusions by view depth, and clamps it to the
-   current neighborhood. RELAX-style mode additionally applies five edge-aware
-   A-trous passes, using the existing normal/material guides. This is a custom
-   filter. The additional default **NVIDIA NRD RELAX** mode uses the official SDK
-   and bypasses these custom filters; see [NRD integration](NRD.md). None of these
+   current neighborhood. The default **NVIDIA NRD RELAX** mode uses the official SDK;
+   PBR scenes use its SH variant with material demodulation, SG resolve and
+   re-jittering before SR. Glass is composited after opaque denoising, using
+   current-frame reprojection and traced cache misses; its closest-surface motion
+   replaces background motion for SR. The custom RELAX/A-trous implementation
+   has been removed; see [NRD integration](NRD.md). None of these
    modes implements DLSS Ray Reconstruction. The separate DLSSD mode instead
    consumes the original noisy radiance and bypasses all conventional denoisers.
 4. The real vendor SDK consumes FP16 linear color, R32 depth, RG16F motion and

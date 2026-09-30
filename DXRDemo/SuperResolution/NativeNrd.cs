@@ -18,6 +18,7 @@ internal static unsafe partial class NativeNrd
         internal nint Specular, SpecularOutput;
         internal float DenoisingRange;
         internal uint Reserved;
+        internal nint DiffuseSh, SpecularSh, DiffuseShOutput, SpecularShOutput;
     }
 
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdAvailable")]

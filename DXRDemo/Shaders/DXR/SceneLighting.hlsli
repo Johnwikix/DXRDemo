@@ -126,12 +126,13 @@ Reservoir BuildReservoir(Surface s,float3 view,bool reuse,inout uint rng) {
     result.depth=length(s.p-CameraOrigin.xyz); result.roughness=s.roughness;
     return result;
 }
-void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out float3 diffuse,out float3 specular,out float3 unfiltered) {
+void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out float3 diffuse,out float3 specular,out float3 unfiltered,out float3 momentD,out float3 momentS) {
     // Few delta lights are cheaper and sharper with deterministic evaluation; emissive scenes use ReSTIR.
     if(Lighting.x==0 || (AnalyticLightCount()<=2 && Environment.y==0)) {
-        DirectClassic(s,view,rng,diffuse,specular,unfiltered); return;
+        DirectClassic(s,view,rng,diffuse,specular,unfiltered,momentD,momentS); return;
     }
-    diffuse=specular=unfiltered=0;
+    diffuse=specular=unfiltered=momentD=momentS=0;
+    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,s.base*(1-s.metallic)*(1-s.transmission),F0(s),s.roughness,factorD,factorS);
     Reservoir reservoir=BuildReservoir(s,view,reuse,rng);
     if(reuse) ReservoirsOut[pixel.y*(uint)Size.x+pixel.x]=reservoir;
     if(reservoir.weight>0) {
@@ -141,6 +142,7 @@ void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out floa
         float3 visibility=Visibility(Offset(s,l),l,maximum,rng,stochastic,reservoir.light.area==0);
         // Reservoir lighting is stochastic even for punctual lights and must enter the NRD/RR lobe signals.
         diffuse=d*visibility*reservoir.weight; specular=r*visibility*reservoir.weight;
+        momentD=l*_NRD_Luminance(diffuse/factorD); momentS=l*_NRD_Luminance(specular/factorS);
     }
     if(Environment.x>0) {
         float z=1-2*Random(rng),phi=2*PI*Random(rng),radius=sqrt(max(0,1-z*z));
@@ -150,6 +152,7 @@ void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out floa
             float3 energy=Sky(l)*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/lightPdf*s.ao*
                 Visibility(Offset(s,l),l,CameraRight.w,rng,stochastic);
             diffuse+=d*energy; specular+=r*energy;
+            momentD+=l*_NRD_Luminance(d*energy/factorD); momentS+=l*_NRD_Luminance(r*energy/factorS);
         }
     }
 }
@@ -233,8 +236,9 @@ void PhotonGen() {
         origin=Offset(s,next); direction=SafeNormalize(next,direction);
     }
 }
-void GatherCaustics(Surface s,float3 view,out float3 diffuse,out float3 specular) {
-    diffuse=specular=0;
+void GatherCaustics(Surface s,float3 view,out float3 diffuse,out float3 specular,out float3 momentD,out float3 momentS) {
+    diffuse=specular=momentD=momentS=0;
+    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,s.base*(1-s.metallic)*(1-s.transmission),F0(s),s.roughness,factorD,factorS);
     if(CausticSettings.x==0 || s.transmission>0) return;
     float radius=CausticSettings.y,radius2=radius*radius;
     int3 cell=(int3)floor(s.p/radius);
@@ -256,6 +260,7 @@ void GatherCaustics(Surface s,float3 view,out float3 diffuse,out float3 specular
             // Normalized Epanechnikov disk kernel: integral over the receiving surface is one.
             float3 energy=photon.flux*(2*(1-distance2/radius2)/(PI*radius2));
             diffuse+=energy*d; specular+=energy*r;
+            momentD+=photon.incoming*_NRD_Luminance(energy*d/factorD); momentS+=photon.incoming*_NRD_Luminance(energy*r/factorS);
         }
     }
 }

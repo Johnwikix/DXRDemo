@@ -1,8 +1,9 @@
 # Official NVIDIA NRD integration
 
 The default mesh denoiser is now **NVIDIA NRD 4.17.3 / RELAX_DIFFUSE**. Select it
-in Settings → 降噪. The existing temporal and RELAX-style filters remain separate
-comparison options. SDK absence or failure produces an explicit legacy-filter
+in Settings → 降噪. PBR scenes use **RELAX_DIFFUSE_SPECULAR_SH**. Temporal accumulation
+remains a comparison option; the custom RELAX implementation and its resources
+have been removed. SDK absence or failure produces an explicit temporal
 fallback in the status/HUD; the UI disables unavailable SDKs.
 
 The current mesh materials implement diffuse reflection only. RELAX_DIFFUSE is
@@ -10,9 +11,55 @@ the complete official algorithm for that signal, including prepass, reprojection
 accumulation, history repair/clamping, anti-firefly and A-trous filtering. The
 adapter consumes every dispatch returned by `nrd::GetComputeDispatches`; stable
 frames currently contain 12 dispatches. This does not expose every NRD algorithm
-in the UI: REBLUR, SIGMA, specular and SH variants require their corresponding
-signals and integration. Specular transport is not fabricated by filling a
-second channel with the same diffuse image.
+in the UI: REBLUR, SIGMA and other variants require their corresponding signals
+and integration. The PBR adapter supplies real diffuse/specular transport,
+first-bounce directional moments and matching material factors to the SH variant.
+
+## PBR glass and upscaling (2026-09-30)
+
+The old integration denoised glass transmission as a specular lobe using the
+glass pane's depth, normal and motion. That mixes unrelated surfaces behind
+the pane and discards detail needed by temporal upscalers. Its fully reactive
+glass mask also prevented useful SR history accumulation.
+
+The corrected sequence follows the NRD README and its transparent sample:
+
+1. Trace the primary **opaque** surface, skipping transmitting geometry only on
+   the primary ray. Secondary transport, transparent shadows and caustics still
+   use the actual materials. NRD guides describe the opaque surface being denoised.
+2. Separate diffuse/specular irradiance and apply `NRD_MaterialFactors` to both
+   lobes. Accumulate luminance-weighted moments from the actual light/first-bounce
+   directions, pack with `RELAX_FrontEnd_PackSh`, and execute all official SH
+   dispatches. Specular hit distances use the official averaging helpers.
+3. Unpack the SG output, resolve diffuse/specular against the current normal,
+   view and roughness, and apply `NRD_SG_ReJitter` when SR is active. Neighbor
+   accesses clamp to the render rectangle. Restore the same material factors,
+   then add unfiltered primary direct light and emission.
+4. Compose glass **after** NRD. Trace one reflection and one refraction path per
+   sample at fully transmitting primary surfaces. Look up lighting in the
+   completed current opaque frame with bilinear reprojection and position,
+   normal and outgoing-direction rejection. Cache misses continue the real
+   path tracer, including absorption and nested media. No SHARC cache is used.
+5. Keep opaque depth for SR, but patch motion to the closest glass layer, as in
+   the NRD transparent sample. Motion remains current-to-previous and unjittered.
+   Glass uses a 0.1 reactive value so stable detail can retain temporal history.
+
+NRD and SR have the same logical input/render resolution. SG resolve runs there
+before the vendor upscaler; it does not claim to create display-resolution guides.
+Native resolution uses no extra TAA, so noisy off-screen cache misses can remain
+visible without SR. Curved/refractive glass still follows the actual optical path;
+the closest-glass motion is a heuristic rather than exact refractive scene flow.
+
+Opaque and transparent guides are separate textures. The transparent guide stores
+the closest glass position with `w = -(rayDistance + 1)`; sky remains `w = -1`.
+Queues finish before borrowed textures/descriptors are reused. Cache SRVs are
+cleared after the glass fence, and linear denoised color remains a non-pixel SRV
+after execution, including the glass output.
+
+Old saved denoiser indices 2 (custom RELAX) and 3 (NRD) both migrate to the current
+NRD selection. Off and Temporal keep their saved meanings. DLSSD continues to
+consume raw noisy PBR radiance and uses its existing guides, independently of
+this NRD glass composition path.
 
 ## Data and resource contract
 
@@ -37,7 +84,7 @@ second channel with the same diffuse image.
   vendor SR SDKs continue to receive inverse projection jitter.
 - NRD output is unpacked with the official helper and multiplied by the same
   primary albedo. It then enters FSR/XeSS/DLSS, or the HDR/SDR encoder when SR is
-  off. The custom temporal/A-trous filters are bypassed when NRD is active.
+  off. The custom temporal reference is bypassed when NRD is active.
 - NRD works independently of SR. At native resolution this path uses unjittered
   pixel centers; NRD itself is a denoiser, not an added TAA pass. Vendor SR at
   100% can provide temporal antialiasing where supported.
@@ -48,7 +95,53 @@ second channel with the same diffuse image.
   Existing queue fences protect reuse and disposal. Reset uses the official
   `CLEAR_AND_RESTART`; resize/mode changes rebuild the size-dependent instance.
 
-## Verification on Intel Arc 140T (2026-09-29)
+## Current glass and pipeline verification on Intel Arc 140T (2026-09-30)
+
+`IntegrationProbe.exe --glass-sr` uses a unit-IOR glass slab in front of fine
+emissive stripes (linear values 1.0 and 0.65). This isolates filtering from optical
+distortion. Contrast is normalized to the glass-free reference; temporal RMS is
+measured in linear red-channel units over the last 12 of 48 stationary frames,
+on stripe interiors. It deliberately also runs the incorrect pane-guide path as
+a negative control, which reproduces the loss of detail.
+
+| Pipeline | Normalized contrast | Frame RMS |
+|---|---:|---:|
+| Incorrect pane guides, NRD | 0.02734 | — |
+| Corrected NRD, native 100% | 0.99969 | 0.01935 |
+| Corrected NRD + FSR 67% | 0.99790 | 0.00092 |
+| Corrected NRD + FSR 100% | 1.00296 | 0.00121 |
+| Corrected NRD + XeSS 67% | 0.99250 | 0.00561 |
+| Corrected NRD + XeSS 100% | 0.99391 | 0.00534 |
+
+- All positive glass cases execute 13 official NRD dispatches. Guide readback
+  verifies opaque depth and closest-glass motion separately; independent camera
+  projection checks unjittered motion. History reset and SR resize also pass,
+  with no D3D12 Error/Corruption messages. A split transmission texture checks
+  that opaque texels remain in the NRD guides; metallic non-transmitting areas
+  are also retained. That check fails before the material-aware primary query.
+- `--glass ../../Samples/RainyCorner/RainyCorner.glb` checks the actual refractive
+  scene against an independently sampled 512-SPP reference. Across 2,991 glass
+  pixels, RGB RMSE after `c / (1 + c)` compression is **0.217002** for raw 2 SPP
+  and **0.100277** for the composed NRD result. Non-unit IOR changes refraction;
+  transmission/volume import and stable primary guides pass.
+- `--scene`, `--sr` and `--lighting` pass: transactional scene loading, packaged
+  startup, camera/reset, hard shadows, ReSTIR and photon caustics, plus 60
+  FSR/XeSS × five-scale × three-denoiser × SDR/HDR combinations. Odd dimensions,
+  tiny input execution, history/disocclusion checks and mode transitions pass.
+- The default probe passes all **18** model/denoiser/SDR-HDR hardware/software
+  parity cases (maximum normalized RGBA RMSE **0.0007662**), resize and GPU HUD.
+- With only the probe's NRD.dll temporarily renamed, `--nrd-missing` reports
+  **Temporal** fallback and FSR still executes. The DLL was restored afterward.
+- Native bridge, integration probe and WinUI Release builds pass. WinUI retains
+  its existing generated WinUIEx obsolete `Icon` warning.
+- DLSS SR and DLSSD execution were not tested on this Intel adapter. These are
+  regression fixtures, not a general glass-quality or performance benchmark.
+
+Run the probe from `diagnostics/integration`; captures and logs are in its ignored
+`output/` directory. `--glass-sr` captures are under `output/glass-sr/`, while the
+actual scene's raw, NRD and reference images are under `output/scenes/`.
+
+## Historical mesh verification on Intel Arc 140T (2026-09-29)
 
 - Real SDK available and active at native resolution; stable-frame dispatch
   count is 12. D3D12 debug Error/Corruption messages fail the probe.
@@ -74,8 +167,8 @@ second channel with the same diffuse image.
 - Native and NRD+SR image captures were inspected. Release build passes with the
   pre-existing generated WinUIEx Icon warning. Sustained performance, subjective
   motion quality, physical HDR and slider interaction were not UI-tested.
-- NVIDIA DLSS execution is not tested on this Intel device. NRD is independent
-  of DLSSD; DLSS Ray Reconstruction remains a separate, unimplemented feature.
+- NVIDIA DLSS execution was not tested on this Intel device in that historical
+  probe. DLSS Ray Reconstruction uses a separate pipeline.
 
 Run `IntegrationProbe.exe --sr` from `diagnostics/integration` for the contract and
 quality checks; run without arguments for model/backend parity. `--nrd-missing`
@@ -88,6 +181,8 @@ beside it; arrow/PageUp/PageDown input is supported. Changes are applied after
 
 ## Sources and build provenance
 
+- [NRD upscaling, PSR, material demodulation and resolution guidance](https://github.com/NVIDIA-RTX/NRD#interaction-with-upscaling-dlssfsrxesstaau)
+- [Official transparent composition sample](https://github.com/NVIDIA-RTX/NRD-Sample/blob/simplex/Shaders/TraceTransparent.cs.hlsl)
 - [Pinned official NRD guide](https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/README.md)
 - [Pinned resource/API contract](https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/Include/NRDDescs.h)
 - [Camera/settings contract](https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/Include/NRDSettings.h)

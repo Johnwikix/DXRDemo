@@ -296,7 +296,7 @@ public sealed partial class MainWindow : WindowEx
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[3]).IsEnabled = status.Supports(ReconstructionMode.Dlss);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[4]).IsEnabled = status.Supports(ReconstructionMode.DlssRayReconstruction);
         DenoiserSelector.IsEnabled = status.Active != ReconstructionMode.DlssRayReconstruction;
-        ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.NrdAvailable;
+        ((ComboBoxItem)_settings.DenoiserSelector.Items[2]).IsEnabled = status.NrdAvailable;
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;
     }
@@ -340,7 +340,8 @@ public sealed partial class MainWindow : WindowEx
         if (_savedSettings is not { } s) return;
 
         RestoreSelection(ModelSelector, s.SceneIndex);
-        RestoreSelection(DenoiserSelector, s.DenoiserMode);
+        // 旧设置中的自实现 RELAX(2) 和 NRD(3) 均迁移到官方 NRD；保留已保存的关闭/时间累积。
+        RestoreSelection(DenoiserSelector, s.DenoiserMode is >= 2 ? (int)RayTraceDenoiserMode.NrdRelax : s.DenoiserMode);
         RestoreSelection(_settings.ReconstructionSelector, s.ReconstructionMode);
         if (s.RenderScalePercent is int scale &&
             scale >= _settings.RenderScaleSlider.Minimum && scale <= _settings.RenderScaleSlider.Maximum)

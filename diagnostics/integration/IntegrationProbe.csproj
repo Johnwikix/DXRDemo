@@ -16,6 +16,7 @@
     <Compile Include="Probe.cs" />
     <Compile Include="ReconstructionProbe.cs" />
     <Compile Include="SceneProbe.cs" />
+    <Compile Include="GlassReconstructionProbe.cs" />
     <Compile Include="LightingProbe.cs" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />
     <Compile Include="../../DXRDemo/DXR/*.cs" Exclude="../../DXRDemo/DXR/DxrRenderer.cs;../../DXRDemo/DXR/DxrSwapChain.cs" />

@@ -27,7 +27,7 @@
 | 灯光 | `KHR_lights_punctual`：方向光、点光源、聚光灯；颜色、强度、范围、锥角和节点变换 |
 | 常用扩展 | `KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization` |
 | 光照 | GGX 镜面反射、漫反射、ReSTIR DI、环境照明、自发光三角形采样、MIS、折射焦散、路径继续与 Russian roulette |
-| 降噪/显示 | NRD RELAX_DIFFUSE_SPECULAR、FSR/XeSS/DLSS SR、DLSSD 光线重建接入（运行验证留给用户）、线性滤波、曝光、SDR/HDR 编码 |
+| 降噪/显示 | NRD RELAX_DIFFUSE_SPECULAR_SH、SG resolve/re-jittering、降噪后玻璃合成、FSR/XeSS/DLSS SR、DLSSD、时间累积、曝光、SDR/HDR 编码 |
 
 这是静态场景渲染器，不宣称完整支持所有 glTF 扩展。蒙皮和 Morph Target 暂时明确拒绝，节点动画显示静态姿态并提示；点/线图元、UV 集 2 以上暂不支持。
 

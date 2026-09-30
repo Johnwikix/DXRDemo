@@ -40,7 +40,7 @@ internal static unsafe class ReconstructionProbe
             Render(pass, target, false, 6);
             Require(pass.ReconstructionStatus is { Active: ReconstructionMode.Fsr, NrdActive: false }, "Missing NRD disabled the independent SR provider");
             VerifyPixels(target); VerifyDebug(queue);
-            Console.WriteLine("PASS missing NRD DLL: explicit legacy denoiser fallback; FSR still executes");
+            Console.WriteLine("PASS missing NRD DLL: explicit Temporal fallback; FSR still executes");
             return;
         }
         Require(status.NrdAvailable && status.NrdActive && pass.NrdDispatchCount > 5, "Official NRD did not run at native resolution");
@@ -72,7 +72,7 @@ internal static unsafe class ReconstructionProbe
                     Require(active.InputWidth == 480 * scale / 100 && active.InputHeight == 270 * scale / 100, "Input dimensions differ from requested scale");
                     VerifyPixels(target);
                     VerifyDebug(queue);
-                    if (scale == 67 && (denoiser is RayTraceDenoiserMode.Relax or RayTraceDenoiserMode.NrdRelax) && !hdr)
+                    if (scale == 67 && denoiser == RayTraceDenoiserMode.NrdRelax && !hdr)
                         SavePpm(target, $"output/{mode}-{denoiser}-67-sdr.ppm");
                 }
                 Console.WriteLine($"PASS {mode} {scale}% / all denoisers / SDR+HDR");
@@ -159,7 +159,7 @@ internal static unsafe class ReconstructionProbe
         void Frame(Float2 orbit, Float2 jitter, int index)
         {
             backend.Trace(mesh, sr.InputWidth, sr.InputHeight, 2, 10, index, orbit, 2.7f, raw, normals, surfaces, jitter);
-            Require(sr.Execute(raw, normals, surfaces, target, orbit, 2.7f, jitter, RayTraceDenoiserMode.Relax, HdrRenderParameters.Default, 1.0 / 60), sr.Status.Message);
+            Require(sr.Execute(raw, normals, surfaces, target, orbit, 2.7f, jitter, RayTraceDenoiserMode.TemporalOnly, HdrRenderParameters.Default, 1.0 / 60), sr.Status.Message);
             VerifyDebug(info);
         }
         Frame(new(0, 0.165f), new(-0.37f, 0.29f), 0);
