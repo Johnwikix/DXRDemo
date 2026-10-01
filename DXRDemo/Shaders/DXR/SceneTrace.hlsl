@@ -25,7 +25,7 @@ struct Surface { float3 p, n, g, base, emission; float metallic, roughness, alph
 cbuffer Frame : register(b0) {
     float4 CameraOrigin, CameraForward, CameraRight, CameraUp, Size, Control, Environment, Limits, SunDirection, SunRadiance;
     float4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
-    float4 Lighting, CausticBounds, CausticSettings;
+    float4 Lighting, CausticBounds, CausticSettings, NeuralSettings, NeuralBounds;
 }
 RaytracingAccelerationStructure Scene : register(t0);
 StructuredBuffer<Vertex> Vertices : register(t1);
@@ -36,6 +36,7 @@ StructuredBuffer<Light> Lights : register(t5);
 StructuredBuffer<Emitter> Emitters : register(t6);
 Texture2D<float4> Textures[1024] : register(t0, space1);
 SamplerState Samplers[1024] : register(s0, space1);
+#include "NeuralRadianceCache.hlsli"
 #include "NRD/NRD.hlsli"
 Texture2D<float4> OpaqueColor : register(t0, space2);
 Texture2D<float4> OpaqueSurface : register(t1, space2);
@@ -335,6 +336,40 @@ bool SampleOpaque(Surface s,float3 view,out float3 radiance) {
     radiance/=max(weights,1e-8); return weights>.05;
 }
 
+NrcSample NrcMakeSample(Surface s,float3 view,float3 target) {
+    NrcSample sample=(NrcSample)0;
+    float3 normalized=saturate((s.p-NeuralBounds.xyz)/max(NeuralSettings.y,1e-3));
+    sample.position=float4(normalized,1);
+    sample.normal=float4(s.n,s.roughness);
+    sample.view=float4(view,0);
+    sample.albedo=float4(s.base*(1-s.metallic)*(1-s.transmission),s.ao);
+    sample.target=float4(max(target,0),1);
+    return sample;
+}
+bool NrcCanUse(Surface s) {
+    return NeuralSettings.x!=0 && s.transmission<=0 && s.metallic<=.95 && s.roughness>.03;
+}
+bool NrcLookup(Surface s,float3 view,out float3 radiance) {
+    radiance=0;
+    if(!NrcCanUse(s)) return false;
+    NrcSample sample=NrcMakeSample(s,view,0);
+    uint cell=NrcCell(sample);
+    if(NrcCoverage[cell]<4) return false;
+    radiance=NrcPredict(sample);
+    return all(isfinite(radiance)) && any(radiance>1e-5);
+}
+void NrcStore(Surface s,float3 view,float3 target) {
+    if(!NrcCanUse(s) || !any(target>1e-5)) return;
+    uint2 pixel=DispatchRaysIndex().xy;
+    uint width=max((uint)Size.x,1), height=max((uint)Size.y,1);
+    uint total=width*height, stride=max(total/NRC_MAX_SAMPLES,1);
+    uint linearIndex=pixel.y*width+pixel.x;
+    if(linearIndex%stride!=0) return;
+    uint pixelIndex=linearIndex/stride;
+    if(pixelIndex>=NRC_MAX_SAMPLES) return;
+    NrcSamples[pixelIndex]=NrcMakeSample(s,view,target);
+}
+
 void AccumulatePath(float3 value,int lobe,float3 direction,float3 factorD,float3 factorS,
     inout float3 sumD,inout float3 sumS,inout float3 momentD,inout float3 momentS) {
     if(lobe==0) { sumD+=value; momentD+=direction*_NRD_Luminance(value/factorD); }
@@ -420,8 +455,21 @@ void RenderPixel(bool transparentPass) {
             float3 cmD=causticMomentD,cmS=causticMomentS;
             if(bounce>0 || coverage) GatherCaustics(s,-rd,causticD,causticS,cmD,cmS);
             directD+=causticD; directS+=causticS;
-            if(bounce==0) { sumD+=directD; sumS+=directS; sumE+=unfiltered; momentD+=directMomentD+cmD; momentS+=directMomentS+cmS; }
-            else AccumulatePath(throughput*(directD+directS+unfiltered),firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS);
+            if(bounce==0) {
+                sumD+=directD; sumS+=directS; sumE+=unfiltered; momentD+=directMomentD+cmD; momentS+=directMomentS+cmS;
+            }
+            else {
+                float3 localRadiance=directD+directS+unfiltered;
+                float3 predicted;
+                if(NrcLookup(s,-rd,predicted)) {
+                    AccumulatePath(throughput*predicted,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS);
+                    break;
+                }
+                AccumulatePath(throughput*localRadiance,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS);
+                // One training target per pixel is enough: the update pass averages
+                // the batch and keeps the local path contribution as the teacher.
+                if(sample==0) NrcStore(s,-rd,localRadiance);
+            }
             if(s.transmission>0) {
                 float u=Random(rng),phi=2*PI*Random(rng),a=s.roughness*s.roughness;
                 float ct=sqrt((1-u)/(1+(a*a-1)*u)),st=sqrt(max(0,1-ct*ct));

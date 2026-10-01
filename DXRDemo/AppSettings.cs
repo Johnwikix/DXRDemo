@@ -27,6 +27,7 @@ internal sealed class AppSettings
     public double? SunElevation { get; set; }
     public double? SunIntensity { get; set; }
     public bool? ModelLightingOnly { get; set; }
+    public bool? NeuralCacheEnabled { get; set; }
     public bool? HdrEnabled { get; set; }
     public bool? ShowDiagnostics { get; set; }
     public int? CameraMode { get; set; }

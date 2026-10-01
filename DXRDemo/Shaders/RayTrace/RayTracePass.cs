@@ -26,7 +26,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     private sealed record Settings(int Scene = 0, RayTraceDenoiserMode Denoiser = RayTraceDenoiserMode.NrdRelax,
         int Bounces = 10, int Samples = 2, Float2 Orbit = default, float Distance = 2.7f, Float2 Mouse = default, int Revision = 0,
         ReconstructionMode Reconstruction = ReconstructionMode.Off, int RenderScale = 67, int CameraReset = 0,
-        SceneAsset? Asset = null, float Environment = 1, float Exposure = 0, SunLightSettings Sun = default, bool ExternalLightingEnabled = true);
+        SceneAsset? Asset = null, float Environment = 1, float Exposure = 0, SunLightSettings Sun = default, bool ExternalLightingEnabled = true,
+        bool NeuralCache = false);
     private readonly object _settingsLock = new();
     private Settings _settings = new(Orbit: new Float2(0, 0.165f), Sun: SunLightSettings.Default);
     private Settings Snapshot => Volatile.Read(ref _settings);
@@ -78,6 +79,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     public float EnvironmentIntensity { get => Snapshot.Environment; set => Change(s => s with { Environment = Math.Clamp(value, 0, 100) }); }
     /// <summary>Gets or sets the switch for external sun and environment; model lights and emissive materials remain enabled.</summary>
     public bool ExternalLightingEnabled { get => Snapshot.ExternalLightingEnabled; set => Change(s => s with { ExternalLightingEnabled = value }); }
+    /// <summary>Enables the online GPU neural radiance cache for diffuse secondary paths.</summary>
+    public bool NeuralCacheEnabled { get => Snapshot.NeuralCache; set => Change(s => s with { NeuralCache = value }); }
     /// <summary>Gets or sets exposure in stops for the linear output pipeline.</summary>
     public float Exposure { get => Snapshot.Exposure; set => Change(s => s with { Exposure = Math.Clamp(value, -16, 16) }); }
     /// <summary>Gets or sets the additional global sun; changes invalidate lighting history without rebuilding geometry.</summary>
@@ -222,7 +225,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 : $"SR {sr.Active}  {sr.InputWidth}x{sr.InputHeight} -> {sr.OutputWidth}x{sr.OutputHeight}";
             string denoiser = sr?.Active == ReconstructionMode.DlssRayReconstruction ? "DLSS RAY RECONSTRUCTION" : s.Denoiser == RayTraceDenoiserMode.NrdRelax
                 ? (sr?.NrdActive == true ? "NRD RELAX" : "TEMPORAL (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
-            return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}\n{reconstruction}";
+            string nrc = s.NeuralCache ? "NRC ON" : "NRC OFF";
+            return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}  {nrc}\n{reconstruction}";
         }
     }
     public string Id => "ray-trace";
@@ -285,7 +289,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         {
             bool lightingCut = cameraCut != _cameraCut;
             if (_previousSettings is not Settings old || old.CameraReset != s.CameraReset || old.Scene != s.Scene || old.Asset != s.Asset || cameraCut != _cameraCut ||
-                old.Samples != s.Samples || old.Bounces != s.Bounces || old.Denoiser != s.Denoiser || old.Environment != s.Environment || old.Sun != s.Sun || old.ExternalLightingEnabled != s.ExternalLightingEnabled)
+                old.Samples != s.Samples || old.Bounces != s.Bounces || old.Denoiser != s.Denoiser || old.Environment != s.Environment || old.Sun != s.Sun ||
+                old.ExternalLightingEnabled != s.ExternalLightingEnabled || old.NeuralCache != s.NeuralCache)
                 _reconstruction!.Reset();
             _cameraCut = cameraCut;
             Float2 jitter = _reconstruction!.Jitter();
@@ -293,7 +298,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             {
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
-                    _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd);
+                    _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd, s.NeuralCache);
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
             bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight, pbr && nrd ? _sceneBackend : null);

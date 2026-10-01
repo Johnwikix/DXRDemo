@@ -20,6 +20,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     private ID3D12RootSignature _root = null!;
     private ID3D12StateObject _pipeline = null!;
     private ID3D12Resource _constants = null!;
+    private NeuralRadianceCache _nrc = null!;
     private SceneGpu? _scene;
     private bool _initialized;
     private int _stride;
@@ -51,7 +52,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     {
         public Vector4 Origin, Forward, Right, Up, Size, Control, Environment, Limits, SunDirection, SunRadiance;
         public Vector4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
-        public Vector4 Lighting, CausticBounds, CausticSettings;
+        public Vector4 Lighting, CausticBounds, CausticSettings, NeuralSettings, NeuralBounds;
     }
     private sealed class SceneGpu : IDisposable
     {
@@ -83,6 +84,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 0, 2)), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.Sampler, MaxTextures, 0, 1)), ShaderVisibility.All));
         for (uint i = 9; i < 13; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
+        for (uint i = 20; i < 24; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         _root = _gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())); _owned.Add(_root);
         using var compiler = new DxrShaderCompiler();
         compiler.CompileLibrary(
@@ -105,6 +107,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             _lightingTable.Unmap(0);
         }
         _constants = DxrResources.CreateUploadBuffer(_gpu.Device, 512); _owned.Add(_constants);
+        _nrc = new NeuralRadianceCache(_gpu.Device); _nrc.EnsureAllocated(); _owned.Add(_nrc);
         _photons = DxrResources.CreateDefaultBuffer(_gpu.Device, PhotonCount * PhotonStride, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess); _owned.Add(_photons);
         _photonGrid = DxrResources.CreateDefaultBuffer(_gpu.Device, PhotonGridSize * 4, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess); _owned.Add(_photonGrid);
         _stride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
@@ -228,6 +231,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             cancellation.ThrowIfCancellationRequested();
             // 已完成的 fence 保护旧场景释放；候选场景完全成功后才替换。
             _scene?.Dispose(); _scene = scene; _boundOutput = null; _historyValid = false; _photonsValid = false;
+            _nrc.ResetPending = true;
         }
         catch { _gpu.SignalAndWait(); scene.Dispose(); throw; }
     }
@@ -273,7 +277,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     internal void Trace(in CameraFrame camera, int frame, int samples, int bounces, Float2 jitter, float environment,
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
         ReadWriteTexture2D<Float4> guide, PbrSignals signals,
-        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false)
+        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false,
+        bool neuralCacheEnabled = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
         if (raw.Width != _reservoirWidth || raw.Height != _reservoirHeight)
@@ -298,6 +303,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
+        float neuralExtent = MathF.Max(Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), camera.Near * 16);
         Constants data = new() { Origin = new(camera.Origin, camera.Near), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
             Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterArea, 0),
@@ -306,7 +312,9 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             PreviousOrigin = _previous.Origin, PreviousForward = _previous.Forward, PreviousRight = _previous.Right, PreviousUp = _previous.Up, PreviousSize = _previous.Size,
             Lighting = new(RestirEnabled ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
             CausticSettings = new(CausticsEnabled && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,
-                MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12) };
+                MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12),
+            NeuralSettings = new(neuralCacheEnabled ? 1 : 0, neuralExtent, 1, _nrc.TrainingSteps),
+            NeuralBounds = new(scene.Asset.Minimum, 0) };
         data.Up.W = opaqueForNrd ? 1 : 0;
         bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 && data.Up.W == _previous.Up.W &&
             data.Environment == _previous.Environment && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
@@ -315,8 +323,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             Vector3.Dot(camera.Forward, new(_previous.Forward.X, _previous.Forward.Y, _previous.Forward.Z)) > .9f &&
             Vector3.Distance(camera.Origin, new(_previous.Origin.X, _previous.Origin.Y, _previous.Origin.Z)) < data.Limits.Y * .1f;
         data.Lighting.Y = compatible ? 1 : 0;
+        if (_historyValid && data.NeuralSettings.X != _previous.NeuralSettings.X) _nrc.ResetPending = true;
         void* pointer; _constants.Map(0, null, &pointer).CheckError(); *(Constants*)pointer = data; _constants.Unmap(0);
         Begin(); var cmd = _gpu.CommandList;
+        if (neuralCacheEnabled) _nrc.BeginFrame(cmd);
         cmd.SetDescriptorHeaps(2, scene.DescriptorHeaps); cmd.SetComputeRootSignature(_root);
         cmd.SetComputeRootConstantBufferView(0, _constants.GPUVirtualAddress);
         cmd.SetComputeRootShaderResourceView(1, scene.Tlas.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(2, scene.Vertices.GPUVirtualAddress);
@@ -329,6 +339,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.SetComputeRootUnorderedAccessView(11, _reservoirs[_reservoirWrite]!.GPUVirtualAddress);
         cmd.SetComputeRootUnorderedAccessView(12, _photons.GPUVirtualAddress);
         cmd.SetComputeRootUnorderedAccessView(13, _photonGrid.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(14, _nrc.Network.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(15, _nrc.Samples.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(16, _nrc.Gradients.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(17, _nrc.Coverage.GPUVirtualAddress);
         // Static geometry/light photon map is camera-independent. Do not replace it with another
         // sparse random map every frame or on a denoiser/camera-history reset.
         bool rebuildPhotons = data.CausticSettings.X > 0 && (!_photonsValid ||
@@ -347,6 +361,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)raw.Width, (uint)raw.Height, 1));
         foreach (var output in _outputs) cmd.ResourceBarrierUnorderedAccessView(output!);
         cmd.ResourceBarrierUnorderedAccessView(_reservoirs[_reservoirWrite]!);
+        if (neuralCacheEnabled) _nrc.Train(cmd, NeuralRadianceCache.MaxSamples);
         End();
         if (rebuildPhotons) { _photonFrame = data; _photonsValid = true; PhotonBuildCount++; }
         _previous = data; _previousFrame = frame; _historyValid = true; _reservoirWrite = 1 - _reservoirWrite;
@@ -373,11 +388,16 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.SetComputeRootUnorderedAccessView(10, _reservoirs[_reservoirWrite]!.GPUVirtualAddress);
         cmd.SetComputeRootUnorderedAccessView(11, _reservoirs[1 - _reservoirWrite]!.GPUVirtualAddress);
         cmd.SetComputeRootUnorderedAccessView(12, _photons.GPUVirtualAddress); cmd.SetComputeRootUnorderedAccessView(13, _photonGrid.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(14, _nrc.Network.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(15, _nrc.Samples.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(16, _nrc.Gradients.GPUVirtualAddress);
+        cmd.SetComputeRootUnorderedAccessView(17, _nrc.Coverage.GPUVirtualAddress);
         cmd.SetPipelineState1(_pipeline);
         cmd.DispatchRays(new(new(_lightingTable.GPUVirtualAddress + 128, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
             new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)_reservoirWidth, (uint)_reservoirHeight, 1));
         cmd.ResourceBarrierUnorderedAccessView(output); cmd.ResourceBarrierUnorderedAccessView(_outputs[11]!);
         cmd.ResourceBarrierUnorderedAccessView(_outputs[14]!); cmd.ResourceBarrierUnorderedAccessView(_outputs[15]!);
+        if (_previous.NeuralSettings.X != 0) cmd.ResourceBarrierUnorderedAccessView(_nrc.Samples);
         End();
         // Restore the opaque output after the glass fence; other UAV bindings are unchanged.
         _gpu.Device.CreateUnorderedAccessView(_outputs[0], null, null, start);

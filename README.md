@@ -44,7 +44,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **光照**：GGX 镜面反射、漫反射、直接光、环境照明、自发光三角形采样、MIS、路径继续与 Russian roulette
 - **轨迹后端**：`DxrMeshBackend`（硬件 DXR，`DxrSceneBackend` 提供导入场景；旧 5-球体程序化 `DxrRenderer` 与 ComputeSharp `SoftwareMeshBackend` 保留为对照路径）
 - **SM 6.9 / DXR 1.2**：设备启动时查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 Shader Execution Reordering（`HitObject::TraceRay` + `MaybeReorderThread`），不支持时自动使用 `lib_6_5`，保持旧版 DXR 驱动可运行。阴影查询只保留可见性所需的命中状态，跳过不必要的 closest-hit/miss payload 回传。
-- **神经 DXR 评估**：SM 6.9 零售特性没有通用的神经辐射缓存或 Cooperative Vector。项目已有 DLSS Ray Reconstruction（DLSSD）作为神经降噪/重建路径；没有引入未经训练和画质验证的 NRC 网络，避免把训练、缓存更新和额外推理开销叠加到实时路径追踪上。
+- **神经辐射缓存（NRC）**：可选的 GPU 在线 32→32→3 MLP，用二次命中的局部辐射样本做反向传播与 Adam 更新，覆盖度达到阈值后提前终止漫反射二次路径。场景或开关变化会重置网络，光照变化继续在线适应；玻璃、镜面和主光照仍走完整 DXR 路径。
 
 ### 降噪 / 超分
 

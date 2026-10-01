@@ -30,6 +30,8 @@
     <Content Include="../../DXRDemo/Shaders/DXR/Reconstruction.hlsl" Link="Shaders/DXR/Reconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli" Link="Shaders/DXR/SceneLighting.hlsli" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/NeuralRadianceCache.hlsl" Link="Shaders/DXR/NeuralRadianceCache.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/NeuralRadianceCache.hlsli" Link="Shaders/DXR/NeuralRadianceCache.hlsli" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Import Project="../../DXRDemo/SuperResolution/ReconstructionAssets.targets" />
 </Project>

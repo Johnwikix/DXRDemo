@@ -41,6 +41,8 @@
                 <NumberBox x:Name="CameraSpeedBox" x:FieldModifier="internal" Header="自由相机速度（场景尺度倍数）" Minimum="0.01" Maximum="100" Value="1" SpinButtonPlacementMode="Compact" />
                 <ToggleSwitch x:Name="ModelLightingOnlyToggle" x:FieldModifier="internal" Header="仅使用模型光照" OnContent="关闭外部天光与太阳" OffContent="允许外部光照" AutomationProperties.AutomationId="ModelLightingOnlyToggle" />
                 <TextBlock Text="开启后保留模型内嵌灯光和自发光；关闭后恢复之前的天光与太阳设置。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <ToggleSwitch x:Name="NeuralCacheToggle" x:FieldModifier="internal" Header="神经辐射缓存（NRC）" IsOn="False" OnContent="开启" OffContent="关闭" AutomationProperties.AutomationId="NeuralCacheToggle" />
+                <TextBlock Text="在线学习漫反射间接光，缓存预热后减少深层 DXR 路径；场景或开关切换会重置网络，光照变化会继续逐帧适应。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <NumberBox x:Name="EnvironmentBox" x:FieldModifier="internal" Header="环境光强度（0 为关闭）" Minimum="0" Maximum="100" Value="1" SpinButtonPlacementMode="Compact" />
                 <ToggleSwitch x:Name="SunToggle" x:FieldModifier="internal" Header="全局太阳光" OnContent="开启" OffContent="关闭" AutomationProperties.AutomationId="SunToggle" />
                 <Grid ColumnSpacing="16">

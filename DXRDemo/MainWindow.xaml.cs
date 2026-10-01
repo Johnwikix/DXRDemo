@@ -37,6 +37,7 @@ public sealed partial class MainWindow : WindowEx
     private ComboBox DenoiserSelector => _settings.DenoiserSelector;
     private NumberBox MaxBouncesBox => _settings.MaxBouncesBox;
     private NumberBox SamplesBox => _settings.SamplesBox;
+    private ToggleSwitch NeuralCacheToggle => _settings.NeuralCacheToggle;
     private FrameworkElement RayTraceParamBar => _settings.RayTraceParamBar;
     private ToggleSwitch HdrToggle => _settings.HdrToggle;
     private TextBlock HdrStatusText => _settings.HdrStatusText;
@@ -96,6 +97,11 @@ public sealed partial class MainWindow : WindowEx
         {
             if (!_syncingRayTraceParams && _activePass is RayTracePass pass)
                 pass.ExternalLightingEnabled = !_settings.ModelLightingOnlyToggle.IsOn;
+        };
+        NeuralCacheToggle.Toggled += (_, _) =>
+        {
+            if (!_syncingRayTraceParams && _activePass is RayTracePass pass)
+                pass.NeuralCacheEnabled = NeuralCacheToggle.IsOn;
         };
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
         _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1920,
@@ -255,6 +261,7 @@ public sealed partial class MainWindow : WindowEx
             _settings.SunElevationBox.Value = pass.Sun.Elevation;
             _settings.SunIntensityBox.Value = pass.Sun.Intensity;
             _settings.ModelLightingOnlyToggle.IsOn = !pass.ExternalLightingEnabled;
+            NeuralCacheToggle.IsOn = pass.NeuralCacheEnabled;
         }
         finally
         {
@@ -362,6 +369,7 @@ public sealed partial class MainWindow : WindowEx
         RestoreNumber(_settings.SunIntensityBox, s.SunIntensity);
         if (s.SunEnabled is { } sun) _settings.SunToggle.IsOn = sun;
         if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
+        if (s.NeuralCacheEnabled is { } neuralCache) NeuralCacheToggle.IsOn = neuralCache;
         if (s.HdrEnabled is { } hdr)
         {
             _hdrAutoEnabled = true; // suppress first-detection auto-enable so the saved choice wins
@@ -417,6 +425,7 @@ public sealed partial class MainWindow : WindowEx
         _settings.SunIntensityBox.ValueChanged += (_, _) => QueueSettingsSave();
         _settings.SunToggle.Toggled += (_, _) => QueueSettingsSave();
         _settings.ModelLightingOnlyToggle.Toggled += (_, _) => QueueSettingsSave();
+        NeuralCacheToggle.Toggled += (_, _) => QueueSettingsSave();
         HdrToggle.Toggled += (_, _) => QueueSettingsSave();
         _settings.DiagnosticsToggle.Toggled += (_, _) => QueueSettingsSave();
     }
@@ -444,6 +453,7 @@ public sealed partial class MainWindow : WindowEx
         SunElevation = CaptureNumber(_settings.SunElevationBox),
         SunIntensity = CaptureNumber(_settings.SunIntensityBox),
         ModelLightingOnly = _settings.ModelLightingOnlyToggle.IsOn,
+        NeuralCacheEnabled = NeuralCacheToggle.IsOn,
         HdrEnabled = HdrToggle.IsOn,
         ShowDiagnostics = _settings.DiagnosticsToggle.IsOn,
         CameraMode = CameraModeSelector.SelectedIndex,
