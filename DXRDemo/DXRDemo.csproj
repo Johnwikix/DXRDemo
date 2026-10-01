@@ -20,8 +20,9 @@
 
   <ItemGroup>
     <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
-    <PackageReference Include="Microsoft.Direct3D.DXC" Version="1.9.2602.24" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
+    <PackageReference Include="Microsoft.Direct3D.DXC" Version="1.9.2609.5" />
+    <PackageReference Include="Microsoft.Direct3D.D3D12" Version="1.619.6" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
@@ -39,13 +40,25 @@
     <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">x86</_DxcSourceArch>
     <_DxcSourceArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(RuntimeIdentifier)' == 'win-arm64'">arm64</_DxcSourceArch>
     <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x64' Or '$(RuntimeIdentifier)' == 'win-x64'">x64</_DxcSourceArch>
-    <_DxcSourceDir Condition="'$(_DxcSourceArch)' != ''">$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.direct3d.dxc', '1.9.2602.24', 'build', 'native', 'bin', '$(_DxcSourceArch)'))</_DxcSourceDir>
+    <_DxcSourceDir Condition="'$(_DxcSourceArch)' != ''">$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.direct3d.dxc', '1.9.2609.5', 'build', 'native', 'bin', '$(_DxcSourceArch)'))</_DxcSourceDir>
+    <_D3d12SourceArch Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">win32</_D3d12SourceArch>
+    <_D3d12SourceArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(RuntimeIdentifier)' == 'win-arm64'">arm64</_D3d12SourceArch>
+    <_D3d12SourceArch Condition="'$(PlatformTarget)' == 'x64' Or '$(RuntimeIdentifier)' == 'win-x64'">x64</_D3d12SourceArch>
+    <_D3d12SourceDir Condition="'$(_D3d12SourceArch)' != ''">$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.direct3d.d3d12', '1.619.6', 'build', 'native', 'bin', '$(_D3d12SourceArch)'))</_D3d12SourceDir>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(_DxcSourceArch)' != ''">
     <None Include="$(_DxcSourceDir)\dxc.exe" Link="dxc.exe" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(_DxcSourceDir)\dxcompiler.dll" Link="dxcompiler.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(_DxcSourceDir)\dxil.dll" Link="dxil.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- DirectX 12 Agility 1.619 supplies the SM 6.9 runtime. The app activates
+       it through ID3D12DeviceFactory and falls back to the inbox runtime when
+       the DLL is unavailable or the device does not expose SM 6.9. -->
+  <ItemGroup Condition="'$(_D3d12SourceArch)' != ''">
+    <None Include="$(_D3d12SourceDir)\D3D12Core.dll" Link="D3D12\D3D12Core.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Publish Properties -->

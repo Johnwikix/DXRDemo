@@ -1,6 +1,6 @@
 param([string]$DxcPath)
 $ErrorActionPreference = 'Stop'
-if (-not $DxcPath) { $DxcPath = Join-Path $env:USERPROFILE '.nuget/packages/microsoft.direct3d.dxc/1.9.2602.24/build/native/bin/x64/dxc.exe' }
+if (-not $DxcPath) { $DxcPath = Join-Path $env:USERPROFILE '.nuget/packages/microsoft.direct3d.dxc/1.9.2609.5/build/native/bin/x64/dxc.exe' }
 if (-not (Test-Path -LiteralPath $DxcPath)) { throw 'Restore Microsoft.Direct3D.DXC or pass -DxcPath with a matching DXC executable.' }
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $cmake = & $vswhere -latest -products '*' -find 'Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe' | Select-Object -First 1

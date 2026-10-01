@@ -85,7 +85,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         for (uint i = 9; i < 13; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         _root = _gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())); _owned.Add(_root);
         using var compiler = new DxrShaderCompiler();
-        compiler.CompileLibrary(Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "SceneTrace.hlsl"));
+        compiler.CompileLibrary(
+            Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "SceneTrace.hlsl"),
+            _gpu.SupportsShaderModel69,
+            _gpu.SupportsShaderModel69);
         _pipeline = _gpu.Device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
         [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("TransparentRayGen"), new("PhotonGen"), new("ClearPhotonGrid"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
          new(new HitGroupDescription("HitGroup_Sphere", HitGroupType.Triangles, anyHitShaderImport: "AnyHit", closestHitShaderImport: "ClosestHit")),

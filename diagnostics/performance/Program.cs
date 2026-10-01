@@ -31,7 +31,7 @@ unsafe class Program
             if (proc.ExitCode != 0) throw new Exception("DXC failed");
             bytecode = File.ReadAllBytes(shader + ".dxil");
         }
-        else { compiler.CompileLibrary(shader); bytecode = compiler.DxilBytes; }
+        else { compiler.CompileLibrary(shader, gpu.SupportsShaderModel69, shader.Contains("SceneTrace", StringComparison.OrdinalIgnoreCase)); bytecode = compiler.DxilBytes; }
         using var scene = new DxrAccelerationStructure();
         gpu.CommandAllocator.Reset(); gpu.CommandList.Reset(gpu.CommandAllocator);
         scene.Build(gpu.Device, gpu.CommandList);

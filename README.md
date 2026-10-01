@@ -33,7 +33,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 
 ### 渲染
 
-- **硬件 DXR 管线**：`RayGeneration / ClosestHit / Miss / Intersection` 四类着色器，启动时由 **DXC** 运行时编译 HLSL（`sm_6_5`）为 DXIL，无需预烘焙
+- **硬件 DXR 管线**：`RayGeneration / ClosestHit / Miss / Intersection` 四类着色器，启动时由 **DXC** 运行时编译 HLSL（优先 `lib_6_9`，旧运行时回退 `lib_6_5`）为 DXIL，无需预烘焙
 - **glTF 2.0 / GLB**：JSON、外部资源、GLB、Data URI；多场景、节点层级、矩阵/TRS、重复网格实例、负缩放 / 非均匀缩放、包围盒自动取景
 - **网格**：`TRIANGLES / TRIANGLE_STRIP / TRIANGLE_FAN`；索引、法线、切线、顶点颜色、`TEXCOORD_0/1`
 - **材质（Metallic-Roughness）**：基础色 / 金属-粗糙度 / 法线 / 遮蔽 / 自发光贴图及因子；双面
@@ -43,6 +43,8 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **常用扩展**：`KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization`
 - **光照**：GGX 镜面反射、漫反射、直接光、环境照明、自发光三角形采样、MIS、路径继续与 Russian roulette
 - **轨迹后端**：`DxrMeshBackend`（硬件 DXR，`DxrSceneBackend` 提供导入场景；旧 5-球体程序化 `DxrRenderer` 与 ComputeSharp `SoftwareMeshBackend` 保留为对照路径）
+- **SM 6.9 / DXR 1.2**：设备启动时查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 Shader Execution Reordering（`HitObject::TraceRay` + `MaybeReorderThread`），不支持时自动使用 `lib_6_5`，保持旧版 DXR 驱动可运行。阴影查询只保留可见性所需的命中状态，跳过不必要的 closest-hit/miss payload 回传。
+- **神经 DXR 评估**：SM 6.9 零售特性没有通用的神经辐射缓存或 Cooperative Vector。项目已有 DLSS Ray Reconstruction（DLSSD）作为神经降噪/重建路径；没有引入未经训练和画质验证的 NRC 网络，避免把训练、缓存更新和额外推理开销叠加到实时路径追踪上。
 
 ### 降噪 / 超分
 
@@ -76,10 +78,11 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 | Vortice.D3DCompiler | 3.6.2 |
 | ComputeSharp | 3.2.0 |
 | SharpGLTF.Core | 1.0.6（glTF 解析） |
-| Microsoft.Direct3D.DXC | 1.9.2602.24（DXC NuGet + 本机复制） |
-| Microsoft.Windows.SDK.BuildTools | 10.0.28000.2270 |
+| Microsoft.Direct3D.DXC | 1.9.2609.5（DXC NuGet + 本机复制） |
+| Microsoft.Direct3D.D3D12 | 1.619.6（Agility runtime，SM 6.9 / DXR 1.2） |
+| Microsoft.Windows.SDK.BuildTools | 10.0.28000.2705 |
 | WinUIEx | 2.9.2 |
-| HLSL Shader Model | `lib_6_5`（DXR 路径） |
+| HLSL Shader Model | `lib_6_9`（DXR 路径，SM 6.5 回退） |
 | 原生桥接 | x64，C++ v145 工具集，PowerShell 7 |
 | 厂商 SDK | NVIDIA NRD 4.17.3、AMD FSR 3.1、Intel XeSS、NVIDIA DLSS / DLSSD（固定版本与 SHA-256 校验，见 `External/NRD/` 与 `External/Upscalers/`） |
 
@@ -88,7 +91,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 ## 环境要求 Requirements
 
 - Windows 10 1809+（最低平台版本 10.0.17763.0）
-- 支持 DXR 的 GPU（NVIDIA RTX / GTX 16 系及以上、AMD RX 6000+ 等）。启动时检查 `D3D12_FEATURE_DATA_D3D12_OPTIONS5.RaytracingTier`，不满足时状态栏提示
+- 支持 DXR 的 GPU（NVIDIA RTX / GTX 16 系及以上、AMD RX 6000+ 等）。启动时检查 `D3D12_FEATURE_DATA_D3D12_OPTIONS5.RaytracingTier` 和 `D3D12_FEATURE_SHADER_MODEL`；SM 6.9 运行时不可用时自动回退 `lib_6_5`
 - HDR10（可选）：需要 Windows HDR 开启的显示器
 - 构建：Visual Studio 2022 + .NET 10 SDK；x64 还需 PowerShell 7 与 C++ v145 工具集
 

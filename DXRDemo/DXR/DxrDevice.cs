@@ -19,9 +19,34 @@ public sealed class DxrDevice : IDisposable
     public ID3D12GraphicsCommandList4 CommandList { get; private set; } = null!;
     public IDXGIFactory7 DxgiFactory { get; private set; } = null!;
     public ID3D12Fence Fence { get; private set; } = null!;
+    /// <summary>Highest shader model reported by the active D3D12 runtime/driver.</summary>
+    public ShaderModel HighestShaderModel { get; private set; } = ShaderModel.Model6_5;
+    /// <summary>True when DXR 1.2 / SM 6.9 shader features are available.</summary>
+    public bool SupportsShaderModel69 => (int)HighestShaderModel >= (int)ShaderModel.Model6_9;
+
+    /// <summary>
+    /// Selects the app-local Agility runtime before any D3D12 device exists.
+    /// This is useful for ComputeSharp, which owns the device used by the main
+    /// renderer. On systems where the SDK configuration API is unavailable,
+    /// callers continue with the inbox runtime and the SM 6.5 path.
+    /// </summary>
+    public static bool TryActivateAgilityRuntime()
+    {
+        try
+        {
+            using var configuration = D3D12.D3D12GetInterface<ID3D12SDKConfiguration>(
+                D3D12.D3D12SDKConfigurationClsId);
+            return configuration.SetSDKVersion(619, "D3D12").Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private ulong _fenceValue;
     private bool _disposed;
+    private ID3D12DeviceFactory? _deviceFactory;
     private readonly AutoResetEvent _fenceEvent = new(false);
 
     public void Initialize(ID3D12Device5? sharedDevice = null)
@@ -44,6 +69,12 @@ public sealed class DxrDevice : IDisposable
 
         DxgiFactory = global::Vortice.DXGI.DXGI.CreateDXGIFactory2<IDXGIFactory7>(false);
 
+        // Agility 1.619 is the first retail runtime with SM 6.9/DXR 1.2.
+        // CreateDeviceFactory selects the app-local D3D12Core.dll without
+        // relying on apphost exports; if it is absent, keep the inbox path.
+        if (sharedDevice == null)
+            _deviceFactory = TryCreateAgilityFactory();
+
         IDXGIAdapter1? adapter = null;
         Device = sharedDevice!;
         for (uint i = 0; sharedDevice == null && DxgiFactory.EnumAdapters1(i, out adapter).Success; i++)
@@ -54,12 +85,36 @@ public sealed class DxrDevice : IDisposable
 
             try
             {
-                Device = D3D12.D3D12CreateDevice<ID3D12Device5>(adapter, FeatureLevel.Level_11_0);
+                if (_deviceFactory != null)
+                {
+                    Device = _deviceFactory.CreateDevice<ID3D12Device5>(
+                        adapter.NativePointer, FeatureLevel.Level_11_0);
+                }
+                else
+                {
+                    Device = D3D12.D3D12CreateDevice<ID3D12Device5>(adapter, FeatureLevel.Level_11_0);
+                }
                 if (Device != null)
                     break;
             }
             catch
             {
+                // A stale/missing app-local runtime must not prevent the
+                // system D3D12 runtime from serving older machines.
+                if (_deviceFactory != null)
+                {
+                    _deviceFactory.Dispose();
+                    _deviceFactory = null;
+                    try
+                    {
+                        Device = D3D12.D3D12CreateDevice<ID3D12Device5>(adapter, FeatureLevel.Level_11_0);
+                        if (Device != null)
+                            break;
+                    }
+                    catch
+                    {
+                    }
+                }
                 continue;
             }
         }
@@ -74,6 +129,18 @@ public sealed class DxrDevice : IDisposable
             throw new NotSupportedException(
                 $"GPU does not support DXR. Reported tier: {options.RaytracingTier}");
 
+        // SM 6.9 is exposed by the D3D12 runtime used by the process. Keep a
+        // 6.5 fallback because older Windows runtimes and drivers can still
+        // support DXR even when the 6.9 feature query is unavailable.
+        try
+        {
+            HighestShaderModel = Device.CheckFeatureSupport<FeatureDataShaderModel>(Vortice.Direct3D12.Feature.ShaderModel).HighestShaderModel;
+        }
+        catch
+        {
+            HighestShaderModel = ShaderModel.Model6_5;
+        }
+
         var queueDesc = new CommandQueueDescription(CommandListType.Direct);
         CommandQueue = Device.CreateCommandQueue<ID3D12CommandQueue>(queueDesc);
         CommandAllocator = Device.CreateCommandAllocator<ID3D12CommandAllocator>(CommandListType.Direct);
@@ -85,6 +152,20 @@ public sealed class DxrDevice : IDisposable
             FrameAllocators[i] = Device.CreateCommandAllocator<ID3D12CommandAllocator>(CommandListType.Direct);
 
         Fence = Device.CreateFence<ID3D12Fence>(0);
+    }
+
+    private static ID3D12DeviceFactory? TryCreateAgilityFactory()
+    {
+        try
+        {
+            using var configuration = D3D12.D3D12GetInterface<ID3D12SDKConfiguration1>(
+                D3D12.D3D12SDKConfigurationClsId);
+            return configuration.CreateDeviceFactory<ID3D12DeviceFactory>(619, "D3D12");
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>Queues a fence signal after the currently submitted work; returns the fence value.</summary>
@@ -132,6 +213,7 @@ public sealed class DxrDevice : IDisposable
         CommandAllocator?.Dispose();
         CommandQueue?.Dispose();
         Device?.Dispose();
+        _deviceFactory?.Dispose();
         DxgiFactory?.Dispose();
         _fenceEvent.Dispose();
     }

@@ -14,6 +14,7 @@ using WinUIEx;
 using DispatcherTimer = Microsoft.UI.Xaml.DispatcherTimer;
 using Microsoft.UI;
 using DXRDemo.Camera;
+using DXRDemo.DXR;
 using Windows.System;
 using Windows.Storage;
 using Windows.Storage.Pickers;
@@ -99,6 +100,11 @@ public sealed partial class MainWindow : WindowEx
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
         _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1920,
             1080 + (int)Math.Round((RootGrid.ActualHeight - ViewportFocus.ActualHeight) * DpiScale)));
+        // Select the app-local Agility runtime before ComputeSharp creates its
+        // shared D3D12 device. If activation is unavailable, DxrDevice keeps
+        // the 6.5 fallback and the app remains compatible with older systems.
+        DxrDevice.TryActivateAgilityRuntime();
+
         // Create the GPU device and shader panel
         _device = GraphicsDevice.GetDefault();
         _factory = new ShaderFactory();

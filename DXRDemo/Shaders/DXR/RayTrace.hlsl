@@ -1,7 +1,7 @@
-// RayTrace.hlsl - DXR Path Tracer (lib_6_5)
+// RayTrace.hlsl - DXR Path Tracer (lib_6_9)
 // Ported 1:1 from ComputeSharpDemo Shaders/RayTrace/RayTraceShader.cs
 // (Monte Carlo path tracer with 5 spheres: Lambertian / Metal / Glass + ground)
-// Compile with: dxc -T lib_6_5 -Fo RayTrace.dxil RayTrace.hlsl
+// Compile with: dxc -T lib_6_9 -D DXR_SHADER_MODEL_69=1 -Fo RayTrace.dxil RayTrace.hlsl
 //
 // Perf notes: shadow rays are resolved analytically inline (like the ComputeSharp
 // original) instead of nested TraceRay calls - 1 TraceRay per bounce only.
@@ -15,6 +15,21 @@ RWTexture2D<float4>              PrevFrame    : register(u1);
 ConstantBuffer<SceneConstants>   Scene        : register(b0);
 
 // ─── Payloads ────────────────────────────────────────────
+#if DXR_SHADER_MODEL_69
+// SM 6.9 requires an explicit payload ABI. Every field is carried between
+// ray generation and the hit/miss shaders because this legacy path tracer
+// advances the path in ray generation after each TraceRay.
+struct [raypayload] PathTracePayload
+{
+    float3 color          : read(caller,closesthit,miss) : write(caller,closesthit,miss);
+    float3 throughput     : read(caller,closesthit,miss) : write(caller,closesthit,miss);
+    float3 nextOrigin     : read(caller) : write(caller,closesthit);
+    float3 nextDirection  : read(caller) : write(caller,closesthit);
+    uint   rngState       : read(caller,closesthit) : write(caller,closesthit);
+    int    remainingBounces : read(caller,closesthit) : write(caller,closesthit,miss);
+    int    hasHit          : read(caller) : write(caller,closesthit,miss);
+};
+#else
 struct PathTracePayload
 {
     float3 color;
@@ -24,8 +39,8 @@ struct PathTracePayload
     uint   rngState;
     int    remainingBounces;
     int    hasHit;
-    int    _pad;
 };
+#endif
 
 // ─── Constants (mirror RayTraceShader.cs) ─────────────────
 static const float  PI         = 3.14159265359;
