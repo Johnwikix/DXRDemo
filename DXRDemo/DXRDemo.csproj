@@ -1,12 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Sdk Name="PublishWithSatoriGC" Version="10.0.13-satori.38707290103.1" />
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>DXRDemo</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Platforms>x86;x64;ARM64</Platforms>
-    <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <Nullable>enable</Nullable>
@@ -36,7 +37,6 @@
 
   <PropertyGroup>
     <Microsoft_Direct3D_DXC_SkipLibraryCopy>true</Microsoft_Direct3D_DXC_SkipLibraryCopy>
-    <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x86' Or '$(RuntimeIdentifier)' == 'win-x86'">x86</_DxcSourceArch>
     <_DxcSourceArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(RuntimeIdentifier)' == 'win-arm64'">arm64</_DxcSourceArch>
     <_DxcSourceArch Condition="'$(PlatformTarget)' == 'x64' Or '$(RuntimeIdentifier)' == 'win-x64'">x64</_DxcSourceArch>
     <_DxcSourceDir Condition="'$(_DxcSourceArch)' != ''">$([MSBuild]::NormalizePath('$(NuGetPackageRoot)', 'microsoft.direct3d.dxc', '1.9.2602.24', 'build', 'native', 'bin', '$(_DxcSourceArch)'))</_DxcSourceDir>
