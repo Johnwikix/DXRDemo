@@ -63,7 +63,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
     }
 
     private static string Source<T>() where T : struct, IComputeShader, IComputeShaderDescriptor<T> => T.HlslSource;
-    private static byte[] CompileHardwareLibrary()
+    private byte[] CompileHardwareLibrary()
     {
         // Keep lighting, camera, random numbers and guides identical to the software tracer.
         // The only replacement is BVH traversal with TraceRay and the dispatch entry point.
@@ -72,7 +72,14 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         int end = source.IndexOf("static float3 Sky(float3 rd)\n{", begin, StringComparison.Ordinal);
         if (begin < 0 || end < 0) throw new InvalidOperationException("Mesh shader generator contract changed: HitMesh/Sky markers missing.");
         const string trace = """
+            #if DXR_SHADER_MODEL_69
+            struct [raypayload] HitPayload {
+                float t : read(caller) : write(caller,closesthit);
+                int id : read(caller) : write(caller,closesthit,miss);
+            };
+            #else
             struct HitPayload { float t; int id; };
+            #endif
             RaytracingAccelerationStructure SceneBVH : register(t2);
             bool HitMesh(float3 ro, float3 rd, float tMax, bool anyHit, out float bestT, out int bestId) {
                 RayDesc ray; ray.Origin=ro; ray.Direction=rd; ray.TMin=0.0001; ray.TMax=tMax;
@@ -96,7 +103,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
         {
             File.WriteAllText(path, source);
             using var compiler = new DxrShaderCompiler();
-            compiler.CompileLibrary(path);
+            compiler.CompileLibrary(path, _gpu.SupportsShaderModel69, false);
             return compiler.DxilBytes;
         }
         finally { File.Delete(path); }

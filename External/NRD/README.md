@@ -11,7 +11,7 @@ does not substitute custom filtering passes for NRD shaders.
 Build configuration: Release x64, C++ v145, static CRT, DXIL on, DXBC/SPIR-V/NRI
 off, `NRD_NORMAL_ENCODING=4` (signed normal, floating point accepted),
 `NRD_ROUGHNESS_ENCODING=1` (linear). SDK optional features retain their defaults.
-Shader compilation uses the project's Microsoft.Direct3D.DXC 1.9.2602.24 package.
+Shader compilation uses the project's Microsoft.Direct3D.DXC 1.9.2609.5 package.
 Normal frame accumulation uses the official RELAX defaults with anti-firefly on.
 Checkerboarding and hit-distance reconstruction are off because every primary
 hit has a sampled diffuse path. This is not DLSS Ray Reconstruction.

@@ -71,7 +71,7 @@ public sealed class DxrRenderer : IDisposable
             if (!File.Exists(entryHlsl))
                 throw new FileNotFoundException(
                     $"HLSL not found: {entryHlsl}");
-            _compiler.CompileLibrary(entryHlsl);
+            _compiler.CompileLibrary(entryHlsl, _device.SupportsShaderModel69, false);
             dxilBytes = _compiler.DxilBytes;
         });
 

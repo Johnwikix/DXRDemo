@@ -7,7 +7,20 @@ struct Material { float4 baseColor, emissive, factors, flags; Binding baseMap, m
 struct Instance { uint4 mesh; row_major float4x4 world, normal; };
 struct Light { float4 positionType, directionRange, colorIntensity, spot; };
 struct Emitter { float4 p0, e1, e2, meta; };
+#if DXR_SHADER_MODEL_69
+// SM 6.9 payload access qualifiers keep any-hit state small while allowing
+// HitObject::TraceRay/Invoke to move closest-hit work to a coherent context.
+struct [raypayload] Payload {
+    float t : read(caller) : write(caller,closesthit);
+    uint instance : read(caller) : write(caller,closesthit,miss);
+    uint primitive : read(caller) : write(caller,closesthit);
+    float2 bary : read(caller) : write(caller,closesthit);
+    uint random : read(caller,anyhit) : write(caller,anyhit);
+    uint transparency : read(caller,anyhit) : write(caller,anyhit);
+};
+#else
 struct Payload { float t; uint instance, primitive; float2 bary; uint random, transparency; };
+#endif
 struct Surface { float3 p, n, g, base, emission; float metallic, roughness, alpha, ao, transmission, ior, thickness; uint material, front, causticCaster; };
 cbuffer Frame : register(b0) {
     float4 CameraOrigin, CameraForward, CameraRight, CameraUp, Size, Control, Environment, Limits, SunDirection, SunRadiance;
@@ -145,7 +158,20 @@ void Miss(inout Payload payload) { payload.instance=0xffffffff; }
 Payload Trace(float3 origin,float3 direction,float maximum,bool shadow,inout uint rng,bool guide=false,bool ignoreGlass=false) {
     RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=max(maximum,Limits.x*2);
     Payload hit; hit.t=ray.TMax; hit.instance=0xffffffff; hit.primitive=0; hit.bary=0; hit.random=rng; hit.transparency=(guide?2:0)|(shadow?4:0)|(ignoreGlass?16:0);
-    TraceRay(Scene,shadow?RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:RAY_FLAG_NONE,255,0,0,0,ray,hit); rng=hit.random; return hit;
+#if DXR_USE_SER
+    dx::HitObject object=dx::HitObject::TraceRay(Scene,shadow?RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:RAY_FLAG_NONE,255,0,0,0,ray,hit);
+    dx::MaybeReorderThread(object);
+    if(shadow) {
+        // Visibility only needs hit/miss and the any-hit transparency bit.
+        // Skipping miss/closest-hit avoids a shader-table round trip for every shadow ray.
+        if(object.IsHit()) { hit.instance=0; hit.t=object.GetRayTCurrent(); }
+    } else if(object.IsHit()) {
+        dx::HitObject::Invoke(object,hit);
+    }
+#else
+    TraceRay(Scene,shadow?RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:RAY_FLAG_NONE,255,0,0,0,ray,hit);
+#endif
+    rng=hit.random; return hit;
 }
 float3 Offset(Surface s,float3 direction) {
     float e=max(Limits.x,max(max(abs(s.p.x),abs(s.p.y)),abs(s.p.z))*1e-6);
@@ -185,7 +211,14 @@ float Weight(float a,float b) { a*=a; b*=b; return a/max(a+b,1e-20); }
 Payload TraceGlass(float3 origin,float3 direction,float maximum,inout uint rng) {
     RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=maximum;
     Payload hit=(Payload)0; hit.t=maximum; hit.instance=0xffffffff; hit.random=rng; hit.transparency=8;
-    TraceRay(Scene,RAY_FLAG_NONE,255,0,0,0,ray,hit); rng=hit.random; return hit;
+#if DXR_USE_SER
+    dx::HitObject object=dx::HitObject::TraceRay(Scene,RAY_FLAG_NONE,255,0,0,0,ray,hit);
+    dx::MaybeReorderThread(object);
+    if(object.IsHit()) dx::HitObject::Invoke(object,hit);
+#else
+    TraceRay(Scene,RAY_FLAG_NONE,255,0,0,0,ray,hit);
+#endif
+    rng=hit.random; return hit;
 }
 float3 Visibility(float3 origin,float3 direction,float maximum,inout uint rng,out bool stochastic,bool analytic=false) {
     float3 visibility=1; stochastic=false;
