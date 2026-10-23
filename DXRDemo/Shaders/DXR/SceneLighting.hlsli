@@ -1,17 +1,8 @@
-// ReSTIR DI: unoccluded-target RIS, fused temporal/spatial reuse from the previous frame.
+// Legacy ReSTIR DI fallback (the default uses PathLightProposal.hlsli's mixture proposals).
+// Unoccluded-target RIS, fused temporal/spatial reuse from the previous frame.
 // A bounded, biased reuse estimator (no visibility bias correction); final visibility is always retraced.
 // Sample domain: discrete punctual lights plus emissive triangle area. The area-light MIS partition
 // remains the same as the BSDF continuation in SceneTrace, so emitters are not counted twice.
-struct LightSample { uint index; float2 bary; uint area; };
-// 64-byte ABI. weight is finalized W = sum(w) / (M * target(selected)).
-struct Reservoir {
-    LightSample light;
-    float weight, target, count; uint material;
-    float3 position; float depth;
-    float3 normal; float roughness;
-};
-RWStructuredBuffer<Reservoir> ReservoirsIn : register(u9);
-RWStructuredBuffer<Reservoir> ReservoirsOut : register(u10);
 // 64-byte ABI. Each launched photon owns one node; atomic heads publish nodes between dispatches.
 struct Photon { float3 position; uint next; float3 flux; float pad0; float3 incoming; float pad1; float3 normal; float pad2; };
 RWStructuredBuffer<Photon> Photons : register(u11);
@@ -38,10 +29,10 @@ LightSample ProposeLight(inout uint rng,out float proposal) {
     if(Random(rng)<areaProbability) {
         result.area=1;
         float choice=Random(rng); uint lo=0,hi=(uint)Environment.y-1;
-        while(lo<hi) { uint mid=(lo+hi)/2; if(Emitters[mid].meta.y<choice) lo=mid+1; else hi=mid; }
+        while(lo<hi) { uint mid=(lo+hi)/2; if(Emitters[mid].meta.y<=choice) lo=mid+1; else hi=mid; }
         result.index=lo;
         float u=sqrt(Random(rng)); result.bary.x=u*(1-Random(rng)); result.bary.y=u-result.bary.x;
-        proposal=areaProbability/max(Environment.z,1e-20);
+        proposal=areaProbability*Emitters[lo].e1.w;
     } else {
         result.index=min((uint)(Random(rng)*count),max(count,1u)-1);
         proposal=(1-areaProbability)/max(count,1u);
@@ -68,7 +59,7 @@ void EvaluateLight(Surface s,float3 view,LightSample sample,out float3 d,out flo
         Material material=Materials[lamp.material];
         if(material.flags.z==0 && lamp.front==0) return;
         float cosine=abs(dot(lamp.g,-direction));
-        float lightPdf=distance*distance/max(Environment.z*cosine,1e-20);
+        float lightPdf=emitter.e1.w*distance*distance/max(cosine,1e-20);
         float pdf; Bsdf(s,view,direction,d,r,pdf);
         energy=lamp.emission*(cosine/max(distance*distance,1e-12))*Weight(lightPdf,pdf);
         if(material.flags.x==1 && lamp.alpha<material.flags.y) energy=0;
@@ -86,12 +77,6 @@ void Stream(inout Reservoir reservoir,LightSample sample,float target,float weig
     if(weight<=0 || !isfinite(weight)) return;
     reservoir.weight+=weight;
     if(Random(rng)*reservoir.weight<weight) { reservoir.light=sample; reservoir.target=target; }
-}
-bool Reproject(float3 p,out int2 pixel) {
-    float3 delta=p-PreviousOrigin.xyz; float z=dot(delta,PreviousForward.xyz);
-    float2 ndc=float2(dot(delta,PreviousRight.xyz)/(PreviousForward.w*(Size.x/Size.y)),-dot(delta,PreviousUp.xyz)/PreviousForward.w)/max(z,1e-8);
-    pixel=(int2)floor((ndc*.5+.5)*PreviousSize.xy-PreviousSize.zw);
-    return z>0 && all(pixel>=0) && all(pixel<(int2)PreviousSize.xy);
 }
 Reservoir BuildReservoir(Surface s,float3 view,bool reuse,inout uint rng) {
     Reservoir result=(Reservoir)0;
@@ -126,13 +111,14 @@ Reservoir BuildReservoir(Surface s,float3 view,bool reuse,inout uint rng) {
     result.depth=length(s.p-CameraOrigin.xyz); result.roughness=s.roughness;
     return result;
 }
-void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out float3 diffuse,out float3 specular,out float3 unfiltered,out float3 momentD,out float3 momentS) {
+void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,AreaProposal proposal,inout Reservoir feedback,float3 throughput,
+    out float3 diffuse,out float3 specular,out float3 unfiltered,out float3 momentD,out float3 momentS) {
     // Few delta lights are cheaper and sharper with deterministic evaluation; emissive scenes use ReSTIR.
-    if(Lighting.x==0 || (AnalyticLightCount()<=2 && Environment.y==0)) {
-        DirectClassic(s,view,rng,diffuse,specular,unfiltered,momentD,momentS); return;
+    if(PathSettings.y!=0 || Lighting.x==0 || (AnalyticLightCount()<=2 && Environment.y==0)) {
+        DirectClassic(s,view,rng,proposal,feedback,throughput,diffuse,specular,unfiltered,momentD,momentS); return;
     }
     diffuse=specular=unfiltered=momentD=momentS=0;
-    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,s.base*(1-s.metallic)*(1-s.transmission),F0(s),s.roughness,factorD,factorS);
+    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,DiffuseAlbedo(s),F0(s),s.roughness,factorD,factorS);
     Reservoir reservoir=BuildReservoir(s,view,reuse,rng);
     if(reuse) ReservoirsOut[pixel.y*(uint)Size.x+pixel.x]=reservoir;
     if(reservoir.weight>0) {
@@ -145,11 +131,11 @@ void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,out floa
         momentD=l*_NRD_Luminance(diffuse/factorD); momentS=l*_NRD_Luminance(specular/factorS);
     }
     if(Environment.x>0) {
-        float z=1-2*Random(rng),phi=2*PI*Random(rng),radius=sqrt(max(0,1-z*z));
-        float3 l=float3(radius*cos(phi),z,radius*sin(phi)),d,r; float pdf; Bsdf(s,view,l,d,r,pdf);
+        float lightPdf; float3 l=SampleEnvironment(float4(Random(rng),Random(rng),Random(rng),Random(rng)),lightPdf),d,r;
+        float pdf; Bsdf(s,view,l,d,r,pdf);
         if(any(d+r>0)) {
-            bool stochastic; float lightPdf=1/(4*PI);
-            float3 energy=Sky(l)*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/lightPdf*s.ao*
+            bool stochastic;
+            float3 energy=Sky(l)*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/lightPdf*
                 Visibility(Offset(s,l),l,CameraRight.w,rng,stochastic);
             diffuse+=d*energy; specular+=r*energy;
             momentD+=l*_NRD_Luminance(d*energy/factorD); momentS+=l*_NRD_Luminance(r*energy/factorS);
@@ -238,7 +224,7 @@ void PhotonGen() {
 }
 void GatherCaustics(Surface s,float3 view,out float3 diffuse,out float3 specular,out float3 momentD,out float3 momentS) {
     diffuse=specular=momentD=momentS=0;
-    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,s.base*(1-s.metallic)*(1-s.transmission),F0(s),s.roughness,factorD,factorS);
+    float3 factorD,factorS; NRD_MaterialFactors(s.n,view,DiffuseAlbedo(s),F0(s),s.roughness,factorD,factorS);
     if(CausticSettings.x==0 || s.transmission>0) return;
     float radius=CausticSettings.y,radius2=radius*radius;
     int3 cell=(int3)floor(s.p/radius);

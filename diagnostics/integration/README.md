@@ -1,3 +1,38 @@
+# Single-frame RTXPT validation
+
+`IntegrationProbe.exe --offline` renders exactly one 256×144, 4-SPP frame with
+256-pixel textures, no window, warmup, photon pass, denoiser or SR. It saves PNG,
+RGBA32F and JSON to `output/rtxpt-offline`. `--cpu-only` checks assets, the authored
+camera and light PDFs without creating a graphics device; add `--convergence`
+or `--bistro` to select another packaged RTXPT model. Bistro includes its Shanghai Bund HDR environment. See [commands and limits](../../docs/RTXPT_REWRITE.md).
+
+`--contracts` runs the production HLSL's material, priority-medium, HDR PDF,
+guided-light PDF, TIR, delta-lobe, mirrored/culling and near-delta numeric contracts in one 9×4 dispatch. `--environment`
+accepts a Radiance `.hdr`; `--production` enables the real-time feature switches
+without enabling photon passes. `--stable` checks three-plane recomposition;
+`--nrd` additionally executes the three independent NRD contexts once, without
+temporal warmup. These switches remain bounded single-frame commands. CPU checks
+also exercise HDR decoding, alias-table normalization and glTF lighting metadata.
+
+For the 30 FPS GPU budget, use `--offline --bistro --production --dlss-4k`:
+3840×2160 output, 1920×1080 input, 1 SPP, 10 bounces, 1024 texture limit,
+three NRD contexts and DLSS Super Resolution. Exactly one traced frame and one
+reconstruction execution, with no temporal warmup. The actual 4K encoded output
+is checked and saved as `*-4k.png`. `--spp`, `--bounces`, `--texture-size`,
+`--uncompressed`, `--reorder` and `--no-ser` provide explicit comparisons.
+Use `--rr-4k` instead of `--dlss-4k` for DLSS Ray Reconstruction without NRD.
+The normal path uses SM 6.9 inline traversal without reordering; `--reorder`
+enables material-coherent SER, and `--legacy-trace` (`--no-ser` alias) selects the TraceRay fallback.
+
+Agility is activated before device creation. JSON records the reported shader
+model, actual SER setting, compressed texture count/bytes and GPU timestamps.
+Both GPU stages run before CPU readbacks and validation; all reconstruction
+pipeline creation occurs before the traced frame. The 33.33 ms budget covers
+trace plus reconstruction GPU work, excluding asset load, shader compilation,
+CPU checks, PNG encoding and presentation. It is not a sustained FPS measurement.
+
+The older commands below run multiple frames and should not be used while gaming.
+
 # Model / HDR / settings integration validation
 
 `IntegrationProbe.exe --glass-sr` checks the actual NRD/SR glass composition with

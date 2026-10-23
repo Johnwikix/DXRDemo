@@ -13,7 +13,7 @@ namespace DXRDemo.DXR;
 /// <summary>Traces indexed, instanced PBR scenes with explicitly maintained DXR shaders.</summary>
 internal sealed unsafe class DxrSceneBackend : IDisposable
 {
-    private const int MaxTextures = 1024, OutputCount = 16;
+    private const int MaxTextures = 1024, OutputCount = 22;
     private readonly DxrDevice _gpu = new();
     private readonly List<IDisposable> _owned = [];
     private readonly DxrShaderTable _table = new();
@@ -36,32 +36,50 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     private Constants _photonFrame;
     internal int PhotonBuildCount { get; private set; }
     internal bool RestirEnabled { get; set; } = true;
+    internal bool AdaptiveLightingEnabled { get; set; } = true;
+    internal float FireflyThreshold { get; set; } = 64;
+    internal bool StablePlanesEnabled { get; set; } = true;
+    internal bool StablePlanesActive => _previous.PathSettings.W != 0;
     internal bool CausticsEnabled { get; set; } = true;
+    /// <summary>Independent camera samples; disables temporal light reuse and photon estimates.</summary>
+    internal bool ReferenceMode { get; set; }
+    internal int TraceDispatchCount { get; private set; }
+    internal string ShaderLibraryFile { get; init; } = "SceneTrace.hlsl";
+    internal bool UseInlineTraversal { get; init; } = true;
+    // The monolithic guide/path shader currently spills too much live state at
+    // reorder points. Keep the RTXPT SER variant for comparison; inline traversal
+    // without reordering is faster on the measured RTX 5070 Ti.
+    internal bool ReorderThreads { get; init; }
+    internal bool InlineTraversalActive => UseInlineTraversal && _gpu.SupportsShaderModel69;
+    internal bool SerActive => InlineTraversalActive && ReorderThreads;
+    internal string ActualShaderModel => _gpu.HighestShaderModel.ToString();
+    private GpuInterval? _traceTimer;
+    internal double TraceGpuMilliseconds { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct InstanceData
     {
         public uint VertexOffset, IndexOffset, Material, CausticCaster;
         public Matrix4x4 World, Normal;
+        public Vector4 EmissionSampling;
     }
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Emitter { public Vector4 P0, E1, E2, Meta; }
     [StructLayout(LayoutKind.Sequential)]
     private struct Constants
     {
         public Vector4 Origin, Forward, Right, Up, Size, Control, Environment, Limits, SunDirection, SunRadiance;
         public Vector4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
-        public Vector4 Lighting, CausticBounds, CausticSettings;
+        public Vector4 Lighting, CausticBounds, CausticSettings, PathSettings, EnvironmentMap;
     }
     private sealed class SceneGpu : IDisposable
     {
         internal readonly List<IDisposable> Owned = [];
         internal SceneAsset Asset = null!;
         internal ID3D12Resource Vertices = null!, Indices = null!, Instances = null!, Materials = null!, Lights = null!, Emitters = null!, Tlas = null!;
+        internal ID3D12Resource EnvironmentTexels = null!;
         internal ID3D12DescriptorHeap Heap = null!, Samplers = null!;
         internal ID3D12DescriptorHeap[] DescriptorHeaps = [];
         internal uint EmitterCount;
-        internal float EmitterArea;
+        internal float EmitterPower;
         internal bool HasTransmission, HasRefractiveVolumes;
         internal Vector4 CausticBounds;
         internal T Keep<T>(T value) where T : IDisposable { Owned.Add(value); return value; }
@@ -79,16 +97,18 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         for (uint i = 0; i < 7; i++) parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(i, 0), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 9, 0, 0),
             new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 7, 13, 0),
+            new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 6, 20, 0),
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, MaxTextures, 0, 1),
             new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 0, 2)), ShaderVisibility.All));
         parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.Sampler, MaxTextures, 0, 1)), ShaderVisibility.All));
         for (uint i = 9; i < 13; i++) parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(i, 0), ShaderVisibility.All));
+        parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(7, 0), ShaderVisibility.All));
         _root = _gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())); _owned.Add(_root);
         using var compiler = new DxrShaderCompiler();
         compiler.CompileLibrary(
-            Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "SceneTrace.hlsl"),
+            Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", ShaderLibraryFile),
             _gpu.SupportsShaderModel69,
-            _gpu.SupportsShaderModel69);
+            _gpu.SupportsShaderModel69 && UseInlineTraversal, ReorderThreads);
         _pipeline = _gpu.Device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
         [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RayGen"), new("TransparentRayGen"), new("PhotonGen"), new("ClearPhotonGrid"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
          new(new HitGroupDescription("HitGroup_Sphere", HitGroupType.Triangles, anyHitShaderImport: "AnyHit", closestHitShaderImport: "ClosestHit")),
@@ -109,6 +129,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         _photonGrid = DxrResources.CreateDefaultBuffer(_gpu.Device, PhotonGridSize * 4, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess); _owned.Add(_photonGrid);
         _stride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
         _initialized = true;
+        _traceTimer = new GpuInterval(_gpu); _owned.Add(_traceTimer);
     }
 
     private void Begin() { _gpu.CommandAllocator.Reset(); _gpu.CommandList.Reset(_gpu.CommandAllocator); }
@@ -128,6 +149,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         if (ReferenceEquals(asset, _scene?.Asset)) return;
         if (asset.Textures.Length > MaxTextures) throw new NotSupportedException($"场景贴图数超过 {MaxTextures}。");
         if (asset.Instances.Length == 0) throw new InvalidDataException("所选场景没有可渲染网格。");
+        if (asset.Instances.Length > 1 << 24) throw new NotSupportedException("DXR instance IDs are limited to 24 bits.");
         var scene = new SceneGpu { Asset = asset };
         try
         {
@@ -148,17 +170,21 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             {
                 cancellation.ThrowIfCancellationRequested();
                 SceneMesh mesh = asset.Meshes[i];
+                SceneMaterial material = asset.Materials[mesh.Material];
+                bool opaque = material.Flags.X == 0 && material.Transmission.X == 0;
                 var geometry = new RaytracingGeometryDescription(new RaytracingGeometryTrianglesDescription(
                     new GpuVirtualAddressAndStride(scene.Vertices.GPUVirtualAddress + (ulong)offsets[i].Vertex * 80, 80),
                     Format.R32G32B32_Float, (uint)mesh.Vertices.Length, transform3x4: 0,
                     indexBuffer: scene.Indices.GPUVirtualAddress + (ulong)offsets[i].Index * 4,
-                    indexFormat: Format.R32_UInt, indexCount: (uint)mesh.Indices.Length), RaytracingGeometryFlags.None);
+                    indexFormat: Format.R32_UInt, indexCount: (uint)mesh.Indices.Length),
+                    opaque ? RaytracingGeometryFlags.Opaque : RaytracingGeometryFlags.None);
                 var inputs = new BuildRaytracingAccelerationStructureInputs { Type = RaytracingAccelerationStructureType.BottomLevel,
                     Flags = RaytracingAccelerationStructureBuildFlags.PreferFastTrace, DescriptorsCount = 1, Layout = ElementsLayout.Array, GeometryDescriptions = [geometry] };
                 blas[i] = BuildAcceleration(scene, inputs);
             }
-            var instanceData = new InstanceData[asset.Instances.Length]; var emitters = new List<Emitter>();
-            var descriptions = new byte[checked(asset.Instances.Length * 64)]; float areaSum = 0;
+            var distribution = new SceneLightDistribution(asset, cancellation);
+            var instanceData = new InstanceData[asset.Instances.Length];
+            var descriptions = new byte[checked(asset.Instances.Length * 64)];
             Vector3 glassMin = new(float.PositiveInfinity), glassMax = new(float.NegativeInfinity);
             for (int i = 0; i < instanceData.Length; i++)
             {
@@ -177,29 +203,31 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
                 }
                 Matrix4x4.Invert(instance.Transform, out Matrix4x4 inverse);
                 instanceData[i] = new() { VertexOffset = (uint)offsets[instance.Mesh].Vertex, IndexOffset = (uint)offsets[instance.Mesh].Index,
-                    Material = (uint)mesh.Material, CausticCaster = causticCaster ? 1u : 0u, World = instance.Transform, Normal = Matrix4x4.Transpose(inverse) };
+                    Material = (uint)mesh.Material, CausticCaster = causticCaster ? 1u : 0u, World = instance.Transform, Normal = Matrix4x4.Transpose(inverse),
+                    EmissionSampling = new(distribution.InstanceAreaPdf[i], distribution.InstanceEmitterStart[i] + 1, 0, 0) };
                 Span<byte> desc = descriptions.AsSpan(i * 64, 64); Span<float> transform = MemoryMarshal.Cast<byte, float>(desc[..48]);
                 Matrix4x4 m = Matrix4x4.Transpose(instance.Transform);
                 MemoryMarshal.CreateReadOnlySpan(ref m.M11, 12).CopyTo(transform);
-                MemoryMarshal.Write(desc[48..], (uint)i | 0xff000000u);
+                // Bit 0: ordinary rays. Bit 1: ordered transmission-only shadow rays.
+                // Reject opaque instances in TLAS traversal instead of invoking any-hit
+                // on every wall, road and piece of furniture for every glass query.
+                uint visibilityMask = material.Transmission.X > 0 ? 3u : 5u;
+                MemoryMarshal.Write(desc[48..], (uint)i | (visibilityMask << 24));
+                // glTF front faces follow the object-space cross-product normal.
+                // DXR classifies winding before the instance transform, matching
+                // our inverse-transpose normal even for mirrored instances.
+                uint instanceFlags = 0;
+                if (material.Flags.Z != 0 || material.Transmission.X > 0)
+                    instanceFlags |= (uint)RaytracingInstanceFlags.TriangleCullDisable;
+                MemoryMarshal.Write(desc[52..], instanceFlags << 24);
                 MemoryMarshal.Write(desc[56..], blas[instance.Mesh].GPUVirtualAddress);
-                if (asset.Materials[mesh.Material].Emissive.X + asset.Materials[mesh.Material].Emissive.Y + asset.Materials[mesh.Material].Emissive.Z > 0)
-                    for (int t = 0; t < mesh.Indices.Length; t += 3)
-                    {
-                        Vector3 Point(uint index) { Vector4 p = mesh.Vertices[index].Position; return Vector3.Transform(new(p.X, p.Y, p.Z), instance.Transform); }
-                        Vector3 p0 = Point(mesh.Indices[t]), e1 = Point(mesh.Indices[t + 1]) - p0, e2 = Point(mesh.Indices[t + 2]) - p0;
-                        float area = Vector3.Cross(e1, e2).Length() * .5f;
-                        if (area <= 1e-12f) continue;
-                        areaSum += area;
-                        emitters.Add(new() { P0 = new(p0, 0), E1 = new(e1, 0), E2 = new(e2, 0), Meta = new(area, areaSum, i, t / 3) });
-                    }
             }
-            for (int i = 0; i < emitters.Count; i++) { Emitter e = emitters[i]; e.Meta.Y /= areaSum; emitters[i] = e; }
-            scene.EmitterCount = (uint)emitters.Count;
-            scene.EmitterArea = areaSum;
+            scene.EmitterCount = distribution.TotalPower > 0 ? (uint)distribution.Emitters.Length : 0;
+            scene.EmitterPower = distribution.TotalPower;
             if (scene.HasRefractiveVolumes) scene.CausticBounds = new((glassMin + glassMax) * .5f, MathF.Max(Vector3.Distance(glassMin, glassMax) * .501f, 1e-4f));
-            if (emitters.Count == 0) emitters.Add(default);
-            scene.Emitters = Upload(scene, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(emitters)));
+            scene.Emitters = Upload(scene, MemoryMarshal.AsBytes(distribution.Emitters.AsSpan()));
+            EnvironmentDistribution.Texel[] environmentTexels = asset.EnvironmentMap is { } map ? new EnvironmentDistribution(map).Texels : [default];
+            scene.EnvironmentTexels = Upload(scene, MemoryMarshal.AsBytes(environmentTexels.AsSpan()));
             scene.Instances = Upload(scene, MemoryMarshal.AsBytes(instanceData.AsSpan()));
             var instanceBuffer = Upload(scene, descriptions);
             scene.Tlas = BuildAcceleration(scene, new BuildRaytracingAccelerationStructureInputs { Type = RaytracingAccelerationStructureType.TopLevel,
@@ -244,22 +272,29 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
 
     private void UploadTexture(SceneGpu scene, SceneTexture source, int index)
     {
-        var desc = ResourceDescription.Texture2D(source.Srgb ? Format.R8G8B8A8_UNorm_SRgb : Format.R8G8B8A8_UNorm,
-            (uint)source.Width, (uint)source.Height, 1, (ushort)source.Mips.Length);
+        bool compressed = source.Bc7Mips != null;
+        byte[][] mips = source.Bc7Mips ?? source.Mips;
+        Format format = compressed ? (source.Srgb ? Format.BC7_UNorm_SRgb : Format.BC7_UNorm) :
+            (source.Srgb ? Format.R8G8B8A8_UNorm_SRgb : Format.R8G8B8A8_UNorm);
+        var desc = ResourceDescription.Texture2D(format,
+            (uint)source.Width, (uint)source.Height, 1, (ushort)mips.Length);
         var texture = scene.Keep(_gpu.Device.CreateCommittedResource(new HeapProperties(HeapType.Default), HeapFlags.None, desc, ResourceStates.CopyDest));
         // Explicit D3D12 row/slice alignment; no temporary allocations in frame rendering.
         ulong total = 0; int w = source.Width, h = source.Height;
-        for (int i = 0; i < source.Mips.Length; i++) { total = (total + 511) & ~511ul; total += (ulong)((w * 4 + 255) & ~255) * (uint)h; w = Math.Max(1, w / 2); h = Math.Max(1, h / 2); }
+        int RowBytes(int width) => compressed ? ((width + 3) / 4) * 16 : width * 4;
+        int Rows(int height) => compressed ? (height + 3) / 4 : height;
+        for (int i = 0; i < mips.Length; i++) { total = (total + 511) & ~511ul; total += (ulong)((RowBytes(w) + 255) & ~255) * (uint)Rows(h); w = Math.Max(1, w / 2); h = Math.Max(1, h / 2); }
         using var staging = DxrResources.CreateUploadBuffer(_gpu.Device, total);
         void* p; staging.Map(0, null, &p).CheckError(); w = source.Width; h = source.Height; ulong offset = 0;
         Begin();
-        for (int i = 0; i < source.Mips.Length; i++)
+        for (int i = 0; i < mips.Length; i++)
         {
-            offset = (offset + 511) & ~511ul; uint pitch = (uint)((w * 4 + 255) & ~255);
-            for (int y = 0; y < h; y++) source.Mips[i].AsSpan(y * w * 4, w * 4).CopyTo(new Span<byte>((byte*)p + offset + (ulong)y * pitch, w * 4));
+            int rowBytes = RowBytes(w), rows = Rows(h);
+            offset = (offset + 511) & ~511ul; uint pitch = (uint)((rowBytes + 255) & ~255);
+            for (int y = 0; y < rows; y++) mips[i].AsSpan(y * rowBytes, rowBytes).CopyTo(new Span<byte>((byte*)p + offset + (ulong)y * pitch, rowBytes));
             var footprint = new PlacedSubresourceFootPrint { Offset = offset, Footprint = new SubresourceFootPrint { Format = desc.Format, Width = (uint)w, Height = (uint)h, Depth = 1, RowPitch = pitch } };
             _gpu.CommandList.CopyTextureRegion(new TextureCopyLocation(texture, (uint)i), 0, 0, 0, new TextureCopyLocation(staging, footprint));
-            offset += pitch * (uint)h; w = Math.Max(1, w / 2); h = Math.Max(1, h / 2);
+            offset += pitch * (uint)rows; w = Math.Max(1, w / 2); h = Math.Max(1, h / 2);
         }
         staging.Unmap(0); _gpu.CommandList.ResourceBarrierTransition(texture, ResourceStates.CopyDest, ResourceStates.NonPixelShaderResource); End();
         _gpu.Device.CreateShaderResourceView(texture, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + (index + OutputCount) * _stride);
@@ -276,6 +311,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
+        if (samples is < 1 or > 4096 || bounces is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(samples));
+        if (!float.IsFinite(FireflyThreshold) || FireflyThreshold < 0) throw new ArgumentOutOfRangeException(nameof(FireflyThreshold));
+        bool stablePlanes = StablePlanesEnabled && opaqueForNrd;
+        if (ReferenceMode || stablePlanes) opaqueForNrd = false;
         if (raw.Width != _reservoirWidth || raw.Height != _reservoirHeight)
         {
             _historyValid = false;
@@ -295,20 +334,24 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             _outputs[9] = Resource(signals.DiffuseSh); _outputs[10] = Resource(signals.SpecularSh); _outputs[11] = Resource(signals.GlassSurface);
             _outputs[12] = Resource(signals.DiffuseFactor); _outputs[13] = Resource(signals.SpecularFactor);
             _outputs[14] = Resource(signals.GlassFallback); _outputs[15] = Resource(signals.GlassNormal);
+            _outputs[16] = Resource(signals.StableReflection); _outputs[17] = Resource(signals.StableReflectionSurface); _outputs[18] = Resource(signals.StableReflectionNormal);
+            _outputs[19] = Resource(signals.StableTransmission); _outputs[20] = Resource(signals.StableTransmissionSurface); _outputs[21] = Resource(signals.StableTransmissionNormal);
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
         Constants data = new() { Origin = new(camera.Origin, camera.Near), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
-            Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterArea, 0),
+            Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterPower, 0),
             Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, scene.HasTransmission ? 1 : 0),
             SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0),
             PreviousOrigin = _previous.Origin, PreviousForward = _previous.Forward, PreviousRight = _previous.Right, PreviousUp = _previous.Up, PreviousSize = _previous.Size,
-            Lighting = new(RestirEnabled ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
-            CausticSettings = new(CausticsEnabled && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,
-                MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12) };
+            Lighting = new(RestirEnabled && !ReferenceMode ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
+            CausticSettings = new(CausticsEnabled && !ReferenceMode && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,
+                MathF.Max(scene.CausticBounds.W * .015f, camera.Near * 8), PhotonGridSize, 12),
+            PathSettings = new(ReferenceMode ? 1 : 0, AdaptiveLightingEnabled && !ReferenceMode ? 1 : 0, ReferenceMode ? 0 : FireflyThreshold, stablePlanes ? 1 : 0),
+            EnvironmentMap = scene.Asset.EnvironmentMap is { } environmentMap ? new(environmentMap.Width, environmentMap.Height, environmentMap.Rotation, 0) : default };
         data.Up.W = opaqueForNrd ? 1 : 0;
-        bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 && data.Up.W == _previous.Up.W &&
+        bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 && data.Up.W == _previous.Up.W && data.PathSettings == _previous.PathSettings &&
             data.Environment == _previous.Environment && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
             data.Control.X == _previous.Control.X && data.Control.Y == _previous.Control.Y && data.Lighting.X == _previous.Lighting.X &&
             data.CausticSettings == _previous.CausticSettings && data.Forward.W == _previous.Forward.W &&
@@ -323,6 +366,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.SetComputeRootShaderResourceView(3, scene.Indices.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(4, scene.Instances.GPUVirtualAddress);
         cmd.SetComputeRootShaderResourceView(5, scene.Materials.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(6, scene.Lights.GPUVirtualAddress);
         cmd.SetComputeRootShaderResourceView(7, scene.Emitters.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(14, scene.EnvironmentTexels.GPUVirtualAddress);
         cmd.SetComputeRootDescriptorTable(8, scene.Heap.GetGPUDescriptorHandleForHeapStart()); cmd.SetComputeRootDescriptorTable(9, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
         cmd.SetPipelineState1(_pipeline);
         cmd.SetComputeRootUnorderedAccessView(10, _reservoirs[1 - _reservoirWrite]!.GPUVirtualAddress);
@@ -343,12 +387,16 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
                 new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, PhotonCount, 1, 1));
             cmd.ResourceBarrierUnorderedAccessView(_photons); cmd.ResourceBarrierUnorderedAccessView(_photonGrid);
         }
+        _traceTimer!.Begin(cmd);
         cmd.DispatchRays(new(new(_table.Buffer.GPUVirtualAddress, 64), new(_table.Buffer.GPUVirtualAddress + 64, 64, 64),
             new(_table.Buffer.GPUVirtualAddress + 128, 64, 64), default, (uint)raw.Width, (uint)raw.Height, 1));
         foreach (var output in _outputs) cmd.ResourceBarrierUnorderedAccessView(output!);
         cmd.ResourceBarrierUnorderedAccessView(_reservoirs[_reservoirWrite]!);
+        _traceTimer.End(cmd);
         End();
+        TraceGpuMilliseconds = _traceTimer.ReadMilliseconds();
         if (rebuildPhotons) { _photonFrame = data; _photonsValid = true; PhotonBuildCount++; }
+        TraceDispatchCount++;
         _previous = data; _previousFrame = frame; _historyValid = true; _reservoirWrite = 1 - _reservoirWrite;
     }
 
@@ -369,6 +417,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         cmd.SetComputeRootShaderResourceView(3, scene.Indices.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(4, scene.Instances.GPUVirtualAddress);
         cmd.SetComputeRootShaderResourceView(5, scene.Materials.GPUVirtualAddress); cmd.SetComputeRootShaderResourceView(6, scene.Lights.GPUVirtualAddress);
         cmd.SetComputeRootShaderResourceView(7, scene.Emitters.GPUVirtualAddress);
+        cmd.SetComputeRootShaderResourceView(14, scene.EnvironmentTexels.GPUVirtualAddress);
         cmd.SetComputeRootDescriptorTable(8, scene.Heap.GetGPUDescriptorHandleForHeapStart()); cmd.SetComputeRootDescriptorTable(9, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
         cmd.SetComputeRootUnorderedAccessView(10, _reservoirs[_reservoirWrite]!.GPUVirtualAddress);
         cmd.SetComputeRootUnorderedAccessView(11, _reservoirs[1 - _reservoirWrite]!.GPUVirtualAddress);

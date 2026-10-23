@@ -1,0 +1,22 @@
+Amazon Lumberyard Bistro, Open Research Content Archive (ORCA)
+Author: Amazon Lumberyard, July 2017
+Source: https://developer.nvidia.com/orca/amazon-lumberyard-bistro
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+This is the Bistro adaptation distributed in NVIDIA RTXPT-Assets at
+2a38b92df0fb43ebf6c6e6603893052dacf5a4c8, with NVIDIA's material overrides.
+The original SDK license is retained as RTXPT-LICENSE.txt.
+
+DXRDemo changes: CPU conversion of DDS textures to PNG (maximum 1024 pixels),
+normal/tangent repairs, material overrides baked to approximate standard glTF
+metallic/roughness, alpha cutouts, emission and transmission. Geometry and
+instances are retained. See SOURCES.md and manifest.json for details.
+No endorsement by the original authors is implied.
+
+Shanghai Bund HDR panorama:
+Author: Greg Zaal / Poly Haven
+Source: https://polyhaven.com/a/shanghai_bund
+License: CC0, https://polyhaven.com/license
+The original 1K RGBE image is included unchanged. RTXPT uses the same panorama
+as a BC6H cubemap; this version is used for portable CPU HDR loading.

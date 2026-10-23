@@ -39,7 +39,14 @@ public sealed class DxrShaderCompiler : IDisposable
                 _                  => "x64",
             };
 
-            // 2. Installed Windows SDKs (registry root + default Program Files roots)
+            // Use the packaged compiler matching our shader features before an
+            // installed Windows SDK, which may predate Shader Model 6.9.
+            string bundled = Path.Combine(AppContext.BaseDirectory, "dxc.exe");
+            searched.Add(bundled);
+            if (File.Exists(bundled))
+                return _dxcPath = bundled;
+
+            // Installed Windows SDKs (registry root + default Program Files roots)
             var roots = new[]
             {
                 ReadSdkRootFromRegistry(),
@@ -71,12 +78,6 @@ public sealed class DxrShaderCompiler : IDisposable
                 candidates.Sort((a, b) => b.Version.CompareTo(a.Version));
                 return _dxcPath = candidates[0].Path;
             }
-
-            // 3. Bundled fallback (Microsoft.Direct3D.DXC copied to app output)
-            string bundled = Path.Combine(AppContext.BaseDirectory, "dxc.exe");
-            searched.Add(bundled);
-            if (File.Exists(bundled))
-                return _dxcPath = bundled;
 
             // 4. PATH fallback (CreateProcess resolves "dxc" via PATH)
             string? pathResolved = ResolveFromPath("dxc.exe");
@@ -131,8 +132,8 @@ public sealed class DxrShaderCompiler : IDisposable
     /// the active device. SM 6.9 enables DXR 1.2/SER when <paramref name="useSer"/>
     /// is true; callers must still provide a 6.5 fallback for older runtimes.
     /// </summary>
-    public void CompileLibrary(string entryHlsl, bool useShaderModel69 = false, bool useSer = false)
-        => Compile(entryHlsl, useShaderModel69 ? "lib_6_9" : "lib_6_5", null, useSer, useShaderModel69);
+    public void CompileLibrary(string entryHlsl, bool useShaderModel69 = false, bool useSer = false, bool reorderThreads = true)
+        => Compile(entryHlsl, useShaderModel69 ? "lib_6_9" : "lib_6_5", null, useSer, useShaderModel69, reorderThreads);
 
     /// <summary>Compiles a compute entry point for reconstruction preparation or output encoding.</summary>
     /// <param name="entryHlsl">The HLSL source path.</param>
@@ -140,7 +141,7 @@ public sealed class DxrShaderCompiler : IDisposable
     public void CompileCompute(string entryHlsl, string entryPoint)
         => Compile(entryHlsl, "cs_6_0", entryPoint);
 
-    private void Compile(string entryHlsl, string profile, string? entryPoint, bool useSer = false, bool useShaderModel69 = false)
+    private void Compile(string entryHlsl, string profile, string? entryPoint, bool useSer = false, bool useShaderModel69 = false, bool reorderThreads = true)
     {
         if (!File.Exists(entryHlsl))
             throw new FileNotFoundException("HLSL not found.", entryHlsl);
@@ -164,6 +165,7 @@ public sealed class DxrShaderCompiler : IDisposable
             psi.ArgumentList.Add("-I"); psi.ArgumentList.Add(dir);
             psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_SHADER_MODEL_69={(useShaderModel69 ? 1 : 0)}");
             psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_USE_SER={(useSer ? 1 : 0)}");
+            psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_REORDER_THREADS={(useSer && reorderThreads ? 1 : 0)}");
             if (entryPoint != null) { psi.ArgumentList.Add("-E"); psi.ArgumentList.Add(entryPoint); }
             psi.ArgumentList.Add(entryHlsl);
 

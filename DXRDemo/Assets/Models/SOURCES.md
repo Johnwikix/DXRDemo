@@ -13,3 +13,7 @@ These models are used in the local path-tracing demos and their independent rese
 Actual downloaded PLY face counts are used in results: Bunny 69,451; Armadillo 345,944; Dragon LODs 11,102 / 47,794 / 202,520 / 871,414. The source page currently lists a different full Dragon reconstruction count; this benchmark reports the actual archive contents, not the page's summary.
 
 Only translation and uniform scaling are applied: center X/Z, rest the model on Y=0, scale the largest bounding-box dimension to 2. The topology, winding and number of triangles are preserved. Faces are reordered for the software BVH, and the identical reordered triangles feed the DXR BLAS. No model decimation is performed by this benchmark.
+
+## RTXPT default scenes
+
+Kitchen, ConvergenceTest and Bistro are supplied by NVIDIA RTXPT. See [RTXPT attribution, pinned revisions and conversion notes](RTXPT/SOURCES.md). These assets have their own terms, independent of the Stanford models above.

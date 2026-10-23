@@ -22,10 +22,17 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     /// <summary>Gets the fixed catalog index of the packaged rainy convenience-store demo.</summary>
     public static int RainyCornerSceneIndex => MeshData.Choices.Length;
     private static readonly MeshChoice RainyCornerChoice = new("雨后便利店 · Rainy Corner", "RainyCorner.glb", 2019650);
-    private static readonly MeshChoice[] DxrDemoChoices = [.. MeshData.Choices, RainyCornerChoice];
+    public static int RtxptKitchenSceneIndex => RainyCornerSceneIndex + 1;
+    public static int RtxptConvergenceSceneIndex => RainyCornerSceneIndex + 2;
+    public static int RtxptBistroSceneIndex => RainyCornerSceneIndex + 3;
+    public static int PackagedSceneCount => DxrDemoChoices.Length;
+    private static readonly MeshChoice[] DxrDemoChoices = [.. MeshData.Choices, RainyCornerChoice,
+        new("RTXPT · Kitchen", RtxptAssets.KitchenPath, 1474751),
+        new("RTXPT · Convergence Test", RtxptAssets.ConvergencePath, 46110),
+        new("RTXPT · Bistro 街角", RtxptAssets.BistroPath, 4209006)];
     private sealed record Settings(int Scene = 0, RayTraceDenoiserMode Denoiser = RayTraceDenoiserMode.NrdRelax,
-        int Bounces = 10, int Samples = 2, Float2 Orbit = default, float Distance = 2.7f, Float2 Mouse = default, int Revision = 0,
-        ReconstructionMode Reconstruction = ReconstructionMode.Off, int RenderScale = 67, int CameraReset = 0,
+        int Bounces = 10, int Samples = 1, Float2 Orbit = default, float Distance = 2.7f, Float2 Mouse = default, int Revision = 0,
+        ReconstructionMode Reconstruction = ReconstructionMode.DlssRayReconstruction, int RenderScale = 50, int CameraReset = 0,
         SceneAsset? Asset = null, float Environment = 1, float Exposure = 0, SunLightSettings Sun = default, bool ExternalLightingEnabled = true);
     private readonly object _settingsLock = new();
     private Settings _settings = new(Orbit: new Float2(0, 0.165f), Sun: SunLightSettings.Default);
@@ -59,8 +66,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     private DxrSceneBackend? _sceneBackend;
     private PbrSignals? _pbrSignals;
     private SceneAsset[] _importedScenes = [];
-    private SceneAsset? _rainyCorner;
-    private Task<SceneDocument>? _rainyCornerLoad;
+    private readonly SceneAsset?[] _packagedScenes = new SceneAsset?[4];
+    private readonly Task<SceneDocument>?[] _packagedLoads = new Task<SceneDocument>?[4];
     private readonly CancellationTokenSource _demoCancellation = new();
     private sealed record PendingImport(SceneDocument Document, TaskCompletionSource<SceneDocument> Completion, CancellationToken Cancellation);
     private PendingImport? _pendingImport;
@@ -102,11 +109,14 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             {
                 int index = Math.Clamp(value, 0, Scenes.Count - 1);
                 int importedIndex = index - DxrDemoChoices.Length;
-                SceneAsset? asset = _backend is DxrMeshBackend && index == RainyCornerSceneIndex ? _rainyCorner :
+                int packaged = index - RainyCornerSceneIndex;
+                SceneAsset? asset = _backend is DxrMeshBackend && packaged >= 0 && packaged < _packagedScenes.Length ? _packagedScenes[packaged] :
                     importedIndex >= 0 && importedIndex < _importedScenes.Length ? _importedScenes[importedIndex] : null;
                 Change(s => s with { Scene = index, Asset = asset, Orbit = new(index == 1 ? MathF.PI : 0, .165f),
+                    Exposure = index != s.Scene && packaged is >= 1 and <= 3
+                        ? RtxptAssets.InitialExposure((RtxptScene)(packaged - 1)) : s.Exposure,
                     Distance = index == 3 && asset == null ? 6.5f : 2.7f, Mouse = default, CameraReset = s.CameraReset + 1 });
-                if (asset != null) _camera.FrameBounds(asset.Minimum, asset.Maximum, _height > 0 ? _width / (float)_height : 16f / 9);
+                if (asset != null) _camera.FrameScene(asset, _height > 0 ? _width / (float)_height : 16f / 9);
                 else _camera.FrameDemo(index);
             }
         }
@@ -118,13 +128,16 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     private bool PreparePackagedScene(GraphicsDevice device, ReadWriteTexture2D<Rgba64, Float4> target)
     {
         Settings selected = Snapshot;
-        if (_backend is not DxrMeshBackend || selected.Scene != RainyCornerSceneIndex || selected.Asset != null)
+        int packaged = selected.Scene - RainyCornerSceneIndex;
+        if (_backend is not DxrMeshBackend || packaged < 0 || packaged >= _packagedScenes.Length || selected.Asset != null)
         {
             _loading = false;
             return true;
         }
-        _rainyCornerLoad ??= GltfImporter.LoadAsync(Path.Combine(AppContext.BaseDirectory, "Assets", "Models", RainyCornerChoice.FileName), _demoCancellation.Token);
-        _loading = !_rainyCornerLoad.IsCompleted;
+        Task<SceneDocument> load = _packagedLoads[packaged] ??= packaged == 0
+            ? GltfImporter.LoadAsync(Path.Combine(AppContext.BaseDirectory, "Assets", "Models", RainyCornerChoice.FileName), _demoCancellation.Token)
+            : RtxptAssets.LoadAsync((RtxptScene)(packaged - 1), _demoCancellation.Token);
+        _loading = !load.IsCompleted;
         if (_loading)
         {
             device.ForEach(target, new LoadingShader());
@@ -132,13 +145,13 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         }
         try
         {
-            SceneDocument document = _rainyCornerLoad.GetAwaiter().GetResult();
+            SceneDocument document = load.GetAwaiter().GetResult();
             lock (_settingsLock)
             {
-                _rainyCorner = document.Scenes[document.DefaultScene];
+                _packagedScenes[packaged] = document.Scenes[document.DefaultScene];
                 // 解析期间允许切换模型；完成后不覆盖用户的新选择。
-                if (_settings.Scene == RainyCornerSceneIndex && _settings.Asset == null)
-                    SceneIndex = RainyCornerSceneIndex;
+                if (_settings.Scene == selected.Scene && _settings.Asset == null)
+                    SceneIndex = selected.Scene;
             }
             return true;
         }
@@ -146,9 +159,9 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         {
             lock (_settingsLock)
             {
-                if (_settings.Scene == RainyCornerSceneIndex && _settings.Asset == null) SceneIndex = 0;
+                if (_settings.Scene == selected.Scene && _settings.Asset == null) SceneIndex = 0;
             }
-            _rainyCornerLoad = null;
+            _packagedLoads[packaged] = null;
             throw;
         }
     }
@@ -292,6 +305,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             if (pbr)
             {
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
+                if (nrd && _sceneBackend.StablePlanesEnabled) _reconstruction.PrepareStablePlanes();
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
                     _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd);
             }

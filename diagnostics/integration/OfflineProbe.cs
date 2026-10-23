@@ -1,0 +1,288 @@
+using System.Diagnostics;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Text.Json;
+using ComputeSharp;
+using ComputeSharp.Interop;
+using DXRDemo.Camera;
+using DXRDemo.DXR;
+using DXRDemo.Scene;
+using DXRDemo.Hdr;
+using DXRDemo.SuperResolution;
+using DXRDemo.Shaders.RayTrace;
+using Vortice.Direct3D12;
+using Vortice.Direct3D12.Debug;
+
+/// <summary>A bounded, headless single-frame check, including optional NRD/DLSS or DLSS RR.</summary>
+internal static class OfflineProbe
+{
+    internal static async Task Run(string[] args)
+    {
+        bool cpuOnly = args.Contains("--cpu-only"), convergence = args.Contains("--convergence");
+        bool bistro = args.Contains("--bistro");
+        if (bistro && convergence) throw new ArgumentException("Choose either --bistro or --convergence.");
+        bool contracts = args.Contains("--contracts"), production = args.Contains("--production");
+        bool stable = args.Contains("--stable"), nrd = args.Contains("--nrd");
+        bool rr = args.Contains("--rr-4k");
+        bool dlss = args.Contains("--dlss-4k") || rr;
+        if (rr && (nrd || stable)) throw new ArgumentException("Ray Reconstruction consumes raw signals; omit --nrd and --stable.");
+        if (dlss && !rr) nrd = true;
+        if (nrd) stable = true;
+        await OfflineFeatureChecks.RunCpu();
+        ValidateLightWeights();
+        Require(Recompose(new(2, 3, 5, 0), new(7, 11, 13, 1), new(1, 1, 1, 0), new(.5f, 1, 2, 1), new(1, 2, 3, 0)) ==
+            new Vector3(15.5f, 36, 70), "CPU signal validation must use scalar arithmetic, not GPU-only Float4 operators");
+        int Option(string name, int fallback, int maximum)
+        {
+            int index = Array.IndexOf(args, name);
+            if (index < 0) return fallback;
+            if (index + 1 >= args.Length || !int.TryParse(args[index + 1], out int value) || value < 1 || value > maximum)
+                throw new ArgumentException($"{name} must be between 1 and {maximum}.");
+            return value;
+        }
+        int width = Option("--width", 256, 3840), height = Option("--height", 144, 2160);
+        int samples = Option("--spp", dlss ? 1 : 4, 64), bounces = Option("--bounces", dlss ? 10 : 8, 32);
+        int textureLimit = Option("--texture-size", dlss ? 1024 : 256, 4096);
+        if (dlss) { width = 1920; height = 1080; }
+        var timer = Stopwatch.StartNew();
+        // Small checks retain a texture budget; 4K checks match the app's 1024 limit.
+        SceneAsset asset;
+        if (contracts) { asset = OfflineFeatureChecks.Fixture(); width = 9; height = 4; samples = 1; }
+        else
+        {
+            SceneDocument document = await RtxptAssets.LoadAsync(bistro ? RtxptScene.Bistro : convergence ? RtxptScene.Convergence : RtxptScene.Kitchen,
+                maximumTextureSize: textureLimit);
+            asset = document.Scenes[document.DefaultScene];
+        }
+        int environmentArgument = Array.IndexOf(args, "--environment");
+        if (environmentArgument >= 0)
+        {
+            if (environmentArgument + 1 >= args.Length) throw new ArgumentException("--environment requires a Radiance .hdr path.");
+            asset = asset with { EnvironmentMap = SceneEnvironment.LoadRadiance(args[environmentArgument + 1], 256) };
+        }
+        Require(asset.TriangleCount > 0 && asset.Instances.Length > 0, "Empty packaged scene");
+        if (args.Contains("--uncompressed")) asset = asset with { Textures = asset.Textures.Select(t => t with { Bc7Mips = null }).ToArray() };
+        Require(asset.Textures.All(t => t.Width <= textureLimit && t.Height <= textureLimit), "Offline texture budget exceeded");
+        Require(Marshal.SizeOf<SceneMaterial>() == 432 && Marshal.SizeOf<SceneVertex>() == 80, "Scene ABI changed");
+        var distribution = new SceneLightDistribution(asset);
+        double mass = distribution.Emitters.Sum(e => (double)e.Meta.X * e.E1.W);
+        if (distribution.Emitters.Length > 0)
+        {
+            Require(Math.Abs(mass - 1) < 1e-5, "Emitter PDF is not normalized");
+            Require(distribution.Emitters[^1].Meta.Y == 1, "Emitter CDF does not end at one");
+            float previous = 0;
+            foreach (var emitter in distribution.Emitters)
+            {
+                Require(emitter.Meta.Y >= previous && (emitter.E1.W > 0 || emitter.Meta.X == 0), "Invalid emitter CDF/PDF");
+                Require(emitter.Meta.X == 0 || emitter.E1.W == distribution.InstanceAreaPdf[(int)emitter.Meta.Z], "NEE and hit-emission PDFs disagree");
+                previous = emitter.Meta.Y;
+            }
+            var aliasMass = new double[distribution.Emitters.Length];
+            for (int i = 0; i < aliasMass.Length; i++)
+            {
+                var emitter = distribution.Emitters[i];
+                Require(emitter.P0.W >= 0 && emitter.P0.W <= 1 && emitter.E2.W >= 0 && emitter.E2.W < aliasMass.Length, "Invalid emitter alias.");
+                aliasMass[i] += emitter.P0.W / aliasMass.Length;
+                aliasMass[(int)emitter.E2.W] += (1 - emitter.P0.W) / aliasMass.Length;
+            }
+            for (int i = 0; i < aliasMass.Length; i++)
+                Require(Math.Abs(aliasMass[i] - distribution.Emitters[i].Meta.X * distribution.Emitters[i].E1.W) < 1e-6, "Emitter alias and hit-light PDFs disagree.");
+        }
+        var controller = new CameraController(); controller.FrameScene(asset, width / (float)height);
+        CameraFrame camera = controller.Advance(0, out _, out _);
+        Require(asset.DefaultCamera is { } authored && Vector3.Distance(camera.Origin, authored.Origin) < 1e-4f &&
+            Vector3.Distance(camera.Forward, authored.Forward) < 1e-4f && camera.VerticalFov == authored.VerticalFov, "Authored camera not applied");
+        controller.Rotate(.2f, .1f); controller.Reset();
+        Require(controller.Advance(0, out _, out _) == camera, "Scene camera reset failed");
+        foreach (string warning in asset.Warnings) Console.WriteLine("Asset warning: " + warning);
+        Console.WriteLine($"CPU validated {asset.Name}: {asset.TriangleCount:N0} triangles, {asset.Instances.Length} instances, {asset.Textures.Length} texture views ({asset.Textures.Count(t => t.Bc7Mips != null)} BC7), {distribution.Emitters.Length} emitters.");
+        if (cpuOnly) { Console.WriteLine("PASS: CPU assets, light PDFs and authored camera. GPU dispatches: 0."); return; }
+
+        using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
+        using var device = GraphicsDevice.GetDefault();
+        using var native = NativeDevice(device);
+        using var messages = native.QueryInterface<ID3D12InfoQueue>();
+        using var backend = new DxrSceneBackend { ReferenceMode = !production, CausticsEnabled = false,
+            UseInlineTraversal = !args.Contains("--no-ser") && !args.Contains("--legacy-trace"),
+            ReorderThreads = args.Contains("--reorder") && !args.Contains("--no-reorder"),
+            ShaderLibraryFile = contracts ? "ContractTracer.hlsl" : "SceneTrace.hlsl" };
+        backend.Initialize(device); backend.SetScene(asset);
+        Console.WriteLine($"Runtime: {backend.ActualShaderModel}, SER active: {backend.SerActive}");
+        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
+        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var signals = new PbrSignals(device, width, height);
+        using var reconstruction = (nrd || rr) && !contracts ? new SuperResolutionRenderer(device) : null;
+        using var target = reconstruction != null ? device.AllocateReadWriteTexture2D<Rgba64, Float4>(dlss ? 3840 : width, dlss ? 2160 : height) : null;
+        float exposureStops = RtxptAssets.InitialExposure(bistro ? RtxptScene.Bistro : convergence ? RtxptScene.Convergence : RtxptScene.Kitchen);
+        if (reconstruction != null)
+        {
+            var mode = rr ? ReconstructionMode.DlssRayReconstruction : dlss ? ReconstructionMode.Dlss : ReconstructionMode.Off;
+            reconstruction.Configure(mode, dlss ? 50 : 100,
+                dlss ? 3840 : width, dlss ? 2160 : height, nrd, true);
+            if (dlss) Require(reconstruction.Status.Active == mode && reconstruction.InputWidth == width && reconstruction.InputHeight == height,
+                "Explicit 4K DLSS / 50% input configuration unavailable.");
+            if (nrd) Require(reconstruction.Status.NrdActive, "NRD is unavailable for the explicit --nrd check.");
+            reconstruction.PrepareStablePlanes();
+        }
+        double setupMilliseconds = timer.Elapsed.TotalMilliseconds;
+        // The only DispatchRays frame in this command. No warmup, history, photon pass or NRC.
+        backend.Trace(camera, 0, samples, bounces, default, 1, raw, normals, surfaces, guide, signals, rayReconstruction: rr, opaqueForNrd: stable);
+        double frameMilliseconds = timer.Elapsed.TotalMilliseconds - setupMilliseconds;
+        double reconstructionMilliseconds = 0, reconstructionGpuMilliseconds = 0;
+        // Keep GPU stages adjacent, as in the app. No image readback, CPU pixel
+        // validation, pipeline compilation or extra frame between these stages.
+        if (reconstruction != null)
+        {
+            var reconstructionTimer = Stopwatch.StartNew();
+            Require(reconstruction.Execute(raw, normals, surfaces, target!, default, 3, default, RayTraceDenoiserMode.NrdRelax,
+                HdrRenderParameters.Default, 1.0 / 30, guide, camera, signals, exposure: exposureStops, transparentBackend: backend), reconstruction.Status.Message);
+            reconstructionMilliseconds = reconstructionTimer.Elapsed.TotalMilliseconds;
+            reconstructionGpuMilliseconds = reconstruction.GpuMilliseconds;
+        }
+        Require(backend.TraceDispatchCount == 1 && backend.PhotonBuildCount == 0, "Single-frame contract violated");
+        if (contracts)
+        {
+            Float4[,] results = raw.ToArray();
+            for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+                Require(results[y, x].X == 1, $"GPU contract ({x},{y}) failed: error={results[y, x].Y}, details={results[y, x].Z}/{results[y, x].W}");
+            for (ulong i = 0; i < messages.NumStoredMessagesAllowedByRetrievalFilter; i++)
+            {
+                var message = messages.GetMessage(i);
+                Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
+            }
+            Console.WriteLine("PASS: 36 GPU contracts in ONE dispatch: materials, media, HDR/light PDF, TIR, delta BSDF, culling/mirrored traversal, near-delta GGX and large-PDF MIS.");
+            return;
+        }
+        Float4[,] pixels = raw.ToArray(), hits = surfaces.ToArray(), d = signals.Diffuse.ToArray(), s = signals.Specular.ToArray();
+        Float4[,] df = signals.DiffuseFactor.ToArray(), sf = signals.SpecularFactor.ToArray(), e = signals.Unfiltered.ToArray();
+        Float4[,] reflection = signals.StableReflection.ToArray(), transmission = signals.StableTransmission.ToArray();
+        Float4[,] reflectionSurface = signals.StableReflectionSurface.ToArray(), transmissionSurface = signals.StableTransmissionSurface.ToArray();
+        double energy = 0, maxRecompositionError = 0; int hitPixels = 0, invalidSignals = 0;
+        int reflectionPixels = 0, transmissionPixels = 0, virtualGuidePixels = 0;
+        byte[] rgba = new byte[width * height * 4];
+        float exposure = MathF.Pow(2, exposureStops);
+        static byte Encode(float linear)
+        {
+            float mapped = linear / (1 + linear);
+            float srgb = mapped <= .0031308f ? 12.92f * mapped : 1.055f * MathF.Pow(mapped, 1 / 2.4f) - .055f;
+            return (byte)Math.Clamp(MathF.Round(srgb * 255), 0, 255);
+        }
+        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+        {
+            Float4 p = pixels[y, x];
+            Require(float.IsFinite(p.X + p.Y + p.Z) && p.X >= 0 && p.Y >= 0 && p.Z >= 0, "Non-finite/negative radiance");
+            energy += p.X + p.Y + p.Z;
+            if (hits[y, x].W > 0) hitPixels++;
+            Vector3 recomposed = Recompose(d[y, x], df[y, x], s[y, x], sf[y, x], e[y, x]);
+            Float4 pr = reflection[y, x], pt = transmission[y, x];
+            recomposed += new Vector3(pr.X + pt.X, pr.Y + pt.Y, pr.Z + pt.Z);
+            if (pr.X + pr.Y + pr.Z > 0) reflectionPixels++;
+            if (pt.X + pt.Y + pt.Z > 0) transmissionPixels++;
+            if (reflectionSurface[y, x].W > 0 || transmissionSurface[y, x].W > 0) virtualGuidePixels++;
+            float error = MathF.Max(MathF.Abs(recomposed.X - p.X), MathF.Max(MathF.Abs(recomposed.Y - p.Y), MathF.Abs(recomposed.Z - p.Z)));
+            if (!float.IsFinite(error)) invalidSignals++;
+            else maxRecompositionError = Math.Max(maxRecompositionError, error / Math.Max(1, Math.Max(p.X, Math.Max(p.Y, p.Z))));
+            int offset = (y * width + x) * 4;
+            rgba[offset] = Encode(p.X * exposure); rgba[offset + 1] = Encode(p.Y * exposure); rgba[offset + 2] = Encode(p.Z * exposure); rgba[offset + 3] = 255;
+        }
+        Require(energy > .001 && hitPixels > width * height / 20, "Empty/black camera view");
+        if (stable) Require(reflectionPixels + transmissionPixels > 0, "Stable-plane test did not exercise a smooth branch.");
+        byte[]? denoisedRgba = null;
+        byte[]? outputRgba = null;
+        if (reconstruction != null)
+        {
+            if (dlss)
+            {
+                Rgba64[,] output = target!.ToArray();
+                ReadOnlySpan<ushort> channels = MemoryMarshal.Cast<Rgba64, ushort>(
+                    MemoryMarshal.CreateReadOnlySpan(ref output[0, 0], output.Length));
+                outputRgba = new byte[output.Length * 4];
+                long outputEnergy = 0;
+                for (int i = 0; i < outputRgba.Length; i++)
+                {
+                    outputRgba[i] = (byte)(channels[i] >> 8);
+                    if ((i & 3) != 3) outputEnergy += channels[i];
+                }
+                Require(outputEnergy > 0, "4K DLSS output is black.");
+            }
+            if (nrd)
+            {
+                float[] denoised = ReconstructionProbe.ReadTexture(native, reconstruction.DenoisedColor, true, ResourceStates.NonPixelShaderResource);
+                double sum = 0; denoisedRgba = new byte[rgba.Length];
+                for (int p = 0; p < width * height; p++)
+                {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        float value = denoised[p * 4 + c];
+                        Require(float.IsFinite(value) && value >= 0, "Non-finite/negative stable NRD output."); sum += value;
+                        denoisedRgba[p * 4 + c] = Encode(value * exposure);
+                    }
+                    denoisedRgba[p * 4 + 3] = 255;
+                }
+                Require(sum > 0, "Stable NRD composition is black.");
+                Console.WriteLine("PASS: single-frame NRD primary + independent reflected/transmitted histories and composition.");
+            }
+            else
+            {
+                float[] reconstructed = ReconstructionProbe.ReadTexture(native, reconstruction.LinearOutput, true, ResourceStates.UnorderedAccess);
+                Require(reconstructed.All(float.IsFinite), "Non-finite DLSS Ray Reconstruction output.");
+                Console.WriteLine("PASS: single-frame DLSS Ray Reconstruction with finite 4K output.");
+            }
+        }
+        for (ulong i = 0; i < messages.NumStoredMessagesAllowedByRetrievalFilter; i++)
+        {
+            var message = messages.GetMessage(i);
+            Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
+        }
+        string directory = Path.GetFullPath("output/rtxpt-offline"); Directory.CreateDirectory(directory);
+        string name = (bistro ? "bistro" : convergence ? "convergence" : "kitchen") + (production ? "-production" : "") + (asset.EnvironmentMap != null ? "-hdr" : "") + (stable ? "-planes" : "") + (rr ? "-rr" : "");
+        SceneProbe.WritePng(Path.Combine(directory, name + ".png"), width, height, rgba);
+        if (denoisedRgba != null) SceneProbe.WritePng(Path.Combine(directory, name + "-nrd.png"), width, height, denoisedRgba);
+        if (outputRgba != null) SceneProbe.WritePng(Path.Combine(directory, name + "-4k.png"), 3840, 2160, outputRgba);
+        File.WriteAllBytes(Path.Combine(directory, name + ".rgba32f"), MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref pixels[0, 0], pixels.Length)).ToArray());
+        var result = new { scene = asset.Name, gpu = device.Name.ToString(), width, height, samples, bounces, exposureStops,
+            textureLimit, compressedTextures = asset.Textures.Count(t => t.Bc7Mips != null),
+            textureGpuBytes = asset.Textures.Sum(t => (t.Bc7Mips ?? t.Mips).Sum(m => (long)m.Length)),
+            frames = backend.TraceDispatchCount, photonPasses = backend.PhotonBuildCount,
+            referenceMode = backend.ReferenceMode, adaptiveLighting = production, hdrEnvironment = asset.EnvironmentMap != null,
+            stablePlanes = stable, nrd, rayReconstruction = rr, reflectionPixels, transmissionPixels, virtualGuidePixels,
+            meanRadiance = energy / (width * height * 3), hitPixels, invalidSignals, maxRecompositionError,
+            setupMilliseconds, frameMilliseconds, traceGpuMilliseconds = backend.TraceGpuMilliseconds, reconstructionMilliseconds,
+            reconstructionGpuMilliseconds, inlineTraversal = backend.InlineTraversalActive, serRequested = backend.ReorderThreads, serActive = backend.SerActive,
+            shaderModel = backend.ActualShaderModel, outputWidth = dlss ? 3840 : width, outputHeight = dlss ? 2160 : height, dlss,
+            targetMilliseconds = 1000.0 / 30, measuredGpuMilliseconds = backend.TraceGpuMilliseconds + reconstructionGpuMilliseconds,
+            withinGpuBudget = backend.TraceGpuMilliseconds + reconstructionGpuMilliseconds <= 1000.0 / 30,
+            debugErrors = 0, temporalValidation = false };
+        string json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(Path.Combine(directory, name + ".json"), json);
+        Console.WriteLine(json);
+        Require(invalidSignals == 0 && maxRecompositionError < 1e-4, "NRD lobe signal recomposition disagrees with raw radiance");
+        Console.WriteLine($"PASS: one offline frame. {Path.Combine(directory, name + ".png")}");
+    }
+
+    private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
+    // ComputeSharp vector arithmetic is a GPU intrinsic and returns undefined results on the CPU.
+    // Read individual components for the independent validation of the shader's signal contract.
+    private static Vector3 Recompose(Float4 d, Float4 df, Float4 s, Float4 sf, Float4 e) =>
+        new(d.X * df.X + s.X * sf.X + e.X, d.Y * df.Y + s.Y * sf.Y + e.Y, d.Z * df.Z + s.Z * sf.Z + e.Z);
+    private static void ValidateLightWeights()
+    {
+        var dim = SceneMaterial.Default; dim.Emissive = new(1, 1, 1, 0);
+        var bright = SceneMaterial.Default; bright.Emissive = new(9, 9, 9, 0);
+        SceneVertex[] vertices = [new() { Position = new(0, 0, 0, 1) },
+            new() { Position = new(1, 0, 0, 1) }, new() { Position = new(0, 1, 0, 1) }];
+        var fixture = new SceneAsset("power fixture", [new("dim", vertices, [0, 1, 2], 0), new("bright", vertices, [0, 1, 2], 1)],
+            [new("dim", 0, Matrix4x4.Identity), new("bright", 1, Matrix4x4.CreateTranslation(0, 0, 1))],
+            [dim, bright], [], [], Vector3.Zero, Vector3.One, []);
+        var distribution = new SceneLightDistribution(fixture);
+        Require(MathF.Abs(distribution.Emitters[0].Meta.Y - .1f) < 1e-6f, "Equal-area lights must be selected in proportion to emitted power");
+        Require(MathF.Abs(distribution.InstanceAreaPdf[1] / distribution.InstanceAreaPdf[0] - 9) < 1e-5f, "Hit-light PDFs lost the power distribution");
+    }
+    private static unsafe ID3D12Device5 NativeDevice(GraphicsDevice device)
+    {
+        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
+        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer); return new(pointer);
+    }
+}

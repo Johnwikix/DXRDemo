@@ -9,6 +9,9 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
+    <PackageReference Include="Microsoft.Direct3D.D3D12" Version="1.619.6" />
+    <Content Include="$(NuGetPackageRoot)/microsoft.direct3d.d3d12/1.619.6/build/native/bin/x64/*.dll"
+             Link="D3D12/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="ComputeSharp" Version="3.2.0" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
@@ -18,6 +21,9 @@
     <Compile Include="SceneProbe.cs" />
     <Compile Include="GlassReconstructionProbe.cs" />
     <Compile Include="LightingProbe.cs" />
+    <Compile Include="OfflineProbe.cs" />
+    <Compile Include="OfflineFeatureChecks.cs" />
+    <Content Include="Shaders/*" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />
     <Compile Include="../../DXRDemo/DXR/*.cs" Exclude="../../DXRDemo/DXR/DxrRenderer.cs;../../DXRDemo/DXR/DxrSwapChain.cs" />
     <Compile Include="../../DXRDemo/Shaders/RayTrace/*.cs" />
@@ -28,8 +34,12 @@
     <Content Include="../../DXRDemo/Assets/Models/**" Link="Assets/Models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../Samples/RainyCorner/RainyCorner.glb" Link="Assets/Models/RainyCorner.glb" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Reconstruction.hlsl" Link="Shaders/DXR/Reconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/StableReconstruction.hlsl" Link="Shaders/DXR/StableReconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli" Link="Shaders/DXR/SceneLighting.hlsli" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/Path*.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/RTXPT/*.hlsli" Link="Shaders/DXR/RTXPT/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Licenses/RTXPT.txt" Link="Licenses/RTXPT.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Import Project="../../DXRDemo/SuperResolution/ReconstructionAssets.targets" />
 </Project>

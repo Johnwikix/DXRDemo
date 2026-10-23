@@ -34,7 +34,8 @@ public sealed class CameraController
 {
     private readonly object _gate = new();
     private Vector3 _target = new(0, .9f, 0), _resetTarget = new(0, .9f, 0), _position;
-    private float _yaw, _pitch = .165f, _distance = 2.7f, _resetDistance = 2.7f, _resetYaw;
+    private float _yaw, _pitch = .165f, _distance = 2.7f, _resetDistance = 2.7f, _resetYaw, _resetPitch = .165f;
+    private float _verticalFov = 2 * MathF.Atan(.5f);
     private float _scale = 1, _near = .01f, _far = 1000, _speed = 1;
     private CameraMode _mode;
     private CameraMovement _movement;
@@ -57,10 +58,27 @@ public sealed class CameraController
         lock (_gate)
         {
             _resetTarget = (minimum + maximum) * .5f;
+            _verticalFov = 2 * MathF.Atan(.5f); _resetPitch = .165f;
             _scale = MathF.Max(Vector3.Distance(minimum, maximum) * .5f, .001f);
             float halfFov = MathF.Min(MathF.Atan(.5f), MathF.Atan(.5f * MathF.Max(.1f, aspect)));
             _resetDistance = _scale / MathF.Sin(halfFov) * 1.1f;
             _resetYaw = 0; _near = MathF.Max(_scale * .0001f, .00001f); _far = MathF.Max(1000, _scale * 1000);
+            ResetCore();
+        }
+    }
+
+    /// <summary>Uses an authored scene camera and preserves it for reset/navigation.</summary>
+    public void FrameScene(DXRDemo.Scene.SceneAsset scene, float aspect = 16f / 9)
+    {
+        if (scene.DefaultCamera is not { } camera) { FrameBounds(scene.Minimum, scene.Maximum, aspect); return; }
+        lock (_gate)
+        {
+            _scale = MathF.Max(Vector3.Distance(scene.Minimum, scene.Maximum) * .5f, .001f);
+            _resetDistance = MathF.Max(Vector3.Distance(camera.Origin, (scene.Minimum + scene.Maximum) * .5f), _scale * .1f);
+            _resetTarget = camera.Origin + camera.Forward * _resetDistance;
+            _resetYaw = MathF.Atan2(-camera.Forward.X, -camera.Forward.Z);
+            _resetPitch = MathF.Asin(Math.Clamp(-camera.Forward.Y, -1, 1));
+            _verticalFov = camera.VerticalFov; _near = camera.Near; _far = camera.Far;
             ResetCore();
         }
     }
@@ -71,6 +89,7 @@ public sealed class CameraController
         lock (_gate)
         {
             _resetTarget = new(0, .9f, 0); _resetDistance = scene == 3 ? 6.5f : 2.7f;
+            _verticalFov = 2 * MathF.Atan(.5f); _resetPitch = .165f;
             _resetYaw = scene == 1 ? MathF.PI : 0; _scale = 1; _near = .01f; _far = 1000; ResetCore();
         }
     }
@@ -79,7 +98,7 @@ public sealed class CameraController
     public void Reset() { lock (_gate) ResetCore(); }
     private void ResetCore()
     {
-        _target = _resetTarget; _distance = _resetDistance; _yaw = _resetYaw; _pitch = .165f;
+        _target = _resetTarget; _distance = _resetDistance; _yaw = _resetYaw; _pitch = _resetPitch;
         _movement = 0; UpdatePosition(); _revision++; _cut++;
     }
     private Vector3 Forward() => -new Vector3(MathF.Sin(_yaw) * MathF.Cos(_pitch), MathF.Sin(_pitch), MathF.Cos(_yaw) * MathF.Cos(_pitch));
@@ -142,5 +161,5 @@ public sealed class CameraController
             revision = _revision; cut = _cut; return frame;
         }
     }
-    private CameraFrame Frame() => CameraFrame.Look(_position, Forward(), 2 * MathF.Atan(.5f), _near, _far);
+    private CameraFrame Frame() => CameraFrame.Look(_position, Forward(), _verticalFov, _near, _far);
 }

@@ -15,10 +15,13 @@ public static class GltfImporter
       "KHR_materials_transmission", "KHR_materials_ior", "KHR_materials_volume" };
 
     /// <summary>Loads and decodes a document on a worker thread, with cancellation between resources.</summary>
-    public static Task<SceneDocument> LoadAsync(string path, CancellationToken cancellation = default)
-        => Task.Run(() => LoadCore(path, cancellation), cancellation);
+    public static Task<SceneDocument> LoadAsync(string path, CancellationToken cancellation = default, int maximumTextureSize = 16384)
+    {
+        if (maximumTextureSize is < 1 or > 16384) throw new ArgumentOutOfRangeException(nameof(maximumTextureSize));
+        return Task.Run(() => LoadCore(path, cancellation, maximumTextureSize), cancellation);
+    }
 
-    private static async Task<SceneDocument> LoadCore(string path, CancellationToken cancellation)
+    private static async Task<SceneDocument> LoadCore(string path, CancellationToken cancellation, int maximumTextureSize)
     {
         string extension = System.IO.Path.GetExtension(path);
         if (!extension.Equals(".gltf", StringComparison.OrdinalIgnoreCase) && !extension.Equals(".glb", StringComparison.OrdinalIgnoreCase))
@@ -52,7 +55,20 @@ public static class GltfImporter
                     else throw new NotSupportedException("贴图需要 PNG/JPEG 回退。KTX2/BasisU、DDS 和 WebP 解码尚未接入。");
                 }
                 var sampler = texture.Sampler;
-                var decoded = await Decode(image.Content, texture.Name ?? $"Texture {index}", srgb, cancellation).ConfigureAwait(false);
+                var decoded = await Decode(image.Content, texture.Name ?? $"Texture {index}", srgb, cancellation, maximumTextureSize).ConfigureAwait(false);
+                if (image.SourcePath is { Length: > 0 } sourcePath)
+                {
+                    string absolute = System.IO.Path.IsPathRooted(sourcePath) ? sourcePath :
+                        System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, sourcePath);
+                    string sidecar = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(absolute)!,
+                        System.IO.Path.GetFileNameWithoutExtension(absolute) + (srgb ? "-bc7srgb.dds" : "-bc7linear.dds"));
+                    if (File.Exists(sidecar))
+                    {
+                        try { decoded = decoded with { Bc7Mips = Bc7Texture.Read(sidecar, decoded.Width, decoded.Height, decoded.Mips.Length, srgb) }; }
+                        catch (Exception error) when (error is IOException or InvalidDataException)
+                        { /* Reduced texture budgets and malformed optional caches use PNG. */ }
+                    }
+                }
                 textures.Add(decoded with { WrapS = (int)(sampler?.WrapS ?? TextureWrapMode.REPEAT),
                     WrapT = (int)(sampler?.WrapT ?? TextureWrapMode.REPEAT),
                     MinFilter = sampler == null || (int)sampler.MinFilter == 0 ? 9987 : (int)sampler.MinFilter,
@@ -64,7 +80,8 @@ public static class GltfImporter
             var transform = c.TextureTransform;
             return new TextureBinding { Info = new(index, uv, 0, 0),
                 Transform = new(transform?.Offset ?? Vector2.Zero, (transform?.Scale ?? Vector2.One).X, (transform?.Scale ?? Vector2.One).Y),
-                Extra = new(transform?.Rotation ?? 0, 0, textures[index].Mips.Length - 1, 0) };
+                Extra = new(transform?.Rotation ?? 0, 0, textures[index].Mips.Length - 1,
+                    Math.Max(textures[index].Width, textures[index].Height)) };
         }
 
         for (int i = 0; i < model.LogicalMaterials.Count; i++)
@@ -91,6 +108,13 @@ public static class GltfImporter
             var attenuation = m.FindChannel("VolumeAttenuation");
             value.Transmission = new(Factor(transmission, "TransmissionFactor", 0), m.IndexOfRefraction,
                 Factor(thickness, "ThicknessFactor", 0), 0);
+            // Renderer metadata, not a nonstandard glTF extension. Matches RTXPT's 4-bit priorities.
+            if (m.Extras is System.Text.Json.Nodes.JsonObject extras && extras["nestedPriority"] is { } priority)
+            {
+                int nested = priority.GetValue<int>();
+                if (nested is < 0 or > 15) throw new InvalidDataException("nestedPriority must be in [0, 15].");
+                value.Transmission.W = nested;
+            }
             Vector4 attenuationColor = attenuation?.Color ?? Vector4.One;
             float attenuationDistance = Factor(attenuation, "AttenuationDistance", float.PositiveInfinity);
             value.Attenuation = new(attenuationColor.X, attenuationColor.Y, attenuationColor.Z,
@@ -134,6 +158,14 @@ public static class GltfImporter
             meshes.Add(new(mesh.Name ?? $"Mesh {mesh.LogicalIndex}", vertices, indices.ToArray(), primitive.Material?.LogicalIndex ?? materials.Length - 1));
         }
         var sharedMeshes = meshes.ToArray(); var sharedTextures = textures.ToArray();
+        SceneEnvironment? environmentMap = null;
+        if (model.Extras is System.Text.Json.Nodes.JsonObject sceneExtras && sceneExtras["environmentMap"] is { } environmentPath)
+        {
+            string imagePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(path))!, environmentPath.GetValue<string>());
+            float rotation = sceneExtras["environmentRotation"]?.GetValue<float>() ?? 0;
+            cancellation.ThrowIfCancellationRequested();
+            environmentMap = SceneEnvironment.LoadRadiance(imagePath, Math.Clamp(maximumTextureSize, 8, 1024), rotation);
+        }
         var scenes = new SceneAsset[model.LogicalScenes.Count];
         if (scenes.Length == 0) throw new InvalidDataException("文件没有场景。");
         for (int i = 0; i < scenes.Length; i++)
@@ -168,7 +200,7 @@ public static class GltfImporter
             foreach (Node root in model.LogicalScenes[i].VisualChildren) Visit(root);
             if (instances.Count == 0) { minimum = new(-1); maximum = new(1); }
             scenes[i] = new(model.LogicalScenes[i].Name ?? $"Scene {i + 1}", sharedMeshes, instances.ToArray(), materials,
-                sharedTextures, lights.ToArray(), minimum, maximum, warnings.ToArray());
+                sharedTextures, lights.ToArray(), minimum, maximum, warnings.ToArray()) { EnvironmentMap = environmentMap };
         }
         return new(System.IO.Path.GetFullPath(path), scenes, model.DefaultScene?.LogicalIndex ?? 0);
     }
@@ -180,7 +212,7 @@ public static class GltfImporter
         return fallback;
     }
 
-    private static async Task<SceneTexture> Decode(ReadOnlyMemory<byte> bytes, string name, bool srgb, CancellationToken cancellation)
+    private static async Task<SceneTexture> Decode(ReadOnlyMemory<byte> bytes, string name, bool srgb, CancellationToken cancellation, int maximumTextureSize)
     {
         using var stream = new InMemoryRandomAccessStream();
         using (var writer = new DataWriter(stream))
@@ -190,10 +222,12 @@ public static class GltfImporter
         stream.Seek(0);
         var decoder = await BitmapDecoder.CreateAsync(stream);
         if (decoder.PixelWidth > 16384 || decoder.PixelHeight > 16384) throw new NotSupportedException("贴图尺寸超过 D3D12 的 16384 限制。");
-        var pixels = await decoder.GetPixelDataAsync(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Straight, new BitmapTransform(),
+        float scale = MathF.Min(1, maximumTextureSize / (float)Math.Max(decoder.PixelWidth, decoder.PixelHeight));
+        int width = Math.Max(1, (int)MathF.Round(decoder.PixelWidth * scale)), height = Math.Max(1, (int)MathF.Round(decoder.PixelHeight * scale));
+        var transform = new BitmapTransform { ScaledWidth = (uint)width, ScaledHeight = (uint)height, InterpolationMode = BitmapInterpolationMode.Fant };
+        var pixels = await decoder.GetPixelDataAsync(BitmapPixelFormat.Rgba8, BitmapAlphaMode.Straight, transform,
             ExifOrientationMode.IgnoreExifOrientation, ColorManagementMode.DoNotColorManage);
         byte[] current = pixels.DetachPixelData();
-        int width = checked((int)decoder.PixelWidth), height = checked((int)decoder.PixelHeight);
         var levels = new List<byte[]> { current }; int w = width, h = height;
         while (w > 1 || h > 1)
         {

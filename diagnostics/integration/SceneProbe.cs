@@ -568,7 +568,7 @@ internal static class SceneProbe
         byte[] rgba=new byte[values.Length];for(int i=0;i<rgba.Length;i++)rgba[i]=(byte)(values[i]>>8);
         WritePng(file,target.Width,target.Height,rgba);
     }
-    private static void WritePng(string path,int width,int height,byte[] rgba)
+    internal static void WritePng(string path,int width,int height,byte[] rgba)
     {
         using var stream=File.Create(path);stream.Write(new byte[]{137,80,78,71,13,10,26,10});
         void Chunk(string name,byte[] bytes)

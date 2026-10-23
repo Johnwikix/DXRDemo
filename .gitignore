@@ -372,3 +372,7 @@ FodyWeavers.xsd
 !External/Upscalers/xess/bin/libxess.dll
 !External/Upscalers/dlss/lib/Windows_x86_64/x64/
 !External/Upscalers/dlss/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib
+
+# Local RTXPT compiler and single-frame validation artifacts.
+/output/rtxpt*/
+/diagnostics/integration/output/rtxpt*/

@@ -32,11 +32,13 @@ public sealed class DxrDevice : IDisposable
     /// </summary>
     public static bool TryActivateAgilityRuntime()
     {
+        if (!System.IO.File.Exists(System.IO.Path.Combine(AppContext.BaseDirectory, "D3D12", "D3D12Core.dll")))
+            return false;
         try
         {
             using var configuration = D3D12.D3D12GetInterface<ID3D12SDKConfiguration>(
                 D3D12.D3D12SDKConfigurationClsId);
-            return configuration.SetSDKVersion(619, "D3D12").Success;
+            return configuration.SetSDKVersion(619, @".\D3D12\").Success;
         }
         catch
         {
@@ -132,14 +134,13 @@ public sealed class DxrDevice : IDisposable
         // SM 6.9 is exposed by the D3D12 runtime used by the process. Keep a
         // 6.5 fallback because older Windows runtimes and drivers can still
         // support DXR even when the 6.9 feature query is unavailable.
-        try
-        {
-            HighestShaderModel = Device.CheckFeatureSupport<FeatureDataShaderModel>(Vortice.Direct3D12.Feature.ShaderModel).HighestShaderModel;
-        }
-        catch
-        {
-            HighestShaderModel = ShaderModel.Model6_5;
-        }
+        // HighestShaderModel is an input AND output. A zero-initialized generic
+        // query is invalid and silently disabled the HitObject/SER path.
+        var shaderModel = new FeatureDataShaderModel { HighestShaderModel = ShaderModel.Model6_9 };
+        if (Device.CheckFeatureSupport(Vortice.Direct3D12.Feature.ShaderModel, ref shaderModel))
+            HighestShaderModel = shaderModel.HighestShaderModel;
+        else
+            HighestShaderModel = Device.CheckHighestShaderModel(ShaderModel.Model6_5);
 
         var queueDesc = new CommandQueueDescription(CommandListType.Direct);
         CommandQueue = Device.CreateCommandQueue<ID3D12CommandQueue>(queueDesc);
@@ -160,7 +161,7 @@ public sealed class DxrDevice : IDisposable
         {
             using var configuration = D3D12.D3D12GetInterface<ID3D12SDKConfiguration1>(
                 D3D12.D3D12SDKConfigurationClsId);
-            return configuration.CreateDeviceFactory<ID3D12DeviceFactory>(619, "D3D12");
+            return configuration.CreateDeviceFactory<ID3D12DeviceFactory>(619, @".\D3D12\");
         }
         catch
         {

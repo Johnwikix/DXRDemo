@@ -1,0 +1,6 @@
+{
+  "tool": "Microsoft DirectXTex texconv may2026",
+  "cpuOnly": true,
+  "compression": "BC7 quick (mode 6), BOX mipmaps, separate alpha",
+  "textures": []
+}

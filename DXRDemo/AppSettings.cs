@@ -14,6 +14,7 @@ internal sealed class AppSettings
 {
     public string? ShaderId { get; set; }
     public int? SceneIndex { get; set; }
+    public int SceneCatalogVersion { get; set; }
     public int? DenoiserMode { get; set; }
     public int? ReconstructionMode { get; set; }
     public int? RenderScalePercent { get; set; }

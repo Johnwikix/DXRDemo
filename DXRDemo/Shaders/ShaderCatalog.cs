@@ -6,13 +6,13 @@ namespace DXRDemo.Shaders;
 public static class ShaderCatalog
 {
     public static IReadOnlyList<ShaderAuthoringInfo> All { get; } =
-    [new("ray-trace", "DXR Path Trace", "Hardware triangle tracing with HDR10 and denoising",
+    [new("ray-trace", "DXR Path Trace · RTXPT", "C# DXR path tracer with RTXPT sampling, PBR transport and HDR10",
         new("RT Demo", null, "See model attribution"), ShaderCapabilities.UsesMouse | ShaderCapabilities.UsesResolution,
         null, static () => new RayTracePass(new DxrMeshBackend())
         {
-            SceneIndex = RayTracePass.RainyCornerSceneIndex,
-            ExternalLightingEnabled = false,
-            Exposure = -2
+            SceneIndex = RayTracePass.RtxptKitchenSceneIndex,
+            ExternalLightingEnabled = true,
+            Exposure = 1.3f
         })];
 }
 

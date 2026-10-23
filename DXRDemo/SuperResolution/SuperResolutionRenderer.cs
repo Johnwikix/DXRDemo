@@ -18,6 +18,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 {
     private const int SrvCount = 26, UavCount = 12, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
+    private readonly GpuInterval _gpuInterval;
+    internal double GpuMilliseconds { get; private set; }
     private readonly List<IDisposable> _pipelineResources = [];
     private readonly List<IDisposable> _sizeResources = [];
     private readonly uint _capabilities;
@@ -32,6 +34,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private ID3D12Resource _constants = null!;
     private nint _constantPointer, _context;
     private nint _nrdContext;
+    private StablePlaneDenoiser? _stablePlanes;
     private int _descriptorStride;
     private ID3D12Resource _color = null!, _depth = null!, _motion = null!, _reactive = null!, _output = null!;
     private ID3D12Resource _viewZ = null!, _nrdOutput = null!;
@@ -65,6 +68,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         nint pointer;
         InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
         _gpu.Initialize(new ID3D12Device5(pointer));
+        _gpuInterval = new GpuInterval(_gpu);
         try
         {
             _capabilities = NativeReconstruction.Capabilities(_gpu.Device.NativePointer);
@@ -106,6 +110,14 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 
     private T Keep<T>(T value) where T : IDisposable { _pipelineResources.Add(value); return value; }
     private T Sized<T>(T value) where T : IDisposable { _sizeResources.Add(value); return value; }
+
+    // Create pipelines before tracing the first frame, so shader compilation
+    // cannot insert a CPU stall between path tracing and reconstruction.
+    internal void PrepareStablePlanes()
+    {
+        if (_nrdContext != 0 && _configuration.Pbr)
+            _stablePlanes ??= new StablePlaneDenoiser(_gpu, InputWidth, InputHeight);
+    }
 
     internal void Configure(ReconstructionMode mode, int scale, int outputWidth, int outputHeight, bool nrd = false, bool pbr = false)
     {
@@ -367,6 +379,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         ReadWriteTexture2D<Float4>? nrdNormals = null, CameraFrame? cameraFrame = null, PbrSignals? pbr = null, float exposure = 0,
         ReadWriteTexture2D<Float4>? directLight = null, DxrSceneBackend? transparentBackend = null)
     {
+        GpuMilliseconds = 0;
         if (seconds > 0.25 || seconds <= 0) Reset();
         _glassComposed = false;
         bool rayReconstruction = Active == ReconstructionMode.DlssRayReconstruction;
@@ -474,7 +487,15 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 Bind(2, _composeNrd, 0);
                 _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
                 Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                if (pbr != null && transparentBackend != null)
+                if (pbr != null && transparentBackend?.StablePlanesActive == true)
+                {
+                    Transition(_glassColor, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    _stablePlanes ??= new StablePlaneDenoiser(_gpu, InputWidth, InputHeight);
+                    _stablePlanes.Execute(pbr, _color, _glassColor, camera, jitter, seconds, _reset);
+                    Transition(_glassColor, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    input = _glassColor; _glassComposed = true;
+                }
+                else if (pbr != null && transparentBackend != null)
                 {
                     Transition(_pbrInputs[7]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_pbrInputs[10]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
@@ -594,15 +615,18 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     {
         _gpu.CommandAllocator.Reset();
         _gpu.CommandList.Reset(_gpu.CommandAllocator);
+        _gpuInterval.Begin(_gpu.CommandList);
         _recording = true;
     }
 
     private void End()
     {
+        _gpuInterval.End(_gpu.CommandList);
         _gpu.CommandList.Close();
         _recording = false;
         _gpu.CommandQueue.ExecuteCommandList(_gpu.CommandList);
         _gpu.SignalAndWait();
+        GpuMilliseconds += _gpuInterval.ReadMilliseconds();
         _gpu.Device.DeviceRemovedReason.CheckError();
     }
 
@@ -628,6 +652,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _gpu.SignalAndWait();
         if (_context != 0) { NativeReconstruction.Destroy(_context); _context = 0; }
         if (_nrdContext != 0) { NativeNrd.Destroy(_nrdContext); _nrdContext = 0; }
+        _stablePlanes?.Dispose(); _stablePlanes = null;
         _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
         _nrdNormals = null;
         _raw = _normals = _surfaces = null; _boundRaw = null;
@@ -647,6 +672,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _disposed = true;
         ReleaseSizeResources();
         ReleasePipelines();
+        _gpuInterval.Dispose();
         _gpu.Dispose();
     }
 

@@ -32,8 +32,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Shaders\DXR\**\*.hlsl" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Shaders\DXR\**\*.hlsli" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Shaders\DXR\**\*.hlsl" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Shaders\DXR\**\*.hlsli" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Licenses\RTXPT.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -69,7 +70,7 @@
     <PublishTrimmed Condition="'$(Configuration)' != 'Debug'">False</PublishTrimmed>
   </PropertyGroup>
   <ItemGroup>
-    <Content Include="Assets\Models\**" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Models\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\Samples\RainyCorner\RainyCorner.glb" Link="Assets\Models\RainyCorner.glb"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>

@@ -11,7 +11,9 @@
 - **轨道 / 自由** 两种相机、轨道 + 拖动 glTF/GLB 打开
 - **实体玻璃**（Snell 折射 / 全反射 / Beer-Lambert 吸收）
 
-启动默认加载随程序打包的 **雨后便利店 · Rainy Corner**（Blender MCP 制作，2,019,650 个三角形，24 个材质，8 盏灯）。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
+启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），提供 Bistro 街角、Convergence Test、Rainy Corner 和 Stanford 模型。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
+
+新配置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已有保存设置仍优先恢复。RTX 5070 Ti 上，Bistro 的 4K 单帧离线 GPU 总耗时为 30.7–32.0 ms，进入 30 FPS 的 GPU 预算；尚未验证连续呈现帧率和运动中的时间累积画质。
 
 A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline is implemented from scratch with [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) — no SharpDX. Loads glTF 2.0 / GLB scenes, runs hardware-accelerated path tracing with official NVIDIA NRD denoising, vendor super resolution, HDR10 output and a swappable orbit / fly camera.
 
@@ -19,13 +21,13 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 
 ## 默认场景 Default Scene
 
-启动后自动加载随构建打包的 **雨后便利店 · Rainy Corner / Koyomi Mart**（原创 Blender 几何，无第三方模型与材质），启用「仅使用模型光照」、曝光 −2 EV。
+启动后自动加载随构建打包的 **RTXPT Kitchen**，使用原作相机、程序化环境与固定曝光 +1.3 EV。
 
-- 233 个共享网格、3,199 个网格实例、**2,019,650 个三角形**（含实例）、24 个导出材质（渲染器加默认后 25）、8 盏内嵌灯。
-- 商店室内（货架、饮料柜、便当、收银台、咖啡机、关东煮柜台、杂志架、冰柜等）、街角设施（售货机、自行车、伞架、垃圾桶、路灯、电线杆、护栏、斑马线、积水等）。
-- 玻璃使用 `KHR_materials_transmission` / `IOR` / `volume`，alpha=1，粗糙度 0.06；金属和湿地反射使用 Metallic-Roughness。
-- 设置中的场景列表保留 Stanford **Bunny / Armadillo / Dragon** 与便利店；导入其他 GLB 后仍可一键切回。
-- 源 `.blend`、参考图、实际 DXR 输出和复现脚本见 [`Samples/RainyCorner`](Samples/RainyCorner/README.md)。
+- 317 个实例、1,474,751 个三角形、102 个纹理视图；不需要运行时下载或本地 RTXPT checkout。
+- 新增 **RTXPT Bistro 街角**（README 中的咖啡馆街区，4,209,006 个三角形）与 **Convergence Test**，保留 Stanford **Bunny / Armadillo / Dragon** 与 **Rainy Corner**。
+- Kitchen 原作 Jay-Artist，RTXPT 修改 Kate Anderson；来源、许可证和转换记录见 [`Assets/Models/RTXPT`](DXRDemo/Assets/Models/RTXPT/SOURCES.md)。
+- 默认纹理上限 1024；打包 BC7 mip 链并保留 PNG 回退。严格校验下修复原始数据的无效法线/切线，缺失的可选 specular 贴图采用标准材质回退。
+- Rainy Corner 的 `.blend`、参考图和脚本仍在 [`Samples/RainyCorner`](Samples/RainyCorner/README.md)。
 
 ---
 
@@ -41,9 +43,10 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **透明度 / 玻璃**：`OPAQUE / MASK / BLEND`；玻璃使用 `KHR_materials_transmission` / `IOR` / `volume` 独立路径，含 Snell 折射、Fresnel 反射、全反射、粗糙微表面、Beer-Lambert 吸收；最多七层正确嵌套的实体介质；封闭几何提供实际穿行厚度
 - **灯光**：`KHR_lights_punctual`（方向、点、聚光），颜色、强度、范围、锥角和节点变换；自发光三角形采样
 - **常用扩展**：`KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization`
-- **光照**：GGX 镜面反射、漫反射、直接光、环境照明、自发光三角形采样、MIS、路径继续与 Russian roulette
+- **光照**：RTXPT GGX VNDF 与 correlated Smith、理想反射/折射、Owen-Sobol 采样、按发光功率与历史贡献反馈选光、HDR 环境 alias 采样及匹配的 MIS、带优先级的实例介质列表、累计 ray cone、带 eta 补偿的 Russian roulette
+- **路径空间分层**：NRD 使用主表面、平滑反射与透射三层，分别保存虚拟几何引导和历史后合成；参考模式关闭 firefly 过滤与历史选光。范围及限制见 [RTXPT 核心实现](docs/RTXPT_REWRITE.md)。
 - **轨迹后端**：`DxrMeshBackend`（硬件 DXR，`DxrSceneBackend` 提供导入场景；旧 5-球体程序化 `DxrRenderer` 与 ComputeSharp `SoftwareMeshBackend` 保留为对照路径）
-- **SM 6.9 / DXR 1.2**：设备启动时查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 Shader Execution Reordering（`HitObject::TraceRay` + `MaybeReorderThread`），不支持时自动使用 `lib_6_5`，保持旧版 DXR 驱动可运行。阴影查询只保留可见性所需的命中状态，跳过不必要的 closest-hit/miss payload 回传。
+- **SM 6.9 / DXR 1.2**：正确查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 inline RayQuery，旧运行时回退 `lib_6_5` 的 TraceRay。保留可选的材质 SER（`HitObject::FromRayQuery` + `MaybeReorderThread`）；实测开销较大，默认关闭。阴影查询提前终止并使用独立实例掩码，减少无关求交与着色。
 - **神经 DXR 评估**：SM 6.9 零售特性没有通用的神经辐射缓存或 Cooperative Vector。项目已有 DLSS Ray Reconstruction（DLSSD）作为神经降噪/重建路径；没有引入未经训练和画质验证的 NRC 网络，避免把训练、缓存更新和额外推理开销叠加到实时路径追踪上。
 
 ### 降噪 / 超分
@@ -138,7 +141,7 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 ## 设置窗口 Settings（`F1`）
 
 - **渲染程序**（`ShaderSelector`）：当前唯一条目 `RT Demo`（DXR Path Trace，Hailuo-3 / DXR）
-- **场景模型**：内置 Bunny / Armadillo / Dragon / 雨后便利店 / 当前已导入的 GLB
+- **场景模型**：RTXPT Kitchen / Bistro 街角 / Convergence Test / Bunny / Armadillo / Dragon / 雨后便利店 / 当前已导入的 GLB
 - **降噪**：关闭 / 时间累积 / NRD · RELAX
 - **超分辨率 / 光线重建**：关闭 / FSR 3.1 / XeSS / DLSS / DLSSD；不支持的算法自动禁用
 - **SR 渲染比例**：1–100% 滑块（默认 67%，200 ms 防抖）
@@ -146,7 +149,7 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 - **最大反弹次数**：1–32（默认 10）
 - **重置相机**、**自由相机速度**、**环境光强度**、**仅使用模型光照**（关外加天光/太阳，留模型自发光）
 - **全局太阳光**：开关 + 方位角（0°=+Z，90°=+X）+ 高度角（0°=地平线，90°=正上）+ 强度；方向光硬阴影
-- **曝光补偿 EV**：−16 ~ +16（默认 −2）
+- **曝光补偿 EV**：−16 ~ +16（默认 +1.3）
 - **HDR10 输出**（自动检测显示能力）
 - **GPU 诊断信息** HUD
 - **场景分辨率设为 1920 × 1080**

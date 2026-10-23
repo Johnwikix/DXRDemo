@@ -82,7 +82,10 @@ public sealed partial class MainWindow : WindowEx
         ModelSelector.SelectionChanged += (_, _) =>
         {
             if (!_syncingRayTraceParams && ModelSelector.SelectedIndex >= 0 && _activePass is RayTracePass pass)
+            {
                 pass.SceneIndex = ModelSelector.SelectedIndex;
+                _settings.ExposureBox.Value = pass.Exposure;
+            }
         };
         _settings.ResetCameraButton.Click += OnResetCamera;
         _settings.CameraSpeedBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.Camera.Speed = (float)e.NewValue; };
@@ -345,7 +348,8 @@ public sealed partial class MainWindow : WindowEx
     {
         if (_savedSettings is not { } s) return;
 
-        RestoreSelection(ModelSelector, s.SceneIndex);
+        bool migrateDefault = s.SceneCatalogVersion < 1 && s.SceneIndex == RayTracePass.RainyCornerSceneIndex;
+        RestoreSelection(ModelSelector, migrateDefault ? RayTracePass.RtxptKitchenSceneIndex : s.SceneIndex);
         // 旧设置中的自实现 RELAX(2) 和 NRD(3) 均迁移到官方 NRD；保留已保存的关闭/时间累积。
         RestoreSelection(DenoiserSelector, s.DenoiserMode is >= 2 ? (int)RayTraceDenoiserMode.NrdRelax : s.DenoiserMode);
         RestoreSelection(_settings.ReconstructionSelector, s.ReconstructionMode);
@@ -355,13 +359,14 @@ public sealed partial class MainWindow : WindowEx
         RestoreNumber(SamplesBox, s.Samples);
         RestoreNumber(MaxBouncesBox, s.MaxBounces);
         RestoreNumber(_settings.CameraSpeedBox, s.CameraSpeed);
-        RestoreNumber(_settings.EnvironmentBox, s.EnvironmentIntensity);
-        RestoreNumber(_settings.ExposureBox, s.Exposure);
+        RestoreNumber(_settings.EnvironmentBox, migrateDefault ? 1 : s.EnvironmentIntensity);
+        RestoreNumber(_settings.ExposureBox, migrateDefault ? 1.3 : s.Exposure);
         RestoreNumber(_settings.SunAzimuthBox, s.SunAzimuth);
         RestoreNumber(_settings.SunElevationBox, s.SunElevation);
         RestoreNumber(_settings.SunIntensityBox, s.SunIntensity);
         if (s.SunEnabled is { } sun) _settings.SunToggle.IsOn = sun;
-        if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
+        if (migrateDefault) _settings.ModelLightingOnlyToggle.IsOn = false;
+        else if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
         if (s.HdrEnabled is { } hdr)
         {
             _hdrAutoEnabled = true; // suppress first-detection auto-enable so the saved choice wins
@@ -394,7 +399,7 @@ public sealed partial class MainWindow : WindowEx
     {
         int index = ModelSelector.SelectedIndex;
         // 未保存导入文件路径，不能把仅在当前会话有效的场景索引写入下次启动的设置。
-        return index >= 0 && index <= RayTracePass.RainyCornerSceneIndex ? index : null;
+        return index >= 0 && index < RayTracePass.PackagedSceneCount ? index : null;
     }
 
     private void WireSettingsPersistence()
@@ -431,6 +436,7 @@ public sealed partial class MainWindow : WindowEx
     {
         ShaderId = (ShaderSelector.SelectedItem as ShaderAuthoringInfo)?.Id,
         SceneIndex = CaptureSceneIndex(),
+        SceneCatalogVersion = 1,
         DenoiserMode = DenoiserSelector.SelectedIndex,
         ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex,
         RenderScalePercent = (int)Math.Round(_settings.RenderScaleSlider.Value),

@@ -16,7 +16,7 @@ public struct TextureBinding
 {
     public Vector4 Info; // texture index (-1 = absent), UV set, wrap S, wrap T
     public Vector4 Transform; // offset XY, scale XY
-    public Vector4 Extra; // rotation, nearest filtering, maximum mip, reserved
+    public Vector4 Extra; // rotation, nearest filtering, maximum mip, longest texture edge (0 = query)
     public static TextureBinding Missing => new() { Info = new(-1, 0, 0, 0), Transform = new(0, 0, 1, 1) };
 }
 
@@ -26,7 +26,7 @@ public struct SceneMaterial
 {
     public Vector4 BaseColor, Emissive, Factors, Flags;
     public TextureBinding BaseColorMap, MetallicRoughnessMap, NormalMap, OcclusionMap, EmissiveMap;
-    /// <summary>Stores transmission factor, index of refraction, volume thickness and a reserved component.</summary>
+    /// <summary>Transmission, IOR, thickness, nested priority (1..15; 0 aliases highest priority).</summary>
     public Vector4 Transmission;
     /// <summary>Stores the attenuation RGB color and distance (zero denotes infinite distance).</summary>
     public Vector4 Attenuation;
@@ -59,13 +59,21 @@ public struct SceneLight
 
 /// <summary>Stores a decoded texture with a full mip chain, in its source transfer function.</summary>
 public sealed record SceneTexture(string Name, int Width, int Height, byte[][] Mips, bool Srgb,
-    int WrapS = 10497, int WrapT = 10497, int MinFilter = 9987, int MagFilter = 9729);
+    int WrapS = 10497, int WrapT = 10497, int MinFilter = 9987, int MagFilter = 9729)
+{
+    /// <summary>Optional prebuilt BC7 mip chain; PNG data remains available for CPU light sampling.</summary>
+    public byte[][]? Bc7Mips { get; init; }
+}
 
 /// <summary>Stores an immutable CPU scene ready for transactional GPU upload.</summary>
 public sealed record SceneAsset(string Name, SceneMesh[] Meshes, SceneInstance[] Instances,
     SceneMaterial[] Materials, SceneTexture[] Textures, SceneLight[] Lights, Vector3 Minimum, Vector3 Maximum,
     string[] Warnings)
 {
+    /// <summary>Gets the authored starting camera, when supplied by the packaged scene.</summary>
+    public DXRDemo.Camera.CameraFrame? DefaultCamera { get; init; }
+    /// <summary>Optional HDR environment; null selects the procedural sky.</summary>
+    public SceneEnvironment? EnvironmentMap { get; init; }
     /// <summary>Gets the visible triangle count, including instances.</summary>
     public int TriangleCount => Instances.Sum(instance => Meshes[instance.Mesh].Indices.Length / 3);
 }
