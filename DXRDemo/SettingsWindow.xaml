@@ -14,6 +14,7 @@
                     <ComboBoxItem Content="关闭" />
                     <ComboBoxItem Content="时间累积" />
                     <ComboBoxItem Content="NVIDIA NRD · RELAX（PBR 漫反射 + 镜面反射）" />
+                    <ComboBoxItem Content="NVIDIA OptiX · AI 降噪（渐进累积）" />
                 </ComboBox>
                 <ComboBox x:Name="ReconstructionSelector" x:FieldModifier="internal" Header="超分辨率 / 光线重建" HorizontalAlignment="Stretch" SelectedIndex="0" IsEnabled="False" AutomationProperties.AutomationId="ReconstructionSelector">
                     <ComboBoxItem Content="关闭 · 原生分辨率" />

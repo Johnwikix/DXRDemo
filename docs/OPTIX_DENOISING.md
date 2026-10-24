@@ -1,6 +1,85 @@
 # Cycles OptiX 与 Temporal 颗粒诊断
 
-2026-10-24。检查 Blender `main` 的 Cycles 源码，并在 RTX 5070 Ti 上运行本项目生产着色器。尚未接入或测量 OptiX，以下接入部分是设计建议。
+2026-10-24。已检查 Blender `main` 的 Cycles 源码，并新增独立 OptiX AOV 模式。
+在 RTX 5070 Ti / NVIDIA 617.14 上执行了实际推理与 D3D12/CUDA 互操作验证。
+
+## 使用与实现
+
+设置 → 降噪 → **NVIDIA OptiX · AI 降噪（渐进累积）**。先关闭 DLSS 光线重建，
+它有自己的降噪流程。原生分辨率下，静止画面持续累计原始线性 HDR，再运行 OptiX；
+相机、场景、光照、采样参数或 raster jitter 改变时重置相关累计。AI 输出从不写回
+原始历史。开启 FSR/XeSS/DLSS SR 时使用逐帧 OptiX 重建，再交给 SR；变化的 jitter
+会重置原始渐进输入，但不会清空 SR 所需的相机运动向量。
+
+新选项的索引为 3。`DenoiserCatalogVersion=1` 区分旧配置中曾表示 NRD 的索引 3，
+避免旧用户设置被误迁移成 OptiX。NVIDIA 驱动/适配器不可用或创建、执行失败时，
+状态栏明确报告时间累积回退；编码空间的旧球体示例不提供 OptiX 输入。
+
+`Native/Reconstruction/Optix.cpp` 动态加载 CUDA driver API 与 OptiX 9.1 AOV 模型。
+共享 D3D12 线性缓冲包含 beauty、albedo、normal、output 四个 float4 平面；
+D3D12/CUDA 通过共享 fence 交换所有权。pack/unpack 各有独立 command allocator，
+CPU 只在原生阶段的最终输出处等待，不下载/上传图像。1080p 共享缓冲约 126.6 MiB，
+另需 denoiser 的 state/scratch 与原始累计纹理。CUDA events 记录推理时间，D3D12
+timestamps 记录包含互操作的阶段耗时，后者计入应用的重建 GPU 诊断。
+
+输入 feature 与 NRD 数据约定分开：OptiX 路径生成 unlit reflectance，包含金属的
+反射颜色；法线归一化并转换到相机空间。光滑玻璃/镜面沿主导理想路径寻找可见表面，
+最多 8 次引导界面，并折叠法线。这个引导是近似实现，不等同于 Cycles 完整的
+多 closure 加权；粗糙透射、覆盖率混合及复杂多层反射仍需要单独评估画质。
+
+SDK 头文件从官方固定提交恢复并验证 SHA-256，不随源码或应用分发；构建开启
+OptiX 适配器需要 `CUDA_PATH/include/cuda.h`。没有 CUDA 开发头文件时可构建不可用
+适配器，已单独编译验证。运行应用不需要安装 CUDA Toolkit，也不链接 cudart。
+详见 [构建依赖](../External/OptiX/README.md)。
+
+实际 GPU 合成测试（128×96，8 帧）中，原始均值 RMSE 为 0.139481，OptiX 输出
+为 0.008517；原始历史相对独立 CPU 均值的 RMSE 为 2.002e-8。尺寸变化、相机与
+jitter 重置、原始历史隔离、真实 dispatch 计数和不可用回退均有回归。
+这些结果不代表所有场景或分辨率的固定性能/画质收益。
+
+Bistro 同输入实景对照（在下述背面阴影 Fresnel 修复前采集）：1920×1080、每帧 1 SPP、8 bounces、64 帧，对同一张
+生产路径 256-SPP 独立种子参考使用 `x/(1+x)` 误差：
+
+| 项目 | Temporal | OptiX |
+| --- | ---: | ---: |
+| 参考 RMSE | 0.014692 | 0.009870 |
+| 最后 16 帧输出 RMS | 0.002877 | 0.000614 |
+
+第 64 帧 CUDA 推理为 6.55 ms，包含 pack/unpack 与编码的重建 GPU 阶段为
+7.37 ms；同帧追踪为 19.75 ms。这里只报告该配置的采样，不能外推所有设备或
+连续呈现帧率。256-SPP 参考仍有噪声，32.8% 的误差下降不等于相对无噪声真值。
+结果位于 `diagnostics/integration/output/optix/bistro-final-optix` 与
+`bistro-final-temporal`，原始输入的 checkpoint 统计相同。
+
+## Bistro 薄片玻璃修复
+
+Bistro 的多种橱窗材质使用零厚度、零粗糙度透射。旧 `Scatter` 在该分支使用
+`-reflect(-view, micro)`，斜视时会翻转切向分量，令实际 beauty 射线采样错误的
+室内位置，同时与直通的降噪引导不一致。现在光滑薄片沿 `-view` 直通，保留原有
+Fresnel/颜色权重；有厚度的体积玻璃仍按 Snell 折射。薄壁与体积的区分见
+[glTF volume 规范](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_volume)。
+
+新增斜视薄片 GPU contract 在旧代码上首先失败（方向误差 0.436436），修复后
+在 inline 与 legacy traversal 均通过。单位 IOR 的实际薄片/条纹背景对照中，
+原始累计相对无玻璃参考 RMSE 为 0.003368，OptiX 输出为 0.001838，平均透射亮度
+比例为 0.9998；另断言生成 OptiX 引导不会改变原始玻璃辐射。
+
+后续用户报告“可透过窗户看见室内，但阳光没有照进去”。这涉及另一条阴影路径：
+`Visibility` 对薄片背面使用 `IOR` 而不是 `1/IOR`，误认为射线从玻璃内部向空气
+传播。Bistro 的 IOR 1.9/2.0 窗片在常见太阳入射角下因此出现虚假的全反射。
+现在使用 `Evaluate` 已计算的 `s.eta`，零厚度窗片的两侧均为空气→玻璃界面，
+有厚度玻璃仍保留入射/出射区分。这也修正环境光阴影查询中的同一问题。
+
+`--sun-glass` 使用实际方向太阳和阴影射线，在 48.5°、IOR=1.9 的薄片对照中，
+修复前背面透光为 0、翻面为 0.886646；修复后两侧均为 0.886646，不透明遮挡
+保持完全挡光。inline 与 legacy 两种遍历均通过。
+太阳本身仍是无限远方向光的硬阴影近似，没有太阳位置或距离衰减；有限角尺寸的
+太阳光盘是另一项模型扩展，不应以近距离球灯代替。
+
+补充检查发现两项基线问题：`--glass-sr` 的 NRD 粗糙玻璃条纹对比度检查失败
+（对比度 0.02541），`--lighting` 的旧 ReSTIR 收敛检查失败。用修改前的
+`SceneTrace.hlsl` / `PathBsdf.hlsli` 重跑，两项均以相同结果失败。平板玻璃直射
+对照的三组几何检查通过。这些既有失败没有作为 OptiX 测试通过来计数。
 
 ## Blender 的快速视觉收敛来自哪里
 
@@ -55,9 +134,9 @@ Blender 中开放的是上述集成与特征生成代码；本项目不能靠复
 
 独立的 GPU 环境采样检查跳过 BSDF 与遮挡，比较 `Sky(direction)/pdf` 的均值与 CPU 球面积分。Shanghai HDR 的 RGB 积分分别为 GPU (11.837221, 9.561598, 9.268904)、CPU (11.774305, 9.510217, 9.151509)，约 0.5%–1.3% 的差异。它排除了明显的环境采样能量错误，不能证明真实场景的可见性估计没有高方差。
 
-## 建议的 OptiX 接入
+## 接入采用的数据流
 
-保留 Temporal 作为可核对算术均值的模式，增加独立的 OptiX 降噪模式：
+保留 Temporal 作为可核对算术均值的模式，OptiX 使用独立降噪输出：
 
 ```text
 DXR 原始线性 HDR 样本
@@ -67,7 +146,7 @@ DXR 原始线性 HDR 样本
   → 曝光 / tone mapping / PQ 或 sRGB
 ```
 
-优先做静止渐进渲染，以隔离输入与网络的画质收益。之后再按交互需求评估时域模型。AI 输出不写回原始累计历史；切换相机/场景/光照时按信号变化重置累计。
+本次采用单帧 AOV 模型；之后可按交互需求评估时域模型。AI 输出不写回原始累计历史。
 
 现有 NRD 的 diffuse demodulation factors、打包的 normal/roughness 与 diffuse-only albedo 不能直接当成 OptiX 引导。应提供满足 OptiX 契约的线性反射率、法线和一致的像素采样；玻璃和镜面需要专门检查特征归属。
 
@@ -82,6 +161,10 @@ D3D12 渲染器可以保留。通过原生桥把数据写入可共享的线性 b
 ```powershell
 IntegrationProbe.exe --temporal-convergence
 IntegrationProbe.exe --environment-sampling
+IntegrationProbe.exe --optix
+IntegrationProbe.exe --sun-glass
+IntegrationProbe.exe --sun-glass --legacy-trace
+IntegrationProbe.exe --temporal-scene --optix --width 1920 --height 1080 --frames 64 --reference-frames 8 --reference-spp 32 --spp 1 --bounces 8 --output output/optix/bistro-final-optix
 IntegrationProbe.exe --temporal-scene --width 640 --height 360 --frames 256 --reference-frames 8 --reference-spp 32 --spp 1 --bounces 8 --capture-linear --output output/firefly-diagnosis/fixed-baseline
 ```
 

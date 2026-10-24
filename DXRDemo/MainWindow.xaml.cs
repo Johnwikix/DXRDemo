@@ -306,8 +306,11 @@ public sealed partial class MainWindow : WindowEx
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[4]).IsEnabled = status.Supports(ReconstructionMode.DlssRayReconstruction);
         DenoiserSelector.IsEnabled = status.Active != ReconstructionMode.DlssRayReconstruction;
         ((ComboBoxItem)_settings.DenoiserSelector.Items[2]).IsEnabled = status.NrdAvailable;
+        ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.OptixAvailable && pass.SupportsOptix;
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;
+        if (pass.DenoiserMode == RayTraceDenoiserMode.Optix && !pass.SupportsOptix)
+            _settings.ReconstructionStatusText.Text = "当前球体渲染不提供线性 HDR 输入，使用时间累积。";
     }
 
     private void OnDenoiserSelected(object sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs e)
@@ -351,7 +354,7 @@ public sealed partial class MainWindow : WindowEx
         bool migrateDefault = s.SceneCatalogVersion < 1 && s.SceneIndex == RayTracePass.RainyCornerSceneIndex;
         RestoreSelection(ModelSelector, migrateDefault ? RayTracePass.RtxptKitchenSceneIndex : s.SceneIndex);
         // 旧设置中的自实现 RELAX(2) 和 NRD(3) 均迁移到官方 NRD；保留已保存的关闭/时间累积。
-        RestoreSelection(DenoiserSelector, s.DenoiserMode is >= 2 ? (int)RayTraceDenoiserMode.NrdRelax : s.DenoiserMode);
+        RestoreSelection(DenoiserSelector, AppSettingsStore.DenoiserSelection(s));
         RestoreSelection(_settings.ReconstructionSelector, s.ReconstructionMode);
         if (s.RenderScalePercent is int scale &&
             scale >= _settings.RenderScaleSlider.Minimum && scale <= _settings.RenderScaleSlider.Maximum)
@@ -438,6 +441,7 @@ public sealed partial class MainWindow : WindowEx
         SceneIndex = CaptureSceneIndex(),
         SceneCatalogVersion = 1,
         DenoiserMode = DenoiserSelector.SelectedIndex,
+        DenoiserCatalogVersion = 1,
         ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex,
         RenderScalePercent = (int)Math.Round(_settings.RenderScaleSlider.Value),
         Samples = CaptureNumber(SamplesBox),

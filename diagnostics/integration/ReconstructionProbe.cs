@@ -69,6 +69,8 @@ internal static unsafe class ReconstructionProbe
                     Require(active.Active == mode, active.Message);
                     Require(active.NrdActive == (denoiser == RayTraceDenoiserMode.NrdRelax), active.Message);
                     if (active.NrdActive) Require(pass.NrdDispatchCount > 5, "NRD fallback was counted as success");
+                    Require(active.OptixActive == (denoiser == RayTraceDenoiserMode.Optix && active.OptixAvailable), active.Message);
+                    if (active.OptixActive) Require(pass.OptixDispatchCount > 0, "OptiX fallback was counted as success");
                     Require(active.InputWidth == 480 * scale / 100 && active.InputHeight == 270 * scale / 100, "Input dimensions differ from requested scale");
                     VerifyPixels(target);
                     VerifyDebug(queue);

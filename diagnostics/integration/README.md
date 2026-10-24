@@ -61,6 +61,26 @@ The older commands below run multiple frames and should not be used while gaming
 
 # Model / HDR / settings integration validation
 
+`IntegrationProbe.exe --optix` requires actual OptiX execution and checks noise
+reduction against known radiance, an independent raw arithmetic mean, oblique
+thin-glass background transmission, moving-camera motion vectors, camera/jitter
+resets, resize, NRD transitions and an explicit unavailable adapter. The sphere
+example's encoded-only fallback is also checked. `--temporal-scene --optix`
+captures actual Bistro checkpoints at 1/4/8/16/32/64/... frames and reports CUDA
+inference time separately from the complete reconstruction GPU stage.
+Use `--output <directory>` to avoid overwriting other ablation captures.
+
+Known baseline failures on the current renderer: `--glass-sr` fails the rough
+glass detail contrast assertion (0.02541), and `--lighting` fails the old ReSTIR
+convergence assertion. Both reproduce with the pre-OptiX production shader files.
+The targeted OptiX/thin-sheet transmission checks do not count these as passing.
+
+`--sun-glass` isolates a directional sun shadow ray through the back of a thin
+IOR=1.9 window at 48.5 degrees. It first reproduced zero transmittance from one
+side versus 0.886646 when the same pane was flipped. The regression requires
+facing-independent thin-sheet Fresnel and an opaque-sheet negative control.
+Add `--legacy-trace` to exercise the fallback traversal.
+
 `IntegrationProbe.exe --temporal-convergence` feeds deterministic noisy samples
 through the production linear and encoded Temporal shaders at native resolution.
 It checks RMSE at 32 and 256 frames against both the known reference and an

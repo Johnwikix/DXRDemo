@@ -13,6 +13,10 @@ void Check(bool condition, ReadOnlySpan<char> message)
 }
 
 Check(AppSettingsStore.Load(path) is null, "Missing settings must use defaults.");
+Check(AppSettingsStore.DenoiserSelection(new() { DenoiserMode = 3 }) == 2, "Legacy NRD index 3 must not become OptiX.");
+Check(AppSettingsStore.DenoiserSelection(new() { DenoiserMode = 3, DenoiserCatalogVersion = 1 }) == 3, "New OptiX selection must survive restore.");
+AppSettingsStore.Save(new() { DenoiserMode = 3, DenoiserCatalogVersion = 1 }, path);
+Check(AppSettingsStore.Load(path) is { DenoiserMode: 3, DenoiserCatalogVersion: 1 }, "OptiX catalog version must round-trip.");
 
 var first = new AppSettings { ShaderId = "ray-trace", SceneIndex = 2, Samples = 2 };
 AppSettingsStore.Save(first, path);

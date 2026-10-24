@@ -201,7 +201,7 @@ internal static class GlassReconstructionProbe
         Console.WriteLine("PASS glass detail, jitter stability, separate guides, closest-glass motion, camera translation/rotation/roll/FOV/projection resets, resumed accumulation and SR resize; no D3D12 errors.");
     }
 
-    private static SceneAsset Fixture()
+    internal static SceneAsset Fixture()
     {
         var materials = new SceneMaterial[3];
         for (int i = 0; i < 2; i++)

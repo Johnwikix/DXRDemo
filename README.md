@@ -6,6 +6,7 @@
 
 - **glTF 2.0 / GLB** 静态场景加载与 PBR 渲染（节点层级、Metallic-Roughness、`KHR_lights_punctual` 等）
 - **NVIDIA NRD 4.17.3 RELAX**（漫反射 + 镜面反射）降噪
+- **NVIDIA OptiX AI** 独立渐进降噪（原始 HDR 历史与 AI 输出分离），见 [OptiX 文档](docs/OPTIX_DENOISING.md)
 - **超分辨率**：AMD FSR 3.1、Intel XeSS、NVIDIA DLSS SR、DLSS Ray Reconstruction（DLSSD）
 - **HDR10** 输出与 SDR 回退
 - **轨道 / 自由** 两种相机、轨道 + 拖动 glTF/GLB 打开
@@ -336,4 +337,5 @@ cd diagnostics/integration
 - Stanford 模型：见 [`Assets/Models/SOURCES.md`](DXRDemo/Assets/Models/SOURCES.md)
 - NVIDIA NRD：见 [`External/NRD/LICENSE.txt`](DXRDemo/External/NRD/LICENSE.txt)、`External/NRD/MathLib-LICENSE.txt`、`External/NRD/ShaderMake-LICENSE.txt`
 - AMD FSR / Intel XeSS / NVIDIA DLSS / DLSSD：见 [`External/Upscalers/NOTICE.txt`](DXRDemo/External/Upscalers/NOTICE.txt)
+- NVIDIA OptiX：见 [`External/OptiX/LICENSE.txt`](External/OptiX/LICENSE.txt)、[构建依赖](External/OptiX/README.md)
 - Vortice、ComputeSharp、WinUIEx、SharpGLTF、Microsoft.Direct3D.DXC 等：见各自仓库

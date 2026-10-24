@@ -16,6 +16,7 @@ internal sealed class AppSettings
     public int? SceneIndex { get; set; }
     public int SceneCatalogVersion { get; set; }
     public int? DenoiserMode { get; set; }
+    public int DenoiserCatalogVersion { get; set; }
     public int? ReconstructionMode { get; set; }
     public int? RenderScalePercent { get; set; }
     public double? Samples { get; set; }
@@ -40,6 +41,9 @@ internal sealed partial class AppSettingsContext : JsonSerializerContext;
 
 internal static class AppSettingsStore
 {
+    // Older catalogs used value 3 for NRD; version 1 adds OptiX at that index.
+    internal static int? DenoiserSelection(AppSettings settings) => settings.DenoiserCatalogVersion < 1 && settings.DenoiserMode >= 2
+        ? 2 : settings.DenoiserMode is >= 0 and <= 3 ? settings.DenoiserMode : null;
     private static readonly string FilePath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DXRDemo", "settings.json");
 

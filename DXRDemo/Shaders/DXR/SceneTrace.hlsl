@@ -260,7 +260,10 @@ float3 Visibility(float3 origin,float3 direction,float maximum,inout uint rng,ou
         // Only focusing geometry delegates transmission to the photon map. Parallel panes retain
         // continuous analytic lighting instead of replacing it with isolated photon footprints.
         if(analytic && CausticSettings.x>0 && s.causticCaster!=0 && s.thickness>0 && s.ior>1.001) return 0;
-        float f=Fresnel(saturate(dot(s.g,-direction)),s.front!=0?1/s.ior:s.ior);
+        // A thin sheet is surrounded by air on both sides. Evaluate already uses
+        // 1/IOR for either facing; using IOR on its back face invents total
+        // internal reflection and makes indoor sun shadow rays see an opaque pane.
+        float f=Fresnel(saturate(dot(s.g,-direction)),s.eta);
         visibility*=s.transmission*(1-f);
         if(s.thickness==0) visibility*=s.base;
         else if(s.front!=0) visibility*=exp(-Absorption(Materials[s.material])*s.thickness/max(abs(dot(s.g,direction)),.05));
@@ -371,6 +374,29 @@ void AccumulatePath(float3 value,int lobe,float3 direction,float3 factorD,float3
     else { sumS+=value; momentS+=direction*_NRD_Luminance(value/factorS); }
 }
 
+// Dedicated unlit OptiX features. Smooth glass/mirrors follow the dominant ideal
+// path to the visible surface; stochastic beauty paths and NRD/RR features are unchanged.
+void OptixGuide(Surface s,float3 direction,uint instance,out float3 albedo,out float3 normal) {
+    PathState path=BeginPath(CameraOrigin.xyz,direction,CameraForward.w*2/Size.y);
+    float3 tint=1; float3x3 rotation=float3x3(1,0,0,0,1,0,0,0,1); uint rng=0x4c1539u;
+    for(uint bounce=0;bounce<8;bounce++) {
+        if(!SplitSurface(s)) break;
+        float eta=s.thickness>0?InterfaceEta(path,s,instance):1/s.ior;
+        bool transmitted=s.transmission>0 && Fresnel(saturate(dot(-path.direction,s.n)),eta)<.5;
+        float3 outgoing=transmitted?(s.thickness>0?refract(path.direction,s.n,eta):path.direction):reflect(path.direction,s.n);
+        if(dot(outgoing,outgoing)<1e-8) { transmitted=false; outgoing=reflect(path.direction,s.n); }
+        rotation=mul(rotation,InterfaceTransform(s,path.direction,outgoing,transmitted));
+        tint*=transmitted?s.transmission*(s.thickness>0?float3(1,1,1):s.base):F0(s);
+        if(transmitted && s.thickness>0 && !UpdateMedium(path,s,instance)) break;
+        path.origin=Offset(s,outgoing); path.direction=outgoing;
+        Payload hit=Trace(path.origin,path.direction,CameraRight.w,false,rng,true);
+        if(hit.instance==0xffffffff) { albedo=0; normal=0; return; }
+        s=Evaluate(hit.instance,hit.primitive,hit.bary,hit.t*path.coneSpread,-outgoing); instance=hit.instance;
+    }
+    albedo=saturate(tint*(DiffuseAlbedo(s)+F0(s)+s.transmission));
+    normal=SafeNormalize(mul(rotation,s.n),s.n);
+}
+
 void RenderPixel(bool transparentPass) {
     uint2 pixel=DispatchRaysIndex().xy;
     if(!transparentPass) ReservoirsOut[pixel.y*(uint)Size.x+pixel.x]=(Reservoir)0;
@@ -387,6 +413,7 @@ void RenderPixel(bool transparentPass) {
     bool coverage=(guide.transparency&1)!=0;
     bool glass=false;
     Reservoir feedback=(Reservoir)0;
+    float3 optixAlbedo=0,optixNormal=0;
     float3 stableReflection=0,stableTransmission=0;
     float4 reflectionSurface=float4(0,0,0,-1),transmissionSurface=reflectionSurface;
     float4 reflectionNormal=float4(0,0,1,1),transmissionNormal=reflectionNormal;
@@ -403,6 +430,7 @@ void RenderPixel(bool transparentPass) {
         if(!coverage) GatherCaustics(g,-primary,primaryCausticD,primaryCausticS,causticMomentD,causticMomentS);
         primarySurface=float4(g.p,guide.t); primaryNormal=g.n; primaryAlbedo=DiffuseAlbedo(g);
         roughness=g.roughness; primaryMaterial=g.material; reactive=coverage||g.transmission>0?1:0;
+        if(Environment.w!=0) OptixGuide(g,primary,guide.instance,optixAlbedo,optixNormal);
         NRD_MaterialFactors(g.n,-primary,primaryAlbedo,F0(g),roughness,factorD,factorS);
         // Split-sum environment BRDF approximation (linear material reflectance, never lit radiance).
         float4 c0=float4(-1,-.0275,-.572,.022),c1=float4(1,.0425,1.04,-.04);
@@ -559,12 +587,12 @@ void RenderPixel(bool transparentPass) {
     StableReflectionNormal[pixel]=reflectionNormal; StableTransmissionNormal[pixel]=transmissionNormal;
     Normals[pixel]=float4(primaryNormal*.5+.5,min(primaryMaterial,254)/255.0);
     Surfaces[pixel]=primarySurface;
-    NormalRoughness[pixel]=float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
+    NormalRoughness[pixel]=Environment.w!=0?float4(optixNormal,roughness):float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
     DiffuseFactor[pixel]=float4(factorD,1); SpecularFactor[pixel]=float4(factorS,1);
     GlassSurface[pixel]=primarySurface;
     GlassFallback[pixel]=0; GlassNormal[pixel]=0;
     SpecularGuide[pixel]=float4(specularAlbedo,mirrorDistance);
-    Albedo[pixel]=float4(primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
+    Albedo[pixel]=float4(Environment.w!=0?optixAlbedo:primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
 }
 #ifdef DXR_VALIDATE_CONTRACTS
 #include "PathContracts.hlsli"

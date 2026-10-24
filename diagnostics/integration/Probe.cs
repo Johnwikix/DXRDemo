@@ -13,6 +13,8 @@ Directory.CreateDirectory("output");
 if (args.Contains("--nrd-motion")) { DxrDevice.TryActivateAgilityRuntime(); NrdMotionProbe.Run(args); return; }
 if (args.Contains("--temporal-convergence")) { TemporalConvergenceProbe.Run(); return; }
 if (args.Contains("--environment-sampling")) { DxrDevice.TryActivateAgilityRuntime(); EnvironmentSamplingProbe.Run(); return; }
+if (args.Contains("--optix") && !args.Contains("--temporal-scene")) { DxrDevice.TryActivateAgilityRuntime(); OptixProbe.Run(); return; }
+if (args.Contains("--sun-glass")) { DxrDevice.TryActivateAgilityRuntime(); SunGlassProbe.Run(args); return; }
 if (args.Contains("--temporal-scene")) { DxrDevice.TryActivateAgilityRuntime(); await TemporalSceneProbe.Run(args); return; }
 if (args.Contains("--offline")) { DxrDevice.TryActivateAgilityRuntime(); await OfflineProbe.Run(args); return; }
 if (args.Contains("--lighting-scene")) { await LightingProbe.SceneAblation(args.SkipWhile(a => a != "--lighting-scene").Skip(1).FirstOrDefault() ?? "baseline"); return; }

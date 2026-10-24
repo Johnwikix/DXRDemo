@@ -308,7 +308,8 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     internal void Trace(in CameraFrame camera, int frame, int samples, int bounces, Float2 jitter, float environment,
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
         ReadWriteTexture2D<Float4> guide, PbrSignals signals,
-        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false)
+        SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false,
+        bool optixGuides = false)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
         if (samples is < 1 or > 4096 || bounces is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(samples));
@@ -341,7 +342,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         }
         Constants data = new() { Origin = new(camera.Origin, camera.Near), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
-            Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterPower, 0),
+            Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterPower, optixGuides ? 1 : 0),
             Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, scene.HasTransmission ? 1 : 0),
             SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0),
             PreviousOrigin = _previous.Origin, PreviousForward = _previous.Forward, PreviousRight = _previous.Right, PreviousUp = _previous.Up, PreviousSize = _previous.Size,

@@ -31,6 +31,8 @@ internal static class TemporalSceneProbe
         int samples = Option("--spp", 1, 16), bounces = Option("--bounces", 8, 32);
         int textureSize = Option("--texture-size", 1024, 4096);
         bool useNrd = args.Contains("--nrd");
+        bool useOptix = args.Contains("--optix");
+        if (useNrd && useOptix) throw new ArgumentException("Choose --nrd or --optix.");
         int outputIndex = Array.IndexOf(args, "--output");
         string? outputDirectory = outputIndex >= 0 ? args.ElementAtOrDefault(outputIndex + 1)
             ?? throw new ArgumentException("--output requires a directory.") : null;
@@ -65,8 +67,9 @@ internal static class TemporalSceneProbe
         using var signals = new PbrSignals(device, width, height);
         using var reconstruction = new SuperResolutionRenderer(device);
         using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        reconstruction.Configure(ReconstructionMode.Off, 100, width, height, useNrd, true);
+        reconstruction.Configure(ReconstructionMode.Off, 100, width, height, useNrd, true, useOptix);
         Require(reconstruction.LinearPipelineActive && reconstruction.Status.NrdActive == useNrd, reconstruction.Status.Message);
+        Require(!useOptix || reconstruction.Status.OptixActive, reconstruction.Status.Message);
         if (useNrd) reconstruction.PrepareStablePlanes();
         float exposureStops = RtxptAssets.InitialExposure(RtxptScene.Bistro);
         string directory = Path.GetFullPath(outputDirectory ?? ($"output/temporal-bistro-{width}x{height}" + (useNrd ? "-nrd" : ""))); Directory.CreateDirectory(directory);
@@ -76,15 +79,16 @@ internal static class TemporalSceneProbe
         Float4[,]? lastRaw = null;
         float[]? lastTemporal = null;
         var checkpoints = new List<object>();
-        const int measuredFrames = 16;
+        int measuredFrames = Math.Min(frames, 16);
         for (int frame = 0; frame < frames; frame++)
         {
-            backend.Trace(camera, frame, samples, bounces, default, environment, raw, normals, surfaces, guide, signals, opaqueForNrd: useNrd);
+            backend.Trace(camera, frame, samples, bounces, default, environment, raw, normals, surfaces, guide, signals, opaqueForNrd: useNrd, optixGuides: useOptix);
             Require(reconstruction.Execute(raw, normals, surfaces, target, default, 3, default,
-                useNrd ? RayTraceDenoiserMode.NrdRelax : RayTraceDenoiserMode.TemporalOnly,
+                useNrd ? RayTraceDenoiserMode.NrdRelax : useOptix ? RayTraceDenoiserMode.Optix : RayTraceDenoiserMode.TemporalOnly,
                 HdrRenderParameters.Default, 1.0 / 60, guide, camera, signals, exposureStops, transparentBackend: useNrd ? backend : null), reconstruction.Status.Message);
+            Require(!useOptix || reconstruction.Status.OptixActive && reconstruction.OptixDispatchCount == frame + 1, reconstruction.Status.Message);
             int number = frame + 1;
-            bool capture = number is 1 or 32 or 64 or 128 or 256 or 1024 || number == frames;
+            bool capture = number is 1 or 4 or 8 or 16 or 32 or 64 or 128 or 256 or 1024 || number == frames;
             bool measure = frame >= frames - measuredFrames;
             if (!capture && !measure) continue;
             Float4[,] rawFrame = raw.ToArray();
@@ -121,7 +125,8 @@ internal static class TemporalSceneProbe
                 checkpoints.Add(new { frame = number, minimumCount = minimum, maximumCount = maximum, expectedCountCoverage = coverage,
                     compressedRawTemporalRmse = difference, rawMeanLinear = rawStats.Linear, temporalMeanLinear = temporalStats.Linear,
                     rawMeanCompressed = rawStats.Compressed, temporalMeanCompressed = temporalStats.Compressed, rawMaximum = rawStats.Maximum,
-                    temporalPath, rawPath, traceGpuMilliseconds = backend.TraceGpuMilliseconds });
+                    temporalPath, rawPath, traceGpuMilliseconds = backend.TraceGpuMilliseconds,
+                    optixGpuMilliseconds = reconstruction.OptixGpuMilliseconds, reconstructionGpuMilliseconds = reconstruction.GpuMilliseconds });
                 string history = useNrd ? $"NRD history={reconstruction.NrdMaxAccumulatedFrames}" :
                     $"count min/max={minimum}/{maximum}, expected={coverage:P2}";
                 Console.WriteLine($"Bistro frame {number}: {history}, raw-vs-temporal RMSE={difference:F6}, " +
@@ -164,12 +169,13 @@ internal static class TemporalSceneProbe
             var message = messages.GetMessage(i);
             Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
         }
-        var result = new { scene = asset.Name, gpu = device.Name.ToString(), denoiser = useNrd ? "NrdRelax" : "TemporalOnly", width, height, samples, bounces, frames,
+        var result = new { scene = asset.Name, gpu = device.Name.ToString(), denoiser = useNrd ? "NrdRelax" : useOptix ? "Optix" : "TemporalOnly", width, height, samples, bounces, frames,
+            optixDispatches = reconstruction.OptixDispatchCount, optixGpuMilliseconds = reconstruction.OptixGpuMilliseconds,
             fireflyThreshold, adaptiveLighting = backend.AdaptiveLightingEnabled, caustics = backend.CausticsEnabled,
             referenceSamples = referenceFrames * referenceSpp, referenceKind, exposureStops, rawLateFrameRms = rawRms, temporalLateFrameRms = temporalRms,
             rawReferenceRmse = rawReference, temporalReferenceRmse = temporalReference, checkpoints, referencePath };
         File.WriteAllText(Path.Combine(directory, "metrics.json"), JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
-        Require(temporalRms < rawRms * .5, $"Temporal output still fluctuates like the 1-SPP input: raw={rawRms}, temporal={temporalRms}");
+        if (frames >= 32) Require(temporalRms < rawRms * .5, $"Temporal output still fluctuates like the 1-SPP input: raw={rawRms}, temporal={temporalRms}");
         Require(temporalReference < rawReference, "Temporal output is not closer to the production high-SPP reference than the raw frame");
     }
 

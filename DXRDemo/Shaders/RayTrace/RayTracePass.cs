@@ -13,7 +13,9 @@ public enum RayTraceDenoiserMode
 {
     None = 0, TemporalOnly = 1,
     /// <summary>Uses official NRD RELAX: diffuse for meshes, diffuse/specular SH for PBR scenes.</summary>
-    NrdRelax = 2
+    NrdRelax = 2,
+    /// <summary>Progressive raw HDR accumulation followed by independent OptiX AI reconstruction.</summary>
+    Optix = 3
 }
 
 /// <summary>Both trace backends feed the same HDR encoder, temporal reference and official NRD denoisers.</summary>
@@ -81,6 +83,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     public IReadOnlyList<MeshChoice> Scenes { get; private set; }
     /// <summary>Gets the viewport camera controller shared by all trace and reconstruction paths.</summary>
     public CameraController Camera => _camera;
+    internal bool SupportsOptix => Snapshot.Asset != null || Snapshot.Scene < MeshData.Choices.Length;
     /// <summary>Gets or sets environment intensity for imported scenes.</summary>
     public float EnvironmentIntensity { get => Snapshot.Environment; set => Change(s => s with { Environment = Math.Clamp(value, 0, 100) }); }
     /// <summary>Gets or sets the switch for external sun and environment; model lights and emissive materials remain enabled.</summary>
@@ -221,6 +224,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
     /// <summary>Gets the most recently published capabilities and actual reconstruction mode.</summary>
     public ReconstructionStatus? ReconstructionStatus => Volatile.Read(ref _reconstruction)?.Status;
     internal uint NrdDispatchCount => _reconstruction?.NrdDispatchCount ?? 0;
+    internal uint OptixDispatchCount => _reconstruction?.OptixDispatchCount ?? 0;
     public string DiagnosticText
     {
         get
@@ -234,7 +238,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 ? (sr.Requested == ReconstructionMode.Off ? "SR OFF / NATIVE" : $"{sr.Requested} UNAVAILABLE / NATIVE")
                 : $"SR {sr.Active}  {sr.InputWidth}x{sr.InputHeight} -> {sr.OutputWidth}x{sr.OutputHeight}";
             string denoiser = sr?.Active == ReconstructionMode.DlssRayReconstruction ? "DLSS RAY RECONSTRUCTION" : s.Denoiser == RayTraceDenoiserMode.NrdRelax
-                ? (sr?.NrdActive == true ? "NRD RELAX" : "TEMPORAL (NRD UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
+                ? (sr?.NrdActive == true ? "NRD RELAX" : "TEMPORAL (NRD UNAVAILABLE)") : s.Denoiser == RayTraceDenoiserMode.Optix
+                ? (sr?.OptixActive == true ? "OPTIX AI" : "TEMPORAL (OPTIX UNAVAILABLE)") : s.Denoiser.ToString().ToUpperInvariant();
             return $"{_backend.Name}\n{model}{(_loading ? "  LOADING" : "")}\n{s.Samples} SPP  {s.Bounces} BOUNCES  DENOISE {denoiser}\n{reconstruction}";
         }
     }
@@ -278,15 +283,17 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
             }
             mesh = load.GetAwaiter().GetResult();
         }
-        if (_reconstruction != null || _backend is DxrMeshBackend || s.Reconstruction != ReconstructionMode.Off || s.Denoiser == RayTraceDenoiserMode.NrdRelax)
+        if (_reconstruction != null || _backend is DxrMeshBackend || s.Reconstruction != ReconstructionMode.Off || s.Denoiser is RayTraceDenoiserMode.NrdRelax or RayTraceDenoiserMode.Optix)
         {
             if (_reconstruction == null) Volatile.Write(ref _reconstruction, new SuperResolutionRenderer(device));
             _reconstruction.Configure(mesh == null && !pbr ? ReconstructionMode.Off : s.Reconstruction, s.RenderScale, width, height,
-                (mesh != null || pbr) && s.Denoiser == RayTraceDenoiserMode.NrdRelax, pbr);
+                (mesh != null || pbr) && s.Denoiser == RayTraceDenoiserMode.NrdRelax, pbr,
+                (mesh != null || pbr) && s.Denoiser == RayTraceDenoiserMode.Optix);
         }
         bool temporal = _reconstruction is { LinearPipelineActive: true };
         bool nrd = _reconstruction?.Status.NrdActive == true;
         RayTraceDenoiserMode denoiserMode = s.Denoiser == RayTraceDenoiserMode.NrdRelax && !nrd ? RayTraceDenoiserMode.TemporalOnly : s.Denoiser;
+        if (denoiserMode == RayTraceDenoiserMode.Optix && !temporal) denoiserMode = RayTraceDenoiserMode.TemporalOnly;
         int inputWidth = temporal ? _reconstruction!.InputWidth : width;
         int inputHeight = temporal ? _reconstruction!.InputHeight : height;
         EnsureTextures(inputWidth, inputHeight, temporal, nrd || pbr, pbr);
@@ -307,7 +314,8 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 _sceneBackend ??= new DxrSceneBackend(); _sceneBackend.Initialize(device); _sceneBackend.SetScene(s.Asset!);
                 if (nrd && _sceneBackend.StablePlanesEnabled) _reconstruction.PrepareStablePlanes();
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
-                    _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd);
+                    _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd,
+                    optixGuides: s.Denoiser == RayTraceDenoiserMode.Optix && _reconstruction.Active != ReconstructionMode.DlssRayReconstruction);
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
             bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight, pbr && nrd ? _sceneBackend : null);

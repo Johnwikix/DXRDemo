@@ -102,7 +102,10 @@ ScatterResult Scatter(Surface s, float3 view, float3 u) {
         float3 micro=result.delta?s.n:Local(s.n,sampleGGX_VNDF(a,ToLocal(s.n,view),u.xy));
         float vm=saturate(dot(view,micro));
         bool volume=s.thickness>0;
-        float3 refracted=volume?refract(-view,micro,s.eta):-reflect(-view,micro);
+        // A smooth thin sheet has coincident entry/exit interfaces: its net
+        // transmission is straight through. Negating a reflection reverses the
+        // tangential direction and makes oblique windows sample the wrong room.
+        float3 refracted=volume?refract(-view,micro,s.eta):(result.delta?-view:-reflect(-view,micro));
         bool tir=volume && dot(refracted,refracted)<1e-10;
         result.transmitted=u.z>=pSpec && !tir;
         result.direction=result.transmitted?refracted:reflect(-view,micro);

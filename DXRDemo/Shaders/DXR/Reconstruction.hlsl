@@ -12,7 +12,7 @@ cbuffer FrameConstants : register(b0)
     float4 PreviousUp;
     float4 Size;             // input width, height, output width, height
     float4 Jitter;           // current and previous ray sample offsets, in input pixels
-    float4 Control;          // history reset, denoiser mode, unused, unjittered camera changed
+    float4 Control;          // global reset, denoiser mode, progressive-only reset, unjittered camera changed
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
     float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
     float4 PreviousProjection; // previous tan(vertical FOV / 2), near, far, unused
@@ -153,7 +153,7 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         mean += l; square += l*l; count++;
     }
     float variance = max(square / count - (mean / count) * (mean / count), 0.0001);
-    if (Control.x == 0 && previousZ > 0)
+    if (Control.x == 0 && Control.z == 0 && previousZ > 0)
     {
         float3 old;
         if (ReprojectHistory(p, previousPixel, previousZ, sky, old))

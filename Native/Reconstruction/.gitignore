@@ -1,2 +1,4 @@
 /bin/
 /obj/
+/bin-no-optix/
+/obj-no-optix/
