@@ -16,6 +16,7 @@ if (args.Contains("--environment-sampling")) { DxrDevice.TryActivateAgilityRunti
 if (args.Contains("--optix") && !args.Contains("--temporal-scene")) { DxrDevice.TryActivateAgilityRuntime(); OptixProbe.Run(); return; }
 if (args.Contains("--sun-glass")) { DxrDevice.TryActivateAgilityRuntime(); SunGlassProbe.Run(args); return; }
 if (args.Contains("--sun-shadow")) { DxrDevice.TryActivateAgilityRuntime(); SunShadowProbe.Run(args); return; }
+if (args.Contains("--sr-detail") || args.Contains("--sr-mips") || args.Contains("--sr-bistro")) { DxrDevice.TryActivateAgilityRuntime(); DenoiserSrProbe.Run(args); return; }
 if (args.Contains("--builtin-shadow")) { DxrDevice.TryActivateAgilityRuntime(); using var shadowDevice = GraphicsDevice.GetDefault(); await SceneProbe.BuiltinShadowTest(shadowDevice); return; }
 if (args.Contains("--temporal-scene")) { DxrDevice.TryActivateAgilityRuntime(); await TemporalSceneProbe.Run(args); return; }
 if (args.Contains("--offline")) { DxrDevice.TryActivateAgilityRuntime(); await OfflineProbe.Run(args); return; }

@@ -61,6 +61,19 @@ The older commands below run multiple frames and should not be used while gaming
 
 # Model / HDR / settings integration validation
 
+`--sr-detail` measures texture contrast and linear error after 48 frames through
+the actual FSR/XeSS/DLSS SDKs at 50% input, with None/Temporal/OptiX. `--noisy`
+adds deterministic exponential Monte Carlo noise; `--emissive` tests current-frame
+unfiltered detail. `--sparse` ensures rare bright paths retain their mean across
+jitter, and `--impulse` rejects recursive spreading into adjacent pixels.
+`--fsr-only` bounds iteration to one provider. JSON and PNG
+artifacts are saved under `output/sr-detail[-noisy][-emissive]`.
+`--sr-mips` independently compares actual production texture sampling at 50%
+input with identical native-resolution rays. `--sr-bistro` captures 64 frames of
+the actual application Bistro path at 1 SPP / 8 bounces, 67% input, 1280×720
+output and the first available DLSS/XeSS/FSR provider. Add `--temporal` to compare
+Temporal instead of OptiX; captures go to `output/sr-bistro`.
+
 `IntegrationProbe.exe --optix` requires actual OptiX execution and checks noise
 reduction against known radiance, an independent raw arithmetic mean, oblique
 thin-glass background transmission, moving-camera motion vectors, camera/jitter

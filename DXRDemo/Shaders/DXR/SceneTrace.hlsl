@@ -77,7 +77,9 @@ float4 Sample(Binding b, float4 uv, float cone) {
     if(cone>0) {
         float edge=b.extra.w;
         if(edge<=0) { uint w,h; Textures[index].GetDimensions(w,h); edge=max(w,h); }
-        lod=clamp(log2(max(cone*edge*max(abs(b.transform.z),abs(b.transform.w)),1)),0,b.extra.z);
+        // Temporal SR reconstructs display-resolution texture detail from jittered
+        // samples. Input-resolution LODs would discard it before denoising starts.
+        lod=clamp(log2(max(cone*edge*max(abs(b.transform.z),abs(b.transform.w)),1))+EnvironmentMap.w,0,b.extra.z);
     }
     return Textures[index].SampleLevel(Samplers[index], UV(b,uv), lod);
 }

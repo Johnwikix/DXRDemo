@@ -16,14 +16,14 @@ cbuffer FrameConstants : register(b0)
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
     float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
     float4 PreviousProjection; // previous tan(vertical FOV / 2), near, far, unused
-    float4 Lighting;        // separate primary direct light in the packaged mesh path
+    float4 Lighting;        // separate mesh direct light, transparent pass, temporal SR, OptiX residual
     float4 GlassControl;    // reset glass on any unjittered camera or explicit history change
 };
 
 Texture2D<float4> Raw : register(t0);
 Texture2D<float4> Normals : register(t1);
 Texture2D<float4> Surfaces : register(t2); // world position + ray distance; sky direction + -1
-Texture2D<float4> History : register(t3);  // linear radiance + previous view depth (-1 for sky)
+Texture2D<float4> History : register(t3);  // native radiance / SR lighting + previous view depth (-1 for sky)
 Texture2D<float4> Reconstructed : register(t5);
 Texture2D<float4> PbrDiffuse : register(t6);
 Texture2D<float4> PbrSpecular : register(t7);
@@ -86,7 +86,11 @@ bool ReprojectHistory(int2 pixel, float2 previousPixel, float previousZ, bool sk
 {
     // A fixed raster footprint needs an exact per-pixel mean. Reprojecting an unchanged
     // camera accumulates world-to-raster roundoff and diffuses isolated bright samples.
-    if (Control.w == 0 && all(Jitter.xy == Jitter.zw))
+    // Under SR this PBR history contains demodulated lighting, not texture color.
+    // Average the pixel's lighting samples across jitter without recursively
+    // resampling rare bright paths into broad false light spots.
+    bool stationaryLighting = Lighting.z != 0 && Projection.w != 0;
+    if (Control.w == 0 && (all(Jitter.xy == Jitter.zw) || stationaryLighting))
     {
         float4 tap = History[pixel];
         color = tap.rgb;
@@ -115,6 +119,21 @@ bool ReprojectHistory(int2 pixel, float2 previousPixel, float previousZ, bool sk
     return weights > 0.00001;
 }
 
+float3 CurrentUnfiltered(int2 p)
+{
+    return Lighting.z != 0 && (Projection.w != 0 || Lighting.x != 0) ? max(PbrUnfiltered[p].rgb, 0) : 0;
+}
+float3 CurrentReflectance(int2 p)
+{
+    // Reproject lighting rather than the already textured image. Remodulating by
+    // this frame's reflectance preserves the exact jitter footprint needed by SR.
+    return Lighting.z != 0 && Projection.w != 0 ? max(PbrAlbedo[p].rgb, .04) : 1;
+}
+float3 TemporalSignal(int2 p)
+{
+    return max(Raw[p].rgb - CurrentUnfiltered(p), 0) / CurrentReflectance(p);
+}
+
 [numthreads(8, 8, 1)]
 void Prepare(uint3 tid : SV_DispatchThreadID)
 {
@@ -141,19 +160,22 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         Color[p] = float4(min(value, 65000), 1);
         return;
     }
+    value = TemporalSignal(p);
     uint2 samples = uint2(1, 0);
     float3 lo = value, hi = value;
     float mean = 0, square = 0, count = 0;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
     {
         int2 q = clamp(p + int2(x, y), 0, int2(Size.xy) - 1);
-        float3 tap = max(Raw[q].rgb, 0);
+        float3 tap = TemporalSignal(q);
         lo = min(lo, tap); hi = max(hi, tap);
         float l = dot(tap, float3(0.2126, 0.7152, 0.0722));
         mean += l; square += l*l; count++;
     }
     float variance = max(square / count - (mean / count) * (mean / count), 0.0001);
-    if (Control.x == 0 && Control.z == 0 && previousZ > 0)
+    // Primary glass/coverage guides cannot safely reproject the visible background.
+    bool unstableSurface = Lighting.z != 0 && Projection.w != 0 && PbrAlbedo[p].a > .5;
+    if (Control.x == 0 && Control.z == 0 && previousZ > 0 && !unstableSurface)
     {
         float3 old;
         if (ReprojectHistory(p, previousPixel, previousZ, sky, old))
@@ -163,18 +185,43 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
             {
                 // Moving history remains bounded and clipped. Once the camera stops, each
                 // accepted pixel resumes an uncapped, unclipped running mean from that history.
-                if (Control.w != 0 && (oldSamples.y != 0 || oldSamples.x >= 32)) oldSamples = uint2(31, 0);
+                // A static scene's lighting stays valid across raster jitter. Clipping
+                // to a single noisy neighborhood loses rare bright path samples and
+                // systematically darkens 1-SPP transport. Only camera motion bounds it.
+                bool resampled = Control.w != 0;
+                uint limit = Lighting.z != 0 ? 16 : 32;
+                if (resampled && (oldSamples.y != 0 || oldSamples.x >= limit)) oldSamples = uint2(limit - 1, 0);
                 samples.x = oldSamples.x + 1;
                 samples.y = oldSamples.y + (samples.x == 0 ? 1 : 0);
                 float sampleCount = float(samples.y) * 4294967296.0 + float(samples.x);
-                float3 history = Control.w != 0 ? clamp(old, lo, hi) : old;
+                float3 history = resampled ? clamp(old, lo, hi) : old;
                 value = lerp(history, value, 1.0 / sampleCount);
             }
         }
     }
     NextHistory[p] = float4(value, sky ? -1 : currentZ);
     NextTemporalSampleCounts[p] = samples;
-    Color[p] = float4(min(value, 65000), variance);
+    float3 radiance = value * CurrentReflectance(p);
+    if (Lighting.w == 0) radiance += CurrentUnfiltered(p);
+    Color[p] = float4(min(radiance, 65000), variance);
+}
+
+[numthreads(8, 8, 1)]
+void ComposeOptix(uint3 tid : SV_DispatchThreadID)
+{
+    int2 p = tid.xy;
+    if (any(p >= int2(Size.xy))) return;
+    // Analytic primary lighting/emission was never noisy. Keep its current-frame
+    // samples instead of allowing the spatial network to remove their fine detail.
+    Color[p] = float4(min(max(Reconstructed[p].rgb, 0) + CurrentUnfiltered(p), 65000), 1);
+}
+
+[numthreads(8, 8, 1)]
+void RestoreOptixFallback(uint3 tid : SV_DispatchThreadID)
+{
+    int2 p = tid.xy;
+    if (any(p >= int2(Size.xy))) return;
+    Color[p] = float4(min(Color[p].rgb + CurrentUnfiltered(p), 65000), 1);
 }
 
 float3 GlassSignal(int2 p)

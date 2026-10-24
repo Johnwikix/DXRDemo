@@ -24,16 +24,26 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    depth (near 0.01, far 1000, vertical FOV `2*atan(0.5)`) and current-to-previous
    **unjittered input-pixel** motion. Sky motion accounts for camera rotation
    without false translation parallax. The opaque scene uses a zero reactive mask.
-3. SR-specific denoising stays in linear Rec.709 floating point. Temporal mode
-   reprojects history and rejects disocclusions by view depth. While the camera
-   changes, it clamps history to the current neighborhood and limits history to
-   32 frames to bound ghosting. A stationary camera disables that clipping and
-   continues an uncapped running mean using independent per-pixel 64-bit counts;
-   when sampling jitter is also unchanged, it reads the identical history pixel
-   directly to prevent world-to-raster roundoff from diffusing bright samples.
-   Changed jitter still reprojects the previous raster footprint.
-   a rejected pixel restarts at one sample instead of inheriting the global frame
-   index. The legacy encoded-space path likewise has no fixed 64-frame cap.
+3. Denoising stays in linear Rec.709 floating point. At native resolution,
+   stationary Temporal retains an uncapped per-pixel mean; it reads the identical
+   history pixel when camera and raster footprint are unchanged. Moving native
+   history is depth-rejected, clipped and bounded to 32 frames. A rejected pixel
+   restarts at one sample. The legacy encoded-space path likewise has no fixed
+   64-frame cap.
+   With temporal SR, Temporal and OptiX instead reproject **lighting divided by
+   current reflectance**, not the already textured color. With a stationary PBR
+   camera it averages lighting at the identical pixel across jitter, with no
+   clipping, cap or recursive interpolation of rare bright samples. Camera motion
+   reprojects lighting, with clipping and a 16-frame bound. Remodulation uses the current
+   jittered reflectance; deterministic primary lighting and emission are added
+   from the current frame. This preserves the subpixel detail the SR SDK needs,
+   while accumulating transport noise. Transparent/coverage surfaces reject this
+   lighting history because their primary depth cannot reproject the background.
+   OptiX receives the remodulated noisy contribution with current-frame guides;
+   it no longer restarts its noisy input solely because SR jitter changed.
+   The spatial AI output never enters the lighting history. Primary unfiltered
+   detail is composed after AI, then the actual SR SDK runs once. This differs
+   from both native progressive OptiX and DLSS Ray Reconstruction.
    These are floating-point means, not a claim of infinite numerical precision.
    Removing the fixed cap does not make heavy-tailed 1-SPP transport converge
    quickly: the actual Bistro sequence still needs substantially more than a few
@@ -59,6 +69,13 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    R8 reactive masks. Its FP16 output is then encoded to SDR gamma or Rec.2020/PQ.
    The GPU HUD and XAML controls remain at output resolution.
 
+PBR ray-cone texture sampling applies `log2(inputResolution/outputResolution)`
+as a mip bias with SR, including guide textures. This retains the native output
+footprint instead of irreversibly removing texture detail at the low input size.
+Off uses zero bias. The bias does not sharpen the reconstructed output. See the
+vendor guidance on [mip selection](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/#mipmap-biasing)
+and [jittered input / replacing TAA](https://www.intel.com/content/www/us/en/developer/articles/technical/xess-sr-developer-guide.html).
+
 Ray-sampling offsets are the inverse of projection offsets supplied to the SDK.
 The preparation shader removes jitter from motion and compensates previous
 jitter when looking up denoiser history. History uses texel-center bilinear
@@ -76,7 +93,11 @@ is required before SDK contexts, mapped constants or descriptor tables are
 reused, and before the next queue reads shared output. SDK dispatch changes root
 bindings, so encoding explicitly binds its own state again. A failed unsubmitted
 command list is discarded before native fallback; a changed configuration can
-retry initialization. Resources and descriptors are reused in steady state.
+retry initialization. Static descriptor tables are cleared when inputs are rebound,
+so transitions between PBR, legacy models and denoisers cannot retain released
+resources in unused slots. OptiX composition has its own table to avoid overwriting
+encoding descriptors before their command list executes. Resources and descriptors
+are reused in steady state.
 No whole-application zero-allocation or FPS claim is made.
 
 With SR and NRD both off, the previous encoded-space filters and stochastic

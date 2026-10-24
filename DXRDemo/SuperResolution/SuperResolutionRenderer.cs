@@ -16,7 +16,7 @@ namespace DXRDemo.SuperResolution;
 /// <summary>Owns linear denoising, vendor reconstruction and encoding on a synchronized render-thread queue.</summary>
 internal sealed unsafe class SuperResolutionRenderer : IDisposable
 {
-    private const int SrvCount = 27, UavCount = 13, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
+    private const int SrvCount = 27, UavCount = 13, SetCount = 7, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
     private readonly GpuInterval _gpuInterval;
     internal double GpuMilliseconds { get; private set; }
@@ -28,13 +28,13 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private string _optixMessage = "";
     private nint _optixContext;
     private ID3D12Resource _optixOutput = null!;
-    private bool _optixUsed;
+    private bool _optixUsed, _optixComposed;
     private string _nrdMessage = "";
     private readonly string _availabilityMessage = "";
     private ID3D12RootSignature _root = null!;
     private ID3D12PipelineState _prepare = null!, _resolveGlass = null!, _encode = null!;
     private ID3D12PipelineState _prepareNrd = null!, _composeNrd = null!;
-    private ID3D12PipelineState _prepareRr = null!;
+    private ID3D12PipelineState _prepareRr = null!, _composeOptix = null!, _restoreOptixFallback = null!;
     private ID3D12DescriptorHeap _heap = null!;
     private ID3D12Resource _constants = null!;
     private nint _constantPointer, _context;
@@ -118,7 +118,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource Depth => _depth;
     internal ID3D12Resource Motion => _motion;
     internal ID3D12Resource LinearOutput => _output;
-    internal ID3D12Resource DenoisedColor => _optixUsed ? _optixOutput : _glassComposed ? _glassColor : _color;
+    internal ID3D12Resource DenoisedColor => _optixUsed && !_optixComposed ? _optixOutput : _glassComposed ? _glassColor : _color;
+    internal float TextureLodBias => Active == ReconstructionMode.Off ? 0 :
+        MathF.Log2(MathF.Min(InputWidth / (float)Status.OutputWidth, InputHeight / (float)Status.OutputHeight));
     internal ID3D12Resource? StableMotion => _stablePlanes?.Motion;
     internal ID3D12Resource GlassUnfilteredColor => _glassRaw;
     /// <summary>Gets the glass running mean and frame count for convergence regression checks.</summary>
@@ -261,7 +263,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             _configuration.Width, _configuration.Height, message + (active == ReconstructionMode.DlssRayReconstruction ? " · DLSSD（已旁路常规降噪）" : _nrdContext != 0 ? " · NVIDIA NRD RELAX" :
                 _configuration.Nrd ? $" · NRD 不可用，使用时间累积：{_nrdMessage}" : "") +
                 (active == ReconstructionMode.DlssRayReconstruction || !_configuration.Optix ? "" : _optixContext != 0 ?
-                active == ReconstructionMode.Off ? " · NVIDIA OptiX AI（渐进累积）" : " · NVIDIA OptiX AI（逐帧重建 + SR）" :
+                active == ReconstructionMode.Off ? " · NVIDIA OptiX AI（渐进累积）" : " · NVIDIA OptiX AI（光照累积 + SR）" :
                 $" · OptiX 不可用，使用时间累积：{_optixMessage}"), _nrdAvailable, _nrdContext != 0, _optixAvailable, _optixContext != 0));
 
     private ID3D12Resource Texture(int width, int height, Format format,
@@ -284,6 +286,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _prepareNrd = Compile(file, "PrepareNrd");
         _composeNrd = Compile(file, "ComposeNrd");
         _prepareRr = Compile(file, "PrepareRr");
+        _composeOptix = Compile(file, "ComposeOptix");
+        _restoreOptixFallback = Compile(file, "RestoreOptixFallback");
         _heap = Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new DescriptorHeapDescription(
             DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, DescriptorsPerSet * SetCount, DescriptorHeapFlags.ShaderVisible)));
         _descriptorStride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
@@ -294,6 +298,12 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _constantPointer = (nint)pointer;
         _historySampleCountFallback = Keep(DxrResources.CreateUnorderedAccessTexture2D(_gpu.Device, 1, 1,
             Format.R32G32_UInt, ResourceStates.NonPixelShaderResource));
+        ClearDescriptorTables();
+        _pipelinesReady = true;
+    }
+
+    private void ClearDescriptorTables()
+    {
         // Static descriptor tables must be fully initialized even when an entry point only uses a subset.
         var nullSrv = new ShaderResourceViewDescription
         {
@@ -311,7 +321,6 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             for (int i = 0; i < SrvCount; i++) _gpu.Device.CreateShaderResourceView(null, nullSrv, start + i * _descriptorStride);
             for (int i = 0; i < UavCount; i++) _gpu.Device.CreateUnorderedAccessView(null, null, nullUav, start + (SrvCount + i) * _descriptorStride);
         }
-        _pipelinesReady = true;
     }
 
     private ID3D12PipelineState Compile(string file, string entry)
@@ -362,6 +371,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4>? nrdNormals, PbrSignals? pbr, ReadWriteTexture2D<Float4>? directLight)
     {
         if (ReferenceEquals(raw, _boundRaw)) return;
+        // Static ranges include unused entries. A different scene/configuration may
+        // release the old PBR/OptiX resources, so remove every stale descriptor.
+        ClearDescriptorTables();
         _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
         _raw = Resource(raw); _normals = Resource(normals); _surfaces = Resource(surfaces);
         _nrdNormals = nrdNormals == null ? null : Resource(nrdNormals);
@@ -415,6 +427,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         if (seconds > 0.25 || seconds <= 0) Reset();
         _glassComposed = false;
         _optixUsed = false;
+        _optixComposed = false;
         bool rayReconstruction = Active == ReconstructionMode.DlssRayReconstruction;
         if (rayReconstruction) denoiser = RayTraceDenoiserMode.None;
         bool useOptix = denoiser == RayTraceDenoiserMode.Optix && _optixContext != 0;
@@ -435,11 +448,11 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Size = new(InputWidth, InputHeight, target.Width, target.Height),
             Jitter = new(jitter.X, jitter.Y, _previousJitter.X, _previousJitter.Y),
             // Reset the progressive image without suppressing the SR motion vectors.
-            Control = new(_reset ? 1 : 0, (int)denoiser, useOptix && resetOptix ? 1 : 0, cameraChanged ? 1 : 0),
+            Control = new(_reset ? 1 : 0, (int)denoiser, useOptix && Active == ReconstructionMode.Off && resetOptix ? 1 : 0, cameraChanged ? 1 : 0),
             Output = new(hdr.IsHdrEnabled ? 1 : 0, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, exposure),
             Projection = new(MathF.Tan(camera.VerticalFov * .5f), camera.Near, camera.Far, pbr != null ? 1 : 0),
             PreviousProjection = new(MathF.Tan(_previousCamera.VerticalFov * .5f), _previousCamera.Near, _previousCamera.Far, 0),
-            Lighting = new(directLight != null ? 1 : 0, 0, Active != ReconstructionMode.Off ? 1 : 0, 0),
+            Lighting = new(directLight != null ? 1 : 0, 0, Active != ReconstructionMode.Off ? 1 : 0, useOptix && Active != ReconstructionMode.Off ? 1 : 0),
             GlassControl = new(resetGlass ? 1 : 0, 0, 0, 0)
         };
         *(Constants*)_constantPointer = data;
@@ -453,7 +466,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         Srv(0, 26, previousHistorySampleCounts);
         if (pbr != null)
             for (int set = 0; set < SetCount; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
-        else if (directLight != null) { Srv(1, 9, _pbrInputs[3]!); Srv(2, 9, _pbrInputs[3]!); }
+        else if (directLight != null) for (int set = 0; set < SetCount; set++) Srv(set, 9, _pbrInputs[3]!);
         Uav(0, 0, _color); Uav(0, 1, _depth); Uav(0, 2, _motion); Uav(0, 3, _reactive); Uav(0, 4, _history[historySlot]);
         Uav(0, 12, historySampleCounts);
         Uav(4, 5, encoded);
@@ -487,17 +500,30 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 End(); // Finish raw accumulation before transferring GPU ownership to CUDA.
                 float* basis = stackalloc float[12] { camera.Right.X, camera.Right.Y, camera.Right.Z, 0,
                     camera.Up.X, camera.Up.Y, camera.Up.Z, 0, camera.Forward.X, camera.Forward.Y, camera.Forward.Z, 0 };
-                int result = NativeOptix.Execute(_optixContext, _history[historySlot].NativePointer, normalInput.NativePointer,
+                bool optixSr = Active != ReconstructionMode.Off;
+                int result = NativeOptix.Execute(_optixContext, (optixSr ? _color : _history[historySlot]).NativePointer, normalInput.NativePointer,
                     pbr != null ? _pbrInputs[2]!.NativePointer : 0, pbr != null ? _pbrInputs[4]!.NativePointer : 0,
-                    _optixOutput.NativePointer, basis, pbr != null ? 1u : 0u, resetOptix ? 1u : 0u);
+                    _optixOutput.NativePointer, basis, pbr != null ? 1u : 0u, optixSr || resetOptix ? 1u : 0u);
                 Begin();
                 if (_nrdNormals != null) Transition(normalInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                if (result == 0) { input = _optixOutput; _optixUsed = true; GpuMilliseconds += NativeOptix.TotalGpuMilliseconds(_optixContext); }
+                if (result == 0)
+                {
+                    input = _optixOutput; _optixUsed = true; GpuMilliseconds += NativeOptix.TotalGpuMilliseconds(_optixContext);
+                }
                 else
                 {
                     _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 执行失败";
                     NativeOptix.Destroy(_optixContext); _optixContext = 0;
                     Publish(Active, InputWidth, InputHeight, "OptiX 执行失败；已回退到时间累积。");
+                }
+                if (optixSr)
+                {
+                    Srv(6, 5, _optixOutput); Uav(6, 0, _color);
+                    Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                    Bind(6, result == 0 ? _composeOptix : _restoreOptixFallback, 0);
+                    _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
+                    Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                    input = _color; _optixComposed = result == 0;
                 }
             }
             if (_nrdContext != 0)

@@ -309,11 +309,12 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
         ReadWriteTexture2D<Float4> guide, PbrSignals signals,
         SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false,
-        bool optixGuides = false)
+        bool optixGuides = false, float textureLodBias = 0)
     {
         var scene = _scene ?? throw new InvalidOperationException("Upload scene before tracing.");
         if (samples is < 1 or > 4096 || bounces is < 1 or > 64) throw new ArgumentOutOfRangeException(nameof(samples));
         if (!float.IsFinite(FireflyThreshold) || FireflyThreshold < 0) throw new ArgumentOutOfRangeException(nameof(FireflyThreshold));
+        if (!float.IsFinite(textureLodBias)) throw new ArgumentOutOfRangeException(nameof(textureLodBias));
         bool stablePlanes = StablePlanesEnabled && opaqueForNrd;
         if (ReferenceMode || stablePlanes) opaqueForNrd = false;
         if (raw.Width != _reservoirWidth || raw.Height != _reservoirHeight)
@@ -352,8 +353,9 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             PathSettings = new(ReferenceMode ? 1 : 0, AdaptiveLightingEnabled && !ReferenceMode ? 1 : 0, ReferenceMode ? 0 : FireflyThreshold, stablePlanes ? 1 : 0),
             EnvironmentMap = scene.Asset.EnvironmentMap is { } environmentMap ? new(environmentMap.Width, environmentMap.Height, environmentMap.Rotation, 0) : default };
         data.Up.W = opaqueForNrd ? 1 : 0;
+        data.EnvironmentMap.W = Math.Clamp(textureLodBias, -8, 0);
         bool compatible = _historyValid && !resetHistory && frame > 0 && frame == _previousFrame + 1 && data.Up.W == _previous.Up.W && data.PathSettings == _previous.PathSettings &&
-            data.Environment == _previous.Environment && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
+            data.Environment == _previous.Environment && data.EnvironmentMap == _previous.EnvironmentMap && data.SunDirection == _previous.SunDirection && data.SunRadiance == _previous.SunRadiance &&
             data.Control.X == _previous.Control.X && data.Control.Y == _previous.Control.Y && data.Lighting.X == _previous.Lighting.X &&
             data.CausticSettings == _previous.CausticSettings && data.Forward.W == _previous.Forward.W &&
             Vector3.Dot(camera.Forward, new(_previous.Forward.X, _previous.Forward.Y, _previous.Forward.Z)) > .9f &&
