@@ -25,8 +25,22 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    **unjittered input-pixel** motion. Sky motion accounts for camera rotation
    without false translation parallax. The opaque scene uses a zero reactive mask.
 3. SR-specific denoising stays in linear Rec.709 floating point. Temporal mode
-   reprojects history, rejects disocclusions by view depth, and clamps it to the
-   current neighborhood. The default **NVIDIA NRD RELAX** mode uses the official SDK;
+   reprojects history and rejects disocclusions by view depth. While the camera
+   changes, it clamps history to the current neighborhood and limits history to
+   32 frames to bound ghosting. A stationary camera disables that clipping and
+   continues an uncapped running mean using independent per-pixel 64-bit counts;
+   when sampling jitter is also unchanged, it reads the identical history pixel
+   directly to prevent world-to-raster roundoff from diffusing bright samples.
+   Changed jitter still reprojects the previous raster footprint.
+   a rejected pixel restarts at one sample instead of inheriting the global frame
+   index. The legacy encoded-space path likewise has no fixed 64-frame cap.
+   These are floating-point means, not a claim of infinite numerical precision.
+   Removing the fixed cap does not make heavy-tailed 1-SPP transport converge
+   quickly: the actual Bistro sequence still needs substantially more than a few
+   hundred frames for its residual path noise. NRD retains its own adaptive
+   30-frame stationary / 8-frame moving histories;
+   it is not an unlimited Monte Carlo reference accumulator. The default
+   **NVIDIA NRD RELAX** mode uses the official SDK;
    PBR scenes use its SH variant with material demodulation, SG resolve and
    re-jittering before SR. Glass is composited after opaque denoising, using
    current-frame reprojection and traced cache misses; its closest-surface motion

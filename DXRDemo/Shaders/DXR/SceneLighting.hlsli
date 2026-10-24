@@ -138,7 +138,7 @@ void Direct(Surface s,float3 view,inout uint rng,bool reuse,uint2 pixel,AreaProp
             float3 energy=Sky(l)*saturate(dot(s.n,l))*Weight(lightPdf,pdf)/lightPdf*
                 Visibility(Offset(s,l),l,CameraRight.w,rng,stochastic);
             diffuse+=d*energy; specular+=r*energy;
-            momentD+=l*_NRD_Luminance(d*energy/factorD); momentS+=l*_NRD_Luminance(r*energy/factorS);
+            momentD+=l*_NRD_Luminance(diffuse/factorD); momentS+=l*_NRD_Luminance(specular/factorS);
         }
     }
 }

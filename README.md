@@ -52,6 +52,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 ### 降噪 / 超分
 
 - **降噪**：关闭、时间累积、**NVIDIA NRD · RELAX** 三档；PBR 使用官方 RELAX_DIFFUSE_SPECULAR_SH、材质去调制、SG resolve 和 SR 前的 re-jittering。玻璃在不透明表面降噪后合成，使用当前帧重投影和独立运动矢量；静止镜头下玻璃持续累积，不设帧数上限，镜头变化立即重置，SR 采样抖动不触发重置。旧 RELAX 风格实现已移除，旧设置自动迁移到 NRD。
+- **时间累积收敛**：静止时按每像素 64 位历史计数进行无固定帧数上限、无邻域裁剪的运行均值，历史被拒绝的像素从 1 重新计数。运动时保留 32 帧上限和邻域裁剪以控制拖影，镜头停止后继续累积；旧编码路径也移除了 64 帧上限。NRD 仍使用自身静止 30 / 运动 8 帧的自适应历史，并非无限样本参考累积器。无上限只保证可以继续求均值；Bistro 的 1-SPP 重尾路径噪声仍可能需要远超数百帧才能收敛，不能据此承诺实时画质接近干净参考。
 - **超分辨率 / 光线重建**：原生分辨率、AMD FSR 3.1、Intel XeSS、NVIDIA DLSS SR、**NVIDIA DLSS Ray Reconstruction（DLSSD，已在 RTX 上完成运行验证）**；统一 **1–100% 渲染比例**滑块（默认 67%）；不支持的算法在 UI 中禁用；初始化失败显示具体回退原因
 - NR 与 NRD 正交：可单独开 NRD、可与 FSR/XeSS/DLSS SR 组合；启用 DLSSD 时旁路 NRD 和常规降噪
 
@@ -262,7 +263,7 @@ DXRDemo/                                  解决方案根
    - 轨迹：`DxrSceneBackend`（硬件 DXR，`DispatchRays`）或 `SoftwareMeshBackend`（ComputeSharp 软件 BVH）二选一
    - 深度 / 运动 / 法线粗糙度 / 反应遮罩准备 → 厂商 SR / 自定义 / NRD → 线性输出
    - SDR 编码（sRGB）或 HDR 编码（Rec.2020 / PQ）→ Present
-3. **渐进累积**：时间模式对历史帧 reprojection，相机拖动 / 缩放 / 模式切换 / 长时间间隔清空历史
+3. **渐进累积**：时间模式对历史帧 reprojection；运动时保留 32 帧短期历史，静止时持续运行均值，遮挡拒绝或显式重置的像素重新计数
 
 ---
 
@@ -286,6 +287,8 @@ cd diagnostics/integration
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene-preview ../../Samples/RainyCorner/RainyCorner.glb
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-convergence
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-scene --bistro --width 1920 --height 1080 --frames 256 --reference-frames 16 --reference-spp 32 --spp 1 --bounces 8
 ```
 
 `SceneProbe` 用 `SceneProbe` 自动生成可重现的 glTF / GLB、3×3 贴图、重复实例样例；检查相机帧率独立性、模式连续性、重置、导入取消 / 失败、材质参数、灯光、alpha、纯金属信号、lobe 能量重组、模型尺度与 mip、真实 NRD dispatch、可用 SR。太阳测试验证开关 / 角度 / 强度线性关系以及双面遮挡片的 225 个可见阴影像素。`--glass` 对 2,888 个可见玻璃像素比较 512 SPP 参考与 2 SPP 输出：`x/(1+x)` 压缩后 RGB RMSE 从 **0.351406 → 0.131150（约 −63%）**。`--sr` 跑 80 组 FSR/XeSS × 比例 × 降噪 × SDR/HDR 组合；包含静止相机引导稳定性的 96 帧回归（最大输入像素误差 **0.000477**）和运动矢量正确性。D3D12 Error / Corruption 消息使测试失败。日志与截图写入 ignored `diagnostics/integration/output/`。

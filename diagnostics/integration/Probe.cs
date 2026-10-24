@@ -2,6 +2,7 @@ using ComputeSharp;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
 using DXRDemo.Shaders.RayTrace;
+using DXRDemo.SuperResolution;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -10,6 +11,9 @@ if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DXR_DXC_PATH")))
     Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
 if (args.Contains("--nrd-motion")) { DxrDevice.TryActivateAgilityRuntime(); NrdMotionProbe.Run(args); return; }
+if (args.Contains("--temporal-convergence")) { TemporalConvergenceProbe.Run(); return; }
+if (args.Contains("--environment-sampling")) { DxrDevice.TryActivateAgilityRuntime(); EnvironmentSamplingProbe.Run(); return; }
+if (args.Contains("--temporal-scene")) { DxrDevice.TryActivateAgilityRuntime(); await TemporalSceneProbe.Run(args); return; }
 if (args.Contains("--offline")) { DxrDevice.TryActivateAgilityRuntime(); await OfflineProbe.Run(args); return; }
 if (args.Contains("--lighting-scene")) { await LightingProbe.SceneAblation(args.SkipWhile(a => a != "--lighting-scene").Skip(1).FirstOrDefault() ?? "baseline"); return; }
 if (args.Contains("--lighting")) { LightingProbe.Run(); return; }
@@ -23,6 +27,8 @@ using var device = GraphicsDevice.GetDefault();
 using var hardware = new RayTracePass(new DxrMeshBackend());
 using var software = new RayTracePass();
 hardware.Initialize(device, default); software.Initialize(device, default);
+// Vendor SR has its own --sr suite; this probe compares tracing and denoising backends.
+hardware.ReconstructionMode = ReconstructionMode.Off; software.ReconstructionMode = ReconstructionMode.Off;
 using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(480, 270);
 var results = new List<object>();
 for (int scene = 0; scene < 3; scene++)

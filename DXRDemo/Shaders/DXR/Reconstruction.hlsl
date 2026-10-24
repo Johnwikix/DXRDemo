@@ -12,7 +12,7 @@ cbuffer FrameConstants : register(b0)
     float4 PreviousUp;
     float4 Size;             // input width, height, output width, height
     float4 Jitter;           // current and previous ray sample offsets, in input pixels
-    float4 Control;          // history reset, denoiser mode, history length, unused
+    float4 Control;          // history reset, denoiser mode, unused, unjittered camera changed
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
     float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
     float4 PreviousProjection; // previous tan(vertical FOV / 2), near, far, unused
@@ -45,6 +45,7 @@ Texture2D<float4> GlassHistory : register(t22); // Linear running mean, approxim
 Texture2D<uint2> GlassSampleCounts : register(t23); // Exact 64-bit count, low/high words; no history-length cap.
 Texture2D<float4> GlassCompensation : register(t24); // Compensated mean update error, one-based instance ID.
 Texture2D<float4> GlassRaw : register(t25);
+Texture2D<uint2> TemporalSampleCounts : register(t26); // Per-pixel linear temporal history count.
 RWTexture2D<float4> Color : register(u0);
 RWTexture2D<float> Depth : register(u1);
 RWTexture2D<float2> Motion : register(u2);
@@ -57,6 +58,7 @@ RWTexture2D<float4> PackedDiffuseSh : register(u8);
 RWTexture2D<float4> PackedSpecularSh : register(u9);
 RWTexture2D<uint2> NextGlassSampleCounts : register(u10);
 RWTexture2D<float4> NextGlassCompensation : register(u11);
+RWTexture2D<uint2> NextTemporalSampleCounts : register(u12);
 
 [numthreads(8, 8, 1)]
 void PrepareRr(uint3 tid : SV_DispatchThreadID)
@@ -75,8 +77,21 @@ float2 Project(float3 direction, float3 forward, float3 right, float3 up, float 
     return float2((ndc.x + 1) * 0.5, (1 - ndc.y) * 0.5) * Size.xy;
 }
 
-bool ReprojectHistory(float2 previousPixel, float previousZ, bool sky, out float3 color)
+bool HistoryDepthMatches(float depth, float previousZ, bool sky)
 {
+    return sky ? depth < 0 : depth > 0 && abs(depth - previousZ) < max(0.01, previousZ * 0.02);
+}
+
+bool ReprojectHistory(int2 pixel, float2 previousPixel, float previousZ, bool sky, out float3 color)
+{
+    // A fixed raster footprint needs an exact per-pixel mean. Reprojecting an unchanged
+    // camera accumulates world-to-raster roundoff and diffuses isolated bright samples.
+    if (Control.w == 0 && all(Jitter.xy == Jitter.zw))
+    {
+        float4 tap = History[pixel];
+        color = tap.rgb;
+        return HistoryDepthMatches(tap.w, previousZ, sky);
+    }
     // Convert the previous jittered raster position to texel-center coordinates.
     // Rounding each frame's jitter delta to one texel introduces a directional drift.
     float2 position = previousPixel - Jitter.zw - 0.5;
@@ -89,7 +104,7 @@ bool ReprojectHistory(float2 previousPixel, float previousZ, bool sky, out float
         int2 q = base + int2(x, y);
         if (any(q < 0) || any(q >= int2(Size.xy))) continue;
         float4 tap = History[q];
-        bool valid = sky ? tap.w < 0 : tap.w > 0 && abs(tap.w - previousZ) < max(0.01, previousZ * 0.02);
+        bool valid = HistoryDepthMatches(tap.w, previousZ, sky);
         if (!valid) continue;
         // Reject disoccluded taps individually, then renormalize the remaining footprint.
         float weight = (x == 0 ? 1 - fraction.x : fraction.x) * (y == 0 ? 1 - fraction.y : fraction.y);
@@ -126,6 +141,7 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         Color[p] = float4(min(value, 65000), 1);
         return;
     }
+    uint2 samples = uint2(1, 0);
     float3 lo = value, hi = value;
     float mean = 0, square = 0, count = 0;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++)
@@ -137,13 +153,27 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
         mean += l; square += l*l; count++;
     }
     float variance = max(square / count - (mean / count) * (mean / count), 0.0001);
-    if (Control.y == 1 && Control.x == 0 && previousZ > 0)
+    if (Control.x == 0 && previousZ > 0)
     {
         float3 old;
-        if (ReprojectHistory(previousPixel, previousZ, sky, old))
-            value = lerp(clamp(old, lo, hi), value, 1.0 / min(Control.z + 1, 32));
+        if (ReprojectHistory(p, previousPixel, previousZ, sky, old))
+        {
+            uint2 oldSamples = TemporalSampleCounts[p];
+            if (any(oldSamples != 0))
+            {
+                // Moving history remains bounded and clipped. Once the camera stops, each
+                // accepted pixel resumes an uncapped, unclipped running mean from that history.
+                if (Control.w != 0 && (oldSamples.y != 0 || oldSamples.x >= 32)) oldSamples = uint2(31, 0);
+                samples.x = oldSamples.x + 1;
+                samples.y = oldSamples.y + (samples.x == 0 ? 1 : 0);
+                float sampleCount = float(samples.y) * 4294967296.0 + float(samples.x);
+                float3 history = Control.w != 0 ? clamp(old, lo, hi) : old;
+                value = lerp(history, value, 1.0 / sampleCount);
+            }
+        }
     }
     NextHistory[p] = float4(value, sky ? -1 : currentZ);
+    NextTemporalSampleCounts[p] = samples;
     Color[p] = float4(min(value, 65000), variance);
 }
 

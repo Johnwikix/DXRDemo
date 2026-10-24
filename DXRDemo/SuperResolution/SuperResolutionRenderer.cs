@@ -16,7 +16,7 @@ namespace DXRDemo.SuperResolution;
 /// <summary>Owns linear denoising, vendor reconstruction and encoding on a synchronized render-thread queue.</summary>
 internal sealed unsafe class SuperResolutionRenderer : IDisposable
 {
-    private const int SrvCount = 26, UavCount = 12, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
+    private const int SrvCount = 27, UavCount = 13, SetCount = 6, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
     private readonly GpuInterval _gpuInterval;
     internal double GpuMilliseconds { get; private set; }
@@ -37,6 +37,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private StablePlaneDenoiser? _stablePlanes;
     private int _descriptorStride;
     private ID3D12Resource _color = null!, _depth = null!, _motion = null!, _reactive = null!, _output = null!;
+    private ID3D12Resource _historySampleCountFallback = null!;
     private ID3D12Resource _viewZ = null!, _nrdOutput = null!;
     private ID3D12Resource _nrdSpecInput = null!, _nrdSpecOutput = null!;
     private ID3D12Resource _nrdDiffShInput = null!, _nrdSpecShInput = null!, _nrdDiffShOutput = null!, _nrdSpecShOutput = null!;
@@ -44,6 +45,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private readonly ID3D12Resource[] _glassHistory = new ID3D12Resource[2];
     private readonly ID3D12Resource[] _glassSampleCounts = new ID3D12Resource[2];
     private readonly ID3D12Resource[] _glassCompensation = new ID3D12Resource[2];
+    private readonly ID3D12Resource[] _temporalSampleCounts = new ID3D12Resource[2];
     private readonly ID3D12Resource?[] _pbrInputs = new ID3D12Resource?[12];
     private ID3D12Resource _rrNormals = null!, _rrHitDistance = null!;
     private readonly ID3D12Resource[] _history = new ID3D12Resource[2];
@@ -109,6 +111,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource NrdViewZ => _viewZ;
     /// <summary>Gets the most recently written linear denoiser history for offscreen regression checks.</summary>
     internal ID3D12Resource DenoiserHistory => _history[(int)((_frame - 1) % 2)];
+    internal ID3D12Resource TemporalHistorySampleCounts => _temporalSampleCounts[(int)((_frame - 1) % 2)];
 
     private T Keep<T>(T value) where T : IDisposable { _pipelineResources.Add(value); return value; }
     private T Sized<T>(T value) where T : IDisposable { _sizeResources.Add(value); return value; }
@@ -206,6 +209,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             for (int i = 0; i < 2; i++)
             {
                 _history[i] = Texture(width, height, Format.R32G32B32A32_Float);
+                if (_nrdContext == 0) _temporalSampleCounts[i] = Texture(width, height, Format.R32G32_UInt);
             }
             _linearReady = true;
             Publish(mode, width, height, message);
@@ -264,6 +268,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         void* pointer;
         _constants.Map(0, null, &pointer).CheckError();
         _constantPointer = (nint)pointer;
+        _historySampleCountFallback = Keep(DxrResources.CreateUnorderedAccessTexture2D(_gpu.Device, 1, 1,
+            Format.R32G32_UInt, ResourceStates.NonPixelShaderResource));
         // Static descriptor tables must be fully initialized even when an entry point only uses a subset.
         var nullSrv = new ShaderResourceViewDescription
         {
@@ -400,7 +406,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             PreviousRight = new(_previousCamera.Right, 0), PreviousUp = new(_previousCamera.Up, 0),
             Size = new(InputWidth, InputHeight, target.Width, target.Height),
             Jitter = new(jitter.X, jitter.Y, _previousJitter.X, _previousJitter.Y),
-            Control = new(_reset ? 1 : 0, (int)denoiser, Math.Min(_frame, 31), 0),
+            Control = new(_reset ? 1 : 0, (int)denoiser, 0, cameraChanged ? 1 : 0),
             Output = new(hdr.IsHdrEnabled ? 1 : 0, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, exposure),
             Projection = new(MathF.Tan(camera.VerticalFov * .5f), camera.Near, camera.Far, pbr != null ? 1 : 0),
             PreviousProjection = new(MathF.Tan(_previousCamera.VerticalFov * .5f), _previousCamera.Near, _previousCamera.Far, 0),
@@ -411,11 +417,16 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         data.Lighting.Y = transparentBackend != null ? 1 : 0;
         *(Constants*)(_constantPointer + 256) = data;
         int historySlot = (int)(_frame % 2);
+        bool temporalHistory = denoiser == RayTraceDenoiserMode.TemporalOnly;
+        ID3D12Resource historySampleCounts = _temporalSampleCounts[historySlot] ?? _historySampleCountFallback;
+        ID3D12Resource previousHistorySampleCounts = _temporalSampleCounts[1 - historySlot] ?? _historySampleCountFallback;
         Srv(0, 0, _raw!); Srv(0, 1, _normals!); Srv(0, 2, _surfaces!); Srv(0, 3, _history[1 - historySlot]);
+        Srv(0, 26, previousHistorySampleCounts);
         if (pbr != null)
             for (int set = 0; set < SetCount; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
         else if (directLight != null) { Srv(1, 9, _pbrInputs[3]!); Srv(2, 9, _pbrInputs[3]!); }
         Uav(0, 0, _color); Uav(0, 1, _depth); Uav(0, 2, _motion); Uav(0, 3, _reactive); Uav(0, 4, _history[historySlot]);
+        Uav(0, 12, historySampleCounts);
         Uav(4, 5, encoded);
         try
         {
@@ -430,6 +441,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_reactive, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_history[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            if (temporalHistory) Transition(historySampleCounts, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Bind(0, _prepare, 0);
             _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
             Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
@@ -437,6 +449,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_motion, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_reactive, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_history[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            if (temporalHistory) Transition(historySampleCounts, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             ID3D12Resource input = _color;
             if (_nrdContext != 0)
             {
@@ -669,6 +682,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         }
         for (int i = _sizeResources.Count - 1; i >= 0; i--) _sizeResources[i].Dispose();
         _sizeResources.Clear();
+        for (int i = 0; i < 2; i++) _temporalSampleCounts[i] = null!;
     }
 
     /// <inheritdoc/>

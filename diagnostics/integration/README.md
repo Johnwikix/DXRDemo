@@ -61,6 +61,38 @@ The older commands below run multiple frames and should not be used while gaming
 
 # Model / HDR / settings integration validation
 
+`IntegrationProbe.exe --temporal-convergence` feeds deterministic noisy samples
+through the production linear and encoded Temporal shaders at native resolution.
+It checks RMSE at 32 and 256 frames against both the known reference and an
+independent CPU arithmetic mean, then verifies per-pixel counts and the two-sample
+mean immediately after a depth discontinuity. It rejects the former 32/64-frame
+noise floors, stationary history clipping and global-frame-count reuse after
+history rejection. On the RTX 5070 Ti, linear RMSE falls from 0.024807 to 0.008759
+(CPU-mean RMSE 1.269e-6), and the post-disocclusion two-sample error is 1.376e-8.
+
+`IntegrationProbe.exe --temporal-scene --bistro --width 1920 --height 1080 --frames 256 --reference-frames 16 --reference-spp 32 --spp 1 --bounces 8`
+renders the actual Bistro camera with native Temporal accumulation and a production
+512-SPP reference. Raw/checkpoint/reference PNGs and `metrics.json` are written to
+`output/temporal-bistro-1920x1080`. Every pixel reaches 256 samples; late-frame RMS
+falls from 0.024385 to 0.000819 and reference RMSE from 0.027784 (raw) to 0.009533
+(Temporal). The production 512-SPP reference still contains heavy-tailed path noise,
+so this is not evidence that 1-SPP Bistro becomes clean within a few hundred frames.
+Add `--nrd` for the separate `output/temporal-bistro-1920x1080-nrd` comparison; it is
+cleaner but more blurred and is not an unbiased reference. `--reference-independent`
+selects the independent transport/subpixel sampler instead of the production sampler.
+
+The temporal suite also checks a sparse first-frame impulse with an off-origin
+stationary camera: subsequent black samples must never gain energy from adjacent
+pixels through repeated reprojection. This failed before the same-pixel history
+path (neighbor leakage 0.002126) and passes with zero leakage. A changed-jitter
+case verifies that SR footprints still reproject. `--environment-sampling` tests
+the production HDR sampler against an independent CPU spherical integral.
+For scene ablations, `--output <directory>` separates runs and `--capture-linear`
+exports RGBA float32 snapshots. The probe accepts `--no-emission`,
+`--no-environment`, `--no-normal-maps`, `--uncompressed`, `--no-adaptive-lighting`,
+`--no-caustics` and `--firefly-threshold <value>`.
+See [OptiX investigation and remaining input noise](../../docs/OPTIX_DENOISING.md).
+
 `IntegrationProbe.exe --glass-sr` checks the actual NRD/SR glass composition with
 a fine stripe fixture: detail contrast, frame-to-frame RMS over the jitter
 sequence, opaque/transparent guide separation, closest-glass motion, camera

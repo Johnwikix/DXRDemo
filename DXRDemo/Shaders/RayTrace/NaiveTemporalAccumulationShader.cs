@@ -3,8 +3,8 @@ using ComputeSharp;
 namespace DXRDemo.Shaders.RayTrace;
 
 /// <summary>
-/// Naive temporal accumulation pass: exact running mean of the last <c>n</c> frames,
-/// <c>acc = (cur + hist * (n - 1)) / n</c> with <c>n = min(frame + 1, MaxHistoryFrames)</c>.
+/// Naive temporal accumulation pass: running mean of every frame since the last reset,
+/// <c>acc = hist + (cur - hist) / n</c> with <c>n = frame + 1</c> and no fixed history cap.
 /// No confidence test, no history clamping, no variance estimation — the simplest possible
 /// temporal mean, kept as a reference mode to compare against NVIDIA NRD RELAX.
 ///
@@ -22,12 +22,6 @@ public readonly partial struct NaiveTemporalAccumulationShader(
     IReadWriteNormalizedTexture2D<Float4> signal,
     IReadWriteNormalizedTexture2D<Float4> history) : IComputeShader<Float4>
 {
-    /// <summary>
-    /// Maximum number of frames kept in the running mean, bounding how much of an old,
-    /// stale frame can linger after a scene change (bounded ghosting).
-    /// </summary>
-    private const int MaxHistoryFrames = 64;
-
     public Float4 Execute()
     {
         Int2 xy = ThreadIds.XY;
@@ -35,9 +29,9 @@ public readonly partial struct NaiveTemporalAccumulationShader(
         Float4 cur = signal[xy];
         Float4 hist = history[xy];
 
-        float n = Hlsl.Min(frame + 1, MaxHistoryFrames);
+        float n = frame + 1.0f;
 
-        Float4 acc = (cur + hist * (n - 1.0f)) / n;
+        Float4 acc = hist + (cur - hist) / n;
 
         history[xy] = acc;
 
