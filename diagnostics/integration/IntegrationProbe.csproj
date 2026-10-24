@@ -22,6 +22,7 @@
     <Compile Include="GlassReconstructionProbe.cs" />
     <Compile Include="LightingProbe.cs" />
     <Compile Include="OfflineProbe.cs" />
+    <Compile Include="NrdMotionProbe.cs" />
     <Compile Include="OfflineFeatureChecks.cs" />
     <Content Include="Shaders/*" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />

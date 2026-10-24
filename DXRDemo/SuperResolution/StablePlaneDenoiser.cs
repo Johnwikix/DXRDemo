@@ -28,6 +28,8 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
     private CameraFrame _previous;
     private Vector2 _previousJitter;
     private uint _frame;
+    /// <summary>Gets the final plane's motion texture (transmission after the two sequential dispatches).</summary>
+    internal ID3D12Resource Motion => _motion;
     [StructLayout(LayoutKind.Sequential)]
     private struct Constants { public Vector4 Origin, Forward, Right, Up, PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, Size, Jitter; }
     private T Keep<T>(T value) where T : IDisposable { _owned.Add(value); return value; }
@@ -98,9 +100,11 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
             _inputs[3] = Resource(signals.StableTransmission); _inputs[4] = Resource(signals.StableTransmissionSurface); _inputs[5] = Resource(signals.StableTransmissionNormal);
             _bound = signals; reset = true;
         }
-        if (reset || _frame == 0) { _previous = camera; _previousJitter = new(jitter.X, jitter.Y); _frame = 0; }
+        bool restarting = reset || _frame == 0;
+        bool cameraChanged = !restarting && camera != _previous;
+        if (restarting) { _previous = camera; _previousJitter = new(jitter.X, jitter.Y); _frame = 0; }
         Constants data = new() { Origin = new(camera.Origin, 0), Forward = new(camera.Forward, MathF.Tan(camera.VerticalFov * .5f)),
-            Right = new(camera.Right, 0), Up = new(camera.Up, 0), PreviousOrigin = new(_previous.Origin, 0), PreviousForward = new(_previous.Forward, 0),
+            Right = new(camera.Right, 0), Up = new(camera.Up, 0), PreviousOrigin = new(_previous.Origin, 0), PreviousForward = new(_previous.Forward, MathF.Tan(_previous.VerticalFov * .5f)),
             PreviousRight = new(_previous.Right, 0), PreviousUp = new(_previous.Up, 0), Size = new(_width, _height, camera.Far, 0),
             Jitter = new(jitter.X, jitter.Y, _previousJitter.X, _previousJitter.Y) };
         void* pointer; _constants.Map(0, null, &pointer).CheckError(); *(Constants*)pointer = data; _constants.Unmap(0);
@@ -132,8 +136,10 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
                 WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
                 WorldToViewPrevious = Matrix4x4.CreateLookAt(_previous.Origin, _previous.Origin + _previous.Forward, _previous.Up),
                 ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, _width / (float)_height, camera.Near, camera.Far),
+                ViewToClipPrevious = Matrix4x4.CreatePerspectiveFieldOfView(_previous.VerticalFov, _width / (float)_height, _previous.Near, _previous.Far),
                 Jitter = new(jitter.X, jitter.Y), PreviousJitter = _previousJitter, Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
-                FrameIndex = _frame, Reset = _frame == 0 ? 1u : 0u, DenoisingRange = camera.Far
+                FrameIndex = _frame, Reset = _frame == 0 ? 1u : 0u, DenoisingRange = camera.Far,
+                MaxAccumulatedFrames = cameraChanged ? NativeNrd.MotionMaxAccumulatedFrames : NativeNrd.DefaultMaxAccumulatedFrames
             };
             if (NativeNrd.Execute(_contexts[plane], cmd.NativePointer, &frame) != 0) throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()));
         }

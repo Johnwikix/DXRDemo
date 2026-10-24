@@ -1,4 +1,4 @@
-# Single-frame RTXPT validation
+# Offline RTXPT validation
 
 `IntegrationProbe.exe --offline` renders exactly one 256×144, 4-SPP frame with
 256-pixel textures, no window, warmup, photon pass, denoiser or SR. It saves PNG,
@@ -23,6 +23,32 @@ is checked and saved as `*-4k.png`. `--spp`, `--bounces`, `--texture-size`,
 Use `--rr-4k` instead of `--dlss-4k` for DLSS Ray Reconstruction without NRD.
 The normal path uses SM 6.9 inline traversal without reordering; `--reorder`
 enables material-coherent SER, and `--legacy-trace` (`--no-ser` alias) selects the TraceRay fallback.
+
+## Temporal camera-motion validation
+
+`--offline --motion` renders 64 deterministic frames: 16 stationary warmup, 16 orbit,
+8 pan, 16 FOV changes and 8 stopped frames. It saves every display-resolution PNG
+and `motion.json` under `output/rtxpt-motion`. The first orbit/pan/FOV frame is
+checked against an independent CPU view-projection calculation for both primary
+and stable-transmission motion; the maximum sampled error must be below 0.25
+input pixels. Every frame also asserts the native NRD history length (8 while
+the camera changes, 30 when stationary). `--motion-frames N` can shorten the
+sequence to no fewer than 57 frames so every phase is still covered, and
+`--motion-name LABEL` selects a separate `output/rtxpt-motion-LABEL` directory.
+
+```powershell
+# Native 4K input/output, primary NRD plus reflected/transmitted histories.
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --bistro --production --nrd --width 3840 --height 2160 --spp 1 --bounces 10 --texture-size 1024
+
+# 1920x1080 input -> 3840x2160 output, NRD plus DLSS SR and nonzero jitter.
+./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --motion-name dlss-4k --bistro --production --dlss-4k --spp 1 --bounces 10
+```
+
+`--nrd-motion` is a separate noise-free 4K regression. It feeds a world-anchored
+linear color field through the real NRD adapter for 32 frames of translation and
+FOV changes, checks linear output RMSE below 0.01 and writes
+`output/nrd-synthetic-motion`. `--width`, `--height` and `--frames` can reduce
+its resource cost for iteration.
 
 Agility is activated before device creation. JSON records the reported shader
 model, actual SER setting, compressed texture count/bytes and GPU timestamps.

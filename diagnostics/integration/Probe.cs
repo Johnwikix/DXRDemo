@@ -9,6 +9,7 @@ using System.Text.Json;
 if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DXR_DXC_PATH")))
     Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
+if (args.Contains("--nrd-motion")) { DxrDevice.TryActivateAgilityRuntime(); NrdMotionProbe.Run(args); return; }
 if (args.Contains("--offline")) { DxrDevice.TryActivateAgilityRuntime(); await OfflineProbe.Run(args); return; }
 if (args.Contains("--lighting-scene")) { await LightingProbe.SceneAblation(args.SkipWhile(a => a != "--lighting-scene").Skip(1).FirstOrDefault() ?? "baseline"); return; }
 if (args.Contains("--lighting")) { LightingProbe.Run(); return; }

@@ -15,6 +15,7 @@ cbuffer FrameConstants : register(b0)
     float4 Control;          // history reset, denoiser mode, history length, unused
     float4 OutputParameters;// HDR, SDR white nits, peak nits, unused
     float4 Projection;      // tan(vertical FOV / 2), near, far, PBR scene
+    float4 PreviousProjection; // previous tan(vertical FOV / 2), near, far, unused
     float4 Lighting;        // separate primary direct light in the packaged mesh path
     float4 GlassControl;    // reset glass on any unjittered camera or explicit history change
 };
@@ -66,11 +67,11 @@ void PrepareRr(uint3 tid : SV_DispatchThreadID)
     SpecularHitDistance[tid.xy] = max(PbrSpecularGuide[tid.xy].a, 0);
 }
 
-float2 Project(float3 direction, float3 forward, float3 right, float3 up)
+float2 Project(float3 direction, float3 forward, float3 right, float3 up, float tanHalfFov)
 {
     float z = max(dot(direction, forward), 0.00001);
-    float2 ndc = float2(dot(direction, right) / (z * (Size.x / Size.y) * Projection.x),
-                        dot(direction, up) / (z * Projection.x));
+    float2 ndc = float2(dot(direction, right) / (z * (Size.x / Size.y) * tanHalfFov),
+                        dot(direction, up) / (z * tanHalfFov));
     return float2((ndc.x + 1) * 0.5, (1 - ndc.y) * 0.5) * Size.xy;
 }
 
@@ -110,8 +111,8 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
     float3 previousDirection = sky ? surface.xyz : surface.xyz - PreviousOrigin.xyz;
     float currentZ = dot(currentDirection, CameraForward.xyz);
     float previousZ = dot(previousDirection, PreviousForward.xyz);
-    float2 currentPixel = Project(currentDirection, CameraForward.xyz, CameraRight.xyz, CameraUp.xyz);
-    float2 previousPixel = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz);
+    float2 currentPixel = Project(currentDirection, CameraForward.xyz, CameraRight.xyz, CameraUp.xyz, Projection.x);
+    float2 previousPixel = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz, PreviousProjection.x);
     float2 motion = previousPixel - currentPixel; // remove jitter by projecting both unjittered cameras
     if (Control.x != 0 || previousZ <= 0) motion = 0;
     Motion[p] = clamp(motion, -32700, 32700);
@@ -164,9 +165,9 @@ void ResolveGlass(uint3 tid : SV_DispatchThreadID)
     float3 currentDirection = sky ? surface.xyz : surface.xyz - CameraOrigin.xyz;
     float3 previousDirection = sky ? surface.xyz : surface.xyz - PreviousOrigin.xyz;
     float previousZ = dot(previousDirection, PreviousForward.xyz);
-    float2 previousPixel = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz);
+    float2 previousPixel = Project(previousDirection, PreviousForward.xyz, PreviousRight.xyz, PreviousUp.xyz, PreviousProjection.x);
     float2 motion = previousPixel
-        - Project(currentDirection, CameraForward.xyz, CameraRight.xyz, CameraUp.xyz);
+        - Project(currentDirection, CameraForward.xyz, CameraRight.xyz, CameraUp.xyz, Projection.x);
     Motion[p] = Control.x != 0 || previousZ <= 0 ? 0 : clamp(motion, -32700, 32700);
     // Keep the opaque background depth, patch closest-glass MV after composition as in NRD-Sample.
     // Deterministically traced first reflection/refraction lobes can retain SR history.

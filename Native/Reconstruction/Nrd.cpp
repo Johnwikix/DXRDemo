@@ -118,20 +118,20 @@ struct NrdFrame {
     ID3D12Resource* viewZ;
     ID3D12Resource* motion;
     ID3D12Resource* output;
-    float worldToView[16], worldToViewPrev[16], viewToClip[16];
+    float worldToView[16], worldToViewPrev[16], viewToClip[16], viewToClipPrev[16];
     float jitter[2], jitterPrev[2];
     float milliseconds;
     uint32_t frameIndex, reset, padding;
     ID3D12Resource* specular;
     ID3D12Resource* specularOutput;
     float denoisingRange;
-    uint32_t reserved;
+    uint32_t maxAccumulatedFrames;
     ID3D12Resource* diffuseSh;
     ID3D12Resource* specularSh;
     ID3D12Resource* diffuseShOutput;
     ID3D12Resource* specularShOutput;
 };
-static_assert(sizeof(NrdFrame) == 320);
+static_assert(sizeof(NrdFrame) == 384);
 
 struct NrdContext {
     NrdApi api;
@@ -143,8 +143,8 @@ struct NrdContext {
     ComPtr<ID3D12Resource> constants;
     uint8_t* mapped = nullptr;
     uint32_t width = 0, height = 0, stride = 0, descriptorsPerSet = 0, constantStride = 0, maxSets = 0;
-    uint32_t dispatchCount = 0;
-    bool sh = false;
+    uint32_t dispatchCount = 0, configuredMaxFrames = 0;
+    bool sh = false, settingsInitialized = false;
     ~NrdContext() {
         if (mapped) constants->Unmap(0, nullptr);
         if (instance) api.destroy(*instance);
@@ -166,17 +166,26 @@ struct NrdContext {
             texture.resource = texture.owned.Get();
         }
     }
+    void SetSettings(uint32_t maxFrames) {
+        if (settingsInitialized && configuredMaxFrames == maxFrames) return;
+        nrd::RelaxSettings settings{};
+        settings.enableAntiFirefly = true;
+        if (maxFrames) {
+            settings.diffuseMaxAccumulatedFrameNum = maxFrames;
+            settings.specularMaxAccumulatedFrameNum = maxFrames;
+            settings.diffuseMaxFastAccumulatedFrameNum = std::min(settings.diffuseMaxFastAccumulatedFrameNum, maxFrames - 1);
+            settings.specularMaxFastAccumulatedFrameNum = std::min(settings.specularMaxFastAccumulatedFrameNum, maxFrames - 1);
+        }
+        if (sh) settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
+        configuredMaxFrames = maxFrames; settingsInitialized = true;
+    }
     void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h, bool pbr = false) {
         device = gpu; width = w; height = h; sh = pbr;
         nrd::DenoiserDesc denoiser{denoiserId, pbr ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : nrd::Denoiser::RELAX_DIFFUSE};
         nrd::InstanceCreationDesc creation{}; creation.denoisers = &denoiser; creation.denoisersNum = 1;
         Check(api.create(creation, instance), "Create NRD RELAX_DIFFUSE");
-        nrd::RelaxSettings settings{};
-        settings.enableAntiFirefly = true;
-        if (pbr) {
-            settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
-        }
-        Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
+        SetSettings(0);
         const auto& desc = *api.description(*instance);
         Pool(permanent, desc.permanentPool, desc.permanentPoolSize);
         Pool(transient, desc.transientPool, desc.transientPoolSize);
@@ -228,9 +237,10 @@ struct NrdContext {
         }
     }
     void Execute(ID3D12GraphicsCommandList* commands, const NrdFrame& frame) {
+        SetSettings(frame.maxAccumulatedFrames);
         nrd::CommonSettings common{};
         memcpy(common.worldToViewMatrix, frame.worldToView, 64); memcpy(common.worldToViewMatrixPrev, frame.worldToViewPrev, 64);
-        memcpy(common.viewToClipMatrix, frame.viewToClip, 64); memcpy(common.viewToClipMatrixPrev, frame.viewToClip, 64);
+        memcpy(common.viewToClipMatrix, frame.viewToClip, 64); memcpy(common.viewToClipMatrixPrev, frame.viewToClipPrev, 64);
         memcpy(common.cameraJitter, frame.jitter, 8); memcpy(common.cameraJitterPrev, frame.jitterPrev, 8);
         common.resourceSize[0] = common.resourceSizePrev[0] = common.rectSize[0] = common.rectSizePrev[0] = uint16_t(width);
         common.resourceSize[1] = common.resourceSizePrev[1] = common.rectSize[1] = common.rectSizePrev[1] = uint16_t(height);
@@ -316,4 +326,5 @@ API int NrdCreatePbr(ID3D12Device* device, uint32_t width, uint32_t height, NrdC
     catch (...) { strcpy_s(diagnostic, "Unknown PBR NRD initialization error"); return -3; }
 }
 API uint32_t NrdDispatchCount(const NrdContext* context) noexcept { return context ? context->dispatchCount : 0; }
+API uint32_t NrdMaxAccumulatedFrames(const NrdContext* context) noexcept { return context && context->settingsInitialized ? context->configuredMaxFrames : 0; }
 API void NrdDestroy(NrdContext* context) noexcept { delete context; }

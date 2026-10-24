@@ -13,7 +13,7 @@ using DXRDemo.Shaders.RayTrace;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
 
-/// <summary>A bounded, headless single-frame check, including optional NRD/DLSS or DLSS RR.</summary>
+/// <summary>Bounded headless single-frame and temporal camera-motion checks, including NRD/DLSS up to 4K.</summary>
 internal static class OfflineProbe
 {
     internal static async Task Run(string[] args)
@@ -23,10 +23,11 @@ internal static class OfflineProbe
         if (bistro && convergence) throw new ArgumentException("Choose either --bistro or --convergence.");
         bool contracts = args.Contains("--contracts"), production = args.Contains("--production");
         bool stable = args.Contains("--stable"), nrd = args.Contains("--nrd");
-        bool rr = args.Contains("--rr-4k");
+        bool rr = args.Contains("--rr-4k"), motion = args.Contains("--motion");
         bool dlss = args.Contains("--dlss-4k") || rr;
         if (rr && (nrd || stable)) throw new ArgumentException("Ray Reconstruction consumes raw signals; omit --nrd and --stable.");
-        if (dlss && !rr) nrd = true;
+        if (motion && (rr || contracts || cpuOnly)) throw new ArgumentException("--motion requires the NRD scene path and cannot be combined with --rr-4k, --contracts or --cpu-only.");
+        if ((dlss && !rr) || motion) nrd = true;
         if (nrd) stable = true;
         await OfflineFeatureChecks.RunCpu();
         ValidateLightWeights();
@@ -63,7 +64,7 @@ internal static class OfflineProbe
         Require(asset.TriangleCount > 0 && asset.Instances.Length > 0, "Empty packaged scene");
         if (args.Contains("--uncompressed")) asset = asset with { Textures = asset.Textures.Select(t => t with { Bc7Mips = null }).ToArray() };
         Require(asset.Textures.All(t => t.Width <= textureLimit && t.Height <= textureLimit), "Offline texture budget exceeded");
-        Require(Marshal.SizeOf<SceneMaterial>() == 432 && Marshal.SizeOf<SceneVertex>() == 80, "Scene ABI changed");
+        Require(Marshal.SizeOf<SceneMaterial>() == 432 && Marshal.SizeOf<SceneVertex>() == 80 && Marshal.SizeOf<NativeNrd.Frame>() == 384, "Scene/NRD ABI changed");
         var distribution = new SceneLightDistribution(asset);
         double mass = distribution.Emitters.Sum(e => (double)e.Meta.X * e.E1.W);
         if (distribution.Emitters.Length > 0)
@@ -127,7 +128,84 @@ internal static class OfflineProbe
             reconstruction.PrepareStablePlanes();
         }
         double setupMilliseconds = timer.Elapsed.TotalMilliseconds;
-        // The only DispatchRays frame in this command. No warmup, history, photon pass or NRC.
+        if (motion)
+        {
+            const int warmup = 16, orbitEnd = 32, panEnd = 40, fovEnd = 56;
+            int frameCount = Option("--motion-frames", 64, 256);
+            if (frameCount <= fovEnd) throw new ArgumentException("--motion-frames must be at least 57 to cover every camera phase, including stopped history recovery.");
+            string motionName = "";
+            int motionNameArgument = Array.IndexOf(args, "--motion-name");
+            if (motionNameArgument >= 0)
+            {
+                if (motionNameArgument + 1 >= args.Length) throw new ArgumentException("--motion-name requires a file-safe label.");
+                motionName = args[motionNameArgument + 1];
+                if (motionName.Length == 0 || motionName.Any(c => !char.IsLetterOrDigit(c) && c is not ('-' or '_')))
+                    throw new ArgumentException("--motion-name requires a file-safe label.");
+            }
+            string motionDirectory = Path.GetFullPath("output/rtxpt-motion" + (motionName.Length > 0 ? "-" + motionName : ""));
+            Directory.CreateDirectory(motionDirectory);
+            CameraFrame previous = camera;
+            float fovScale = 1;
+            double maxMotionError = 0;
+            var frames = new List<object>();
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                if (frame >= warmup && frame < orbitEnd) controller.Rotate(.015f, .0015f);
+                else if (frame >= orbitEnd && frame < panEnd) controller.Pan(.0015f, -.0005f);
+                else if (frame >= panEnd && frame < fovEnd) fovScale *= 1.015f;
+                CameraFrame current = controller.Advance(0, out _, out _) with { VerticalFov = camera.VerticalFov * fovScale };
+                Float2 jitter = reconstruction!.Jitter();
+                bool reset = reconstruction.HistoryReset;
+                backend.Trace(current, frame, samples, bounces, jitter, 1, raw, normals, surfaces, guide, signals,
+                    rayReconstruction: false, opaqueForNrd: true);
+                var motionTimer = Stopwatch.StartNew();
+                Require(reconstruction.Execute(raw, normals, surfaces, target!, default, 3, jitter, RayTraceDenoiserMode.NrdRelax,
+                    HdrRenderParameters.Default, 1.0 / 60, guide, current, signals, exposure: exposureStops, transparentBackend: backend),
+                    reconstruction.Status.Message);
+                Require(reconstruction.Status.NrdActive && reconstruction.NrdDispatchCount > 5, "Motion sequence silently fell back from NRD.");
+                uint expectedHistory = !reset && current != previous ? NativeNrd.MotionMaxAccumulatedFrames : NativeNrd.DefaultMaxAccumulatedFrames;
+                Require(reconstruction.NrdMaxAccumulatedFrames == expectedHistory, "NRD history length did not follow camera motion.");
+                double motionReconstructionMilliseconds = motionTimer.Elapsed.TotalMilliseconds;
+                double? motionError = null, stableMotionError = null;
+                int? stableMotionSamples = null;
+                if (frame is warmup or orbitEnd or panEnd)
+                {
+                    float[] vectors = ReconstructionProbe.ReadTexture(native, reconstruction.Motion, true);
+                    motionError = MeasureMotionError(current, previous, surfaces.ToArray(), vectors, width, height);
+                    Require(backend.StablePlanesActive && reconstruction.StableMotion != null, "Motion sequence did not execute stable-plane NRD.");
+                    float[] stableVectors = ReconstructionProbe.ReadTexture(native, reconstruction.StableMotion!, true);
+                    stableMotionError = MeasureMotionError(current, previous, signals.StableTransmissionSurface.ToArray(), stableVectors, width, height, out int stableSamples);
+                    stableMotionSamples = stableSamples;
+                    Require(stableSamples > 0, "Stable transmission motion was not exercised by the motion sequence.");
+                    motionError = Math.Max(motionError.Value, stableMotionError.Value);
+                    maxMotionError = Math.Max(maxMotionError, motionError.Value);
+                }
+                string file = Path.Combine(motionDirectory, $"frame-{frame:D3}.png");
+                SceneProbe.Save(target!, file);
+                frames.Add(new { frame, phase = frame < warmup ? "warmup" : frame < orbitEnd ? "orbit" : frame < panEnd ? "pan" : frame < fovEnd ? "fov" : "stopped",
+                    reset, maxAccumulatedFrames = reconstruction.NrdMaxAccumulatedFrames, jitterX = jitter.X, jitterY = jitter.Y, origin = current.Origin, forward = current.Forward,
+                    verticalFov = current.VerticalFov, motionError, stableMotionError, stableMotionSamples, traceGpuMilliseconds = backend.TraceGpuMilliseconds,
+                    reconstructionGpuMilliseconds = reconstruction.GpuMilliseconds, reconstructionMilliseconds = motionReconstructionMilliseconds });
+                Console.WriteLine($"Motion frame {frame:D2}/{frameCount - 1}: motion error = {(motionError.HasValue ? motionError.Value.ToString("F4") : "not sampled")} px");
+                previous = current;
+            }
+            for (ulong i = 0; i < messages.NumStoredMessagesAllowedByRetrievalFilter; i++)
+            {
+                var message = messages.GetMessage(i);
+                Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
+            }
+            Require(backend.TraceDispatchCount == frameCount && backend.PhotonBuildCount == 0, "Motion sequence frame contract violated");
+            var motionResult = new { scene = asset.Name, gpu = device.Name.ToString(), width, height, outputWidth = target!.Width, outputHeight = target.Height,
+                samples, bounces, textureLimit, frames = frameCount, stablePlanes = true, nrd = true, dlss,
+                temporalValidation = true, maxMotionError, frameDetails = frames };
+            string motionJson = JsonSerializer.Serialize(motionResult, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(Path.Combine(motionDirectory, "motion.json"), motionJson);
+            Console.WriteLine(motionJson);
+            Require(maxMotionError < .25, $"Camera motion vectors disagree with the previous camera by {maxMotionError:F4} pixels.");
+            Console.WriteLine($"PASS: {frameCount} offline NRD motion frames. {motionDirectory}");
+            return;
+        }
+        // The only DispatchRays frame in the single-frame command. No warmup, history, photon pass or NRC.
         backend.Trace(camera, 0, samples, bounces, default, 1, raw, normals, surfaces, guide, signals, rayReconstruction: rr, opaqueForNrd: stable);
         double frameMilliseconds = timer.Elapsed.TotalMilliseconds - setupMilliseconds;
         double reconstructionMilliseconds = 0, reconstructionGpuMilliseconds = 0;
@@ -260,6 +338,39 @@ internal static class OfflineProbe
         Console.WriteLine(json);
         Require(invalidSignals == 0 && maxRecompositionError < 1e-4, "NRD lobe signal recomposition disagrees with raw radiance");
         Console.WriteLine($"PASS: one offline frame. {Path.Combine(directory, name + ".png")}");
+    }
+
+    private static double MeasureMotionError(CameraFrame current, CameraFrame previous, Float4[,] surfaces, float[] motion, int width, int height)
+    {
+        double maximum = MeasureMotionError(current, previous, surfaces, motion, width, height, out int checkedPixels);
+        Require(checkedPixels > 100, "Insufficient geometry samples for motion-sequence projection verification");
+        return maximum;
+    }
+
+    private static double MeasureMotionError(CameraFrame current, CameraFrame previous, Float4[,] surfaces, float[] motion, int width, int height, out int checkedPixels)
+    {
+        static Matrix4x4 ViewProjection(CameraFrame camera, int width, int height) =>
+            Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up) *
+            Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, width / (float)height, camera.Near, camera.Far);
+        Matrix4x4 currentVp = ViewProjection(current, width, height), previousVp = ViewProjection(previous, width, height);
+        double maximum = 0;
+        checkedPixels = 0;
+        int stepX = Math.Max(1, width / 64), stepY = Math.Max(1, height / 64);
+        for (int y = 0; y < height; y += stepY) for (int x = 0; x < width; x += stepX)
+        {
+            Float4 surface = surfaces[y, x];
+            if (surface.W < 0) continue;
+            Vector4 world = new(surface.X, surface.Y, surface.Z, 1);
+            Vector4 a = Vector4.Transform(world, currentVp), b = Vector4.Transform(world, previousVp);
+            if (a.W <= 0 || b.W <= 0) continue;
+            float expectedX = (b.X / b.W - a.X / a.W) * width * .5f;
+            float expectedY = (a.Y / a.W - b.Y / b.W) * height * .5f;
+            int index = (y * width + x) * 2;
+            double error = Math.Max(Math.Abs(motion[index] - expectedX), Math.Abs(motion[index + 1] - expectedY));
+            maximum = Math.Max(maximum, error);
+            checkedPixels++;
+        }
+        return maximum;
     }
 
     private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }

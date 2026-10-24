@@ -14,10 +14,10 @@ RWTexture2D<float4> PackedNormal : register(u1);
 RWTexture2D<float> ViewZ : register(u2);
 RWTexture2D<float2> Motion : register(u3);
 RWTexture2D<float4> Output : register(u4);
-float2 ProjectPrevious(float3 position) {
-    float3 d=position-PreviousOrigin.xyz; float z=max(dot(d,PreviousForward.xyz),1e-6);
-    float2 ndc=float2(dot(d,PreviousRight.xyz)/(z*Forward.w*Size.x/Size.y),-dot(d,PreviousUp.xyz)/(z*Forward.w));
-    return (ndc*.5+.5)*Size.xy-Jitter.zw;
+float2 Project(float3 position,float3 origin,float3 forward,float3 right,float3 up,float tanHalfFov) {
+    float3 d=position-origin; float z=max(dot(d,forward),1e-6);
+    float2 ndc=float2(dot(d,right)/(z*tanHalfFov*Size.x/Size.y),-dot(d,up)/(z*tanHalfFov));
+    return (ndc*.5+.5)*Size.xy;
 }
 [numthreads(8,8,1)]
 void PrepareStable(uint3 tid:SV_DispatchThreadID) {
@@ -28,7 +28,8 @@ void PrepareStable(uint3 tid:SV_DispatchThreadID) {
     ViewZ[p]=valid?-z:-max(1e6,Size.z*2);
     Packed[p]=RELAX_FrontEnd_PackRadianceAndHitDist(valid?value.rgb:0,valid?value.w:0,true);
     PackedNormal[p]=NRD_FrontEnd_PackNormalAndRoughness(normalize(normal.xyz),normal.w,0);
-    Motion[p]=valid?ProjectPrevious(surface.xyz)-(float2(p)+.5):0;
+    Motion[p]=valid?Project(surface.xyz,PreviousOrigin.xyz,PreviousForward.xyz,PreviousRight.xyz,PreviousUp.xyz,PreviousForward.w)
+        -Project(surface.xyz,Origin.xyz,Forward.xyz,Right.xyz,Up.xyz,Forward.w):0;
 }
 [numthreads(8,8,1)]
 void ComposeStable(uint3 tid:SV_DispatchThreadID) {

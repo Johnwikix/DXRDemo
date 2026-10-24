@@ -13,7 +13,7 @@
 
 启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），提供 Bistro 街角、Convergence Test、Rainy Corner 和 Stanford 模型。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
 
-新配置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已有保存设置仍优先恢复。RTX 5070 Ti 上，Bistro 的 4K 单帧离线 GPU 总耗时为 30.7–32.0 ms，进入 30 FPS 的 GPU 预算；尚未验证连续呈现帧率和运动中的时间累积画质。
+新配置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已有保存设置仍优先恢复。RTX 5070 Ti 上，Bistro 的 4K 单帧离线 GPU 总耗时为 30.7–32.0 ms，进入 30 FPS 的 GPU 预算；已加入原生 4K NRD 与 1080p→4K NRD+DLSS 的离线相机运动序列验证，连续呈现帧率仍未验证。
 
 A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline is implemented from scratch with [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) — no SharpDX. Loads glTF 2.0 / GLB scenes, runs hardware-accelerated path tracing with official NVIDIA NRD denoising, vendor super resolution, HDR10 output and a swappable orbit / fly camera.
 

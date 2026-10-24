@@ -15,6 +15,35 @@ in the UI: REBLUR, SIGMA and other variants require their corresponding signals
 and integration. The PBR adapter supplies real diffuse/specular transport,
 first-bounce directional moments and matching material factors to the SH variant.
 
+## Camera-motion history (2026-10-24)
+
+The native ABI now carries both current and previous unjittered projection matrices.
+Previously `viewToClipMatrixPrev` incorrectly reused the current projection; the
+main and stable-plane motion shaders likewise projected the previous camera with
+the current FOV. Stable-plane motion now follows the same contract as primary
+motion: project the virtual surface through both unjittered cameras and subtract
+current from previous, without adding pixel-center or previous-jitter offsets.
+The C# and C++ frame layouts are both checked at 384 bytes.
+
+RELAX uses 8 accumulated frames while the unjittered camera changes and restores
+30 frames when it stops. This applies to primary, reflected and transmitted NRD
+contexts; fast-history limits remain below the selected main-history limit. The
+shorter moving history limits visible lag at 1 SPP without reducing stationary
+accumulation. It is separate from the projection fix and from explicit cuts,
+which still use `CLEAR_AND_RESTART`.
+
+`--offline --motion` covers native 4K NRD and 1080p→4K NRD+DLSS with a fixed
+warmup/orbit/pan/FOV/stop trajectory. It writes every frame and checks motion
+vectors against independent CPU matrices, NRD activity, history-length changes
+and D3D12 errors. `--nrd-motion` adds a noise-free world-anchored 4K signal so
+reprojection correctness can be distinguished from low-SPP temporal response.
+See [offline probe commands](../diagnostics/integration/README.md).
+On the RTX 5070 Ti, the 64-frame native 4K run reports 0.1251 pixels maximum
+sampled motion error, and the NRD+DLSS run reports 0.0628 pixels at its 1080p
+input resolution. The corrected noise-free 4K sequence's maximum linear RMSE is
+0.00204. Native readback confirms 8-frame histories during motion and restoration
+of 30-frame accumulation after the camera stops.
+
 ## PBR glass and upscaling (2026-09-30)
 
 The old integration denoised glass transmission as a specular lobe using the
