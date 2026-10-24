@@ -198,7 +198,7 @@ public sealed unsafe class DxrMeshBackend : IMeshTraceBackend
             normalRoughness != null ? 2 : surfaces != null ? 1 : 0, directLight != null ? 1 : 0, environment, jitter, null!, null!, output, normals, surfaces ?? output, normalRoughness ?? output, directLight ?? output,
             new(view.Origin.X, view.Origin.Y, view.Origin.Z), new(view.Forward.X, view.Forward.Y, view.Forward.Z),
             new(view.Right.X, view.Right.Y, view.Right.Z), new(view.Up.X, view.Up.Y, view.Up.Z),
-            new(light.Direction.X, light.Direction.Y, light.Direction.Z), new(light.Radiance.X, light.Radiance.Y, light.Radiance.Z));
+            new(light.Direction.X, light.Direction.Y, light.Direction.Z), new(light.Radiance.X, light.Radiance.Y, light.Radiance.Z), light.ConeHeight);
         void* pointer; _constants.Map(0, null, &pointer).CheckError();
         var loader = new ConstantLoader((nint)pointer); WriteConstants(in shader, ref loader, width, height); _constants.Unmap(0);
         Begin(); var cmd = _gpu.CommandList;

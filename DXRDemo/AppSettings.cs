@@ -28,6 +28,7 @@ internal sealed class AppSettings
     public double? SunAzimuth { get; set; }
     public double? SunElevation { get; set; }
     public double? SunIntensity { get; set; }
+    public double? SunAngularDiameter { get; set; }
     public bool? ModelLightingOnly { get; set; }
     public bool? HdrEnabled { get; set; }
     public bool? ShowDiagnostics { get; set; }

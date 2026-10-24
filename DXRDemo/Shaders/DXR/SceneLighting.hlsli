@@ -35,6 +35,8 @@ LightSample ProposeLight(inout uint rng,out float proposal) {
         proposal=areaProbability*Emitters[lo].e1.w;
     } else {
         result.index=min((uint)(Random(rng)*count),max(count,1u)-1);
+        // Preserve the sampled disk coordinates when a sun candidate is reused.
+        if(result.index==(uint)Control.w && SunDirection.w>0) result.bary=float2(Random(rng),Random(rng));
         proposal=(1-areaProbability)/max(count,1u);
     }
     return result;
@@ -45,6 +47,9 @@ void EvaluateLight(Surface s,float3 view,LightSample sample,out float3 d,out flo
         if(sample.index>=AnalyticLightCount()) return;
         Light light=AnalyticLight(sample.index); direction=-light.directionRange.xyz;
         float attenuation=1;
+        if(sample.index==(uint)Control.w && SunDirection.w>0) {
+            direction=SampleSun(sample.bary); attenuation=SunSampleWeight();
+        }
         if(light.positionType.w!=0) {
             direction=light.positionType.xyz-s.p; distance=length(direction); direction/=max(distance,1e-8);
             attenuation=RangeFalloff(light,distance)*SpotFalloff(light,-direction)/max(distance*distance,1e-8);
@@ -162,6 +167,9 @@ void PhotonGen() {
     float radius=CausticBounds.w,phi=2*PI*(reversebits(stratum)*2.3283064365386963e-10);
     if(light.positionType.w==0) {
         direction=SafeNormalize(light.directionRange.xyz,float3(0,-1,0));
+        if(lightIndex==(uint)Control.w && SunDirection.w>0) {
+            direction=-SampleSun(float2(Random(rng),Random(rng))); flux*=SunSampleWeight();
+        }
         float diskRadius=radius*sqrt(uEmission);
         origin=CausticBounds.xyz-direction*(radius+Limits.x*8)+Local(direction,float3(diskRadius*cos(phi),diskRadius*sin(phi),0));
         flux*=PI*radius*radius;

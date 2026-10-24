@@ -14,7 +14,7 @@ public readonly partial struct RayTraceShader(
     int maxBounces,
     int samples,
     IReadWriteNormalizedTexture2D<Float4> normalTexture,
-    Float3 SunDir, Float3 SunColor, float environment,
+    Float3 SunDir, Float3 SunColor, float sunConeHeight, float environment,
     Float3 cameraOrigin, Float3 cameraForward, Float3 cameraRight, Float3 cameraUp, float tanHalfFov) : IComputeShader<Float4>
 {
     private const float PI = 3.14159265359f;
@@ -359,32 +359,35 @@ public readonly partial struct RayTraceShader(
                         sampleMat = matType;
                     }
 
-                    float ndotl = Hlsl.Dot(normal, SunDir);
+                    Float3 sun = SunDir;
+                    if (sunConeHeight > 0) sun = SunSampling.Direction(SunDir, sunConeHeight, Random(ref rngState), Random(ref rngState));
+                    Float3 solarEnergy = SunColor * (2 / (2 - sunConeHeight));
+                    float ndotl = Hlsl.Dot(normal, sun);
                     if (ndotl > 0.0f)
                     {
                         Float3 shadowRo = position + normal * 0.001f;
-                        if (!ShadowHit(shadowRo, SunDir, 0.001f, 5000.0f))
+                        if (!ShadowHit(shadowRo, sun, 0.001f, 5000.0f))
                         {
                             if (matType == LAMB)
                             {
-                                accum += mask * matAlbedo * SunColor * ndotl * (1.0f / PI);
+                                accum += mask * matAlbedo * solarEnergy * ndotl * (1.0f / PI);
                             }
                             else if (matType == METAL)
                             {
                                 Float3 viewDir = -Hlsl.Normalize(rayRd);
-                                Float3 halfVec = Hlsl.Normalize(viewDir + SunDir);
+                                Float3 halfVec = Hlsl.Normalize(viewDir + sun);
                                 float ndoth = Hlsl.Max(Hlsl.Dot(normal, halfVec), 0.0f);
                                 float roughness = matParam * matParam + 0.001f;
                                 float spec = Hlsl.Pow(ndoth, 1.0f / roughness);
-                                accum += mask * matAlbedo * SunColor * spec * ndotl * 0.5f;
+                                accum += mask * matAlbedo * solarEnergy * spec * ndotl * 0.5f;
                             }
                             else if (matType == DIEL)
                             {
                                 Float3 viewDir = -Hlsl.Normalize(rayRd);
-                                Float3 halfVec = Hlsl.Normalize(viewDir + SunDir);
+                                Float3 halfVec = Hlsl.Normalize(viewDir + sun);
                                 float ndoth = Hlsl.Max(Hlsl.Dot(normal, halfVec), 0.0f);
                                 float fresnel = Schlick(ndoth, matParam);
-                                accum += mask * SunColor * Hlsl.Pow(ndoth, 10.0f) * fresnel;
+                                accum += mask * solarEnergy * Hlsl.Pow(ndoth, 10.0f) * fresnel;
                             }
                         }
                     }

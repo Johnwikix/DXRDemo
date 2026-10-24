@@ -96,9 +96,10 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         get => Snapshot.Sun;
         set
         {
-            if (!float.IsFinite(value.Azimuth) || !float.IsFinite(value.Elevation) || !float.IsFinite(value.Intensity)) return;
+            if (!float.IsFinite(value.Azimuth) || !float.IsFinite(value.Elevation) || !float.IsFinite(value.Intensity) || !float.IsFinite(value.AngularDiameter)) return;
             var normalized = value with { Azimuth = (value.Azimuth % 360 + 360) % 360,
-                Elevation = Math.Clamp(value.Elevation, -90, 90), Intensity = Math.Clamp(value.Intensity, 0, 100) };
+                Elevation = Math.Clamp(value.Elevation, -90, 90), Intensity = Math.Clamp(value.Intensity, 0, 100),
+                AngularDiameter = Math.Clamp(value.AngularDiameter, 0, 20) };
             Change(s => s with { Sun = normalized });
         }
     }
@@ -333,7 +334,7 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
         }
         else device.ForEach(signal, new RayTraceShader((float)time.TotalSeconds, new(width, height), _frame,
             hdr.IsHdrEnabled, hdr.SdrWhiteLevelInNits, hdr.MaxLuminanceInNits, s.Bounces, s.Samples, _normal!,
-            new(sun.Direction.X, sun.Direction.Y, sun.Direction.Z), new(sun.Radiance.X, sun.Radiance.Y, sun.Radiance.Z), environment,
+            new(sun.Direction.X, sun.Direction.Y, sun.Direction.Z), new(sun.Radiance.X, sun.Radiance.Y, sun.Radiance.Z), sun.ConeHeight, environment,
             new(camera.Origin.X,camera.Origin.Y,camera.Origin.Z), new(camera.Forward.X,camera.Forward.Y,camera.Forward.Z),
             new(camera.Right.X,camera.Right.Y,camera.Right.Z), new(camera.Up.X,camera.Up.Y,camera.Up.Z), MathF.Tan(camera.VerticalFov*.5f)));
         if (denoiserMode == RayTraceDenoiserMode.TemporalOnly)

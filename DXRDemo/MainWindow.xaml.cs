@@ -95,6 +95,7 @@ public sealed partial class MainWindow : WindowEx
         _settings.SunAzimuthBox.ValueChanged += (_, _) => ApplySunSettings();
         _settings.SunElevationBox.ValueChanged += (_, _) => ApplySunSettings();
         _settings.SunIntensityBox.ValueChanged += (_, _) => ApplySunSettings();
+        _settings.SunAngularDiameterBox.ValueChanged += (_, _) => ApplySunSettings();
         _settings.ModelLightingOnlyToggle.Toggled += (_, _) =>
         {
             if (!_syncingRayTraceParams && _activePass is RayTracePass pass)
@@ -257,6 +258,7 @@ public sealed partial class MainWindow : WindowEx
             _settings.SunAzimuthBox.Value = pass.Sun.Azimuth;
             _settings.SunElevationBox.Value = pass.Sun.Elevation;
             _settings.SunIntensityBox.Value = pass.Sun.Intensity;
+            _settings.SunAngularDiameterBox.Value = pass.Sun.AngularDiameter;
             _settings.ModelLightingOnlyToggle.IsOn = !pass.ExternalLightingEnabled;
         }
         finally
@@ -280,8 +282,9 @@ public sealed partial class MainWindow : WindowEx
     {
         if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
         double azimuth = _settings.SunAzimuthBox.Value, elevation = _settings.SunElevationBox.Value, intensity = _settings.SunIntensityBox.Value;
-        if (!double.IsFinite(azimuth) || !double.IsFinite(elevation) || !double.IsFinite(intensity)) return;
-        pass.Sun = new(_settings.SunToggle.IsOn, (float)azimuth, (float)elevation, (float)intensity);
+        double diameter = _settings.SunAngularDiameterBox.Value;
+        if (!double.IsFinite(azimuth) || !double.IsFinite(elevation) || !double.IsFinite(intensity) || !double.IsFinite(diameter)) return;
+        pass.Sun = new(_settings.SunToggle.IsOn, (float)azimuth, (float)elevation, (float)intensity, (float)diameter);
     }
 
     private void OnRenderScaleChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -367,6 +370,7 @@ public sealed partial class MainWindow : WindowEx
         RestoreNumber(_settings.SunAzimuthBox, s.SunAzimuth);
         RestoreNumber(_settings.SunElevationBox, s.SunElevation);
         RestoreNumber(_settings.SunIntensityBox, s.SunIntensity);
+        RestoreNumber(_settings.SunAngularDiameterBox, s.SunAngularDiameter);
         if (s.SunEnabled is { } sun) _settings.SunToggle.IsOn = sun;
         if (migrateDefault) _settings.ModelLightingOnlyToggle.IsOn = false;
         else if (s.ModelLightingOnly is { } modelLightingOnly) _settings.ModelLightingOnlyToggle.IsOn = modelLightingOnly;
@@ -423,6 +427,7 @@ public sealed partial class MainWindow : WindowEx
         _settings.SunAzimuthBox.ValueChanged += (_, _) => QueueSettingsSave();
         _settings.SunElevationBox.ValueChanged += (_, _) => QueueSettingsSave();
         _settings.SunIntensityBox.ValueChanged += (_, _) => QueueSettingsSave();
+        _settings.SunAngularDiameterBox.ValueChanged += (_, _) => QueueSettingsSave();
         _settings.SunToggle.Toggled += (_, _) => QueueSettingsSave();
         _settings.ModelLightingOnlyToggle.Toggled += (_, _) => QueueSettingsSave();
         HdrToggle.Toggled += (_, _) => QueueSettingsSave();
@@ -453,6 +458,7 @@ public sealed partial class MainWindow : WindowEx
         SunAzimuth = CaptureNumber(_settings.SunAzimuthBox),
         SunElevation = CaptureNumber(_settings.SunElevationBox),
         SunIntensity = CaptureNumber(_settings.SunIntensityBox),
+        SunAngularDiameter = CaptureNumber(_settings.SunAngularDiameterBox),
         ModelLightingOnly = _settings.ModelLightingOnlyToggle.IsOn,
         HdrEnabled = HdrToggle.IsOn,
         ShowDiagnostics = _settings.DiagnosticsToggle.IsOn,

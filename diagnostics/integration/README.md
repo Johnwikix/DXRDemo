@@ -74,12 +74,26 @@ Known baseline failures on the current renderer: `--glass-sr` fails the rough
 glass detail contrast assertion (0.02541), and `--lighting` fails the old ReSTIR
 convergence assertion. Both reproduce with the pre-OptiX production shader files.
 The targeted OptiX/thin-sheet transmission checks do not count these as passing.
+The full `--scene` suite also has a stale startup assertion requiring the night
+demo while the application now defaults to Kitchen. The scene sun toggle,
+intensity, hard-shadow and NRD checks run before that assertion and pass;
+`--sun-shadow`, `--sun-glass` and `--builtin-shadow` are independent entry points.
 
 `--sun-glass` isolates a directional sun shadow ray through the back of a thin
 IOR=1.9 window at 48.5 degrees. It first reproduced zero transmittance from one
 side versus 0.886646 when the same pane was flipped. The regression requires
 facing-independent thin-sheet Fresnel and an opaque-sheet negative control.
 Add `--legacy-trace` to exercise the fallback traversal.
+
+`--sun-shadow` traces a diffuse receiver and a knife edge at 1 m and 8 m using
+256 samples per pixel. It requires distance-dependent penumbrae for the default
+0.526-degree solar diameter, double width when the diameter doubles, and hard
+shadows at zero diameter. It also checks normalized unoccluded irradiance at
+0.526 and 20 degrees, exact lobe recomposition, and that stochastic solar light
+does not bypass denoising in Unfiltered. `output/sun-shadow/profiles.json` records
+the measured radiance profiles. Add `--legacy-trace` for the fallback traversal.
+`--builtin-shadow` separately checks the old Bunny DXR/compute tracers: delta-sun
+NRD bypass and finite-sun soft shadows, noisy-light routing and backend parity.
 
 `IntegrationProbe.exe --temporal-convergence` feeds deterministic noisy samples
 through the production linear and encoded Temporal shaders at native resolution.

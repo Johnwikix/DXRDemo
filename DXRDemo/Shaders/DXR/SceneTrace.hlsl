@@ -278,14 +278,16 @@ void DirectClassic(Surface s,float3 v,inout uint rng,AreaProposal proposal,inout
     diffuse=specular=unfiltered=momentD=momentS=0;
     if(s.roughness<.001 && !any(DiffuseAlbedo(s)>0)) return;
     float3 factorD,factorS; NRD_MaterialFactors(s.n,v,DiffuseAlbedo(s),F0(s),s.roughness,factorD,factorS);
-    // Evaluate analytic lights deterministically. Their sharp shadows must not be blurred with
-    // the indirect lobe hit distance. Stochastic transparent shadows still require denoising.
+    // Delta lights retain deterministic direct lighting. Finite solar disks and
+    // stochastic coverage use the denoised lobes, including their visibility noise.
     uint lightCount=(uint)Control.w+(SunRadiance.x>0?1:0);
     for(uint lightIndex=0;lightIndex<lightCount;lightIndex++) {
         Light light;
         if(lightIndex<(uint)Control.w) light=Lights[lightIndex];
         else { light.positionType=0; light.directionRange=float4(-SunDirection.xyz,0); light.colorIntensity=float4(SunRadiance.rgb,1); light.spot=0; }
         float3 l=-light.directionRange.xyz; float distance=CameraRight.w,attenuation=1;
+        bool solarDisk=lightIndex==(uint)Control.w && SunDirection.w>0;
+        if(solarDisk) { l=SampleSun(float2(Random(rng),Random(rng))); attenuation=SunSampleWeight(); }
         if(light.positionType.w!=0) {
             l=light.positionType.xyz-s.p; distance=length(l); l/=max(distance,1e-6); attenuation=1/max(distance*distance,1e-8);
             if(light.directionRange.w>0) attenuation*=saturate(1-pow(distance/light.directionRange.w,4));
@@ -296,7 +298,7 @@ void DirectClassic(Surface s,float3 v,inout uint rng,AreaProposal proposal,inout
             bool stochastic; float3 visibility=Visibility(Offset(s,l),l,distance-Limits.x*4,rng,stochastic,true);
             if(any(visibility>0)) {
                 float3 energy=light.colorIntensity.rgb*light.colorIntensity.w*attenuation*nl*visibility;
-                if(stochastic || Materials[s.material].flags.x==2) {
+                if(solarDisk || stochastic || Materials[s.material].flags.x==2) {
                     diffuse+=d*energy; specular+=r*energy;
                     momentD+=l*_NRD_Luminance(d*energy/factorD); momentS+=l*_NRD_Luminance(r*energy/factorS);
                 }

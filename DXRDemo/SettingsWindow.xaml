@@ -50,6 +50,8 @@
                     <NumberBox x:Name="SunElevationBox" x:FieldModifier="internal" Grid.Column="1" Header="高度角（°）" Minimum="-90" Maximum="90" Value="45" SmallChange="5" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="SunElevationBox" />
                 </Grid>
                 <NumberBox x:Name="SunIntensityBox" x:FieldModifier="internal" Header="太阳光强度" Minimum="0" Maximum="100" Value="3" SmallChange="0.5" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="SunIntensityBox" />
+                <NumberBox x:Name="SunAngularDiameterBox" x:FieldModifier="internal" Header="太阳角直径（°）" Minimum="0" Maximum="20" Value="0.526" SmallChange="0.1" SpinButtonPlacementMode="Compact" AutomationProperties.AutomationId="SunAngularDiameterBox" />
+                <TextBlock Text="约 0.53° 接近真实太阳；数值越大，半影越宽。0° 为硬阴影。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <TextBlock Text="方位角 0° 指向 +Z，90° 指向 +X；高度角 0° 为地平线，90° 为正上方。太阳光叠加于模型灯光，产生方向性硬阴影。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 <NumberBox x:Name="ExposureBox" x:FieldModifier="internal" Header="曝光补偿 EV（线性渲染管线）" Minimum="-16" Maximum="16" Value="0" SpinButtonPlacementMode="Compact" />
             </StackPanel>

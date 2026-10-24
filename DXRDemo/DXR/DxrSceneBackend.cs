@@ -344,7 +344,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0), Size = new(raw.Width, raw.Height, jitter.X, jitter.Y),
             Control = new(samples, bounces, frame, scene.Asset.Lights.Length), Environment = new(environment, scene.EmitterCount, scene.EmitterPower, optixGuides ? 1 : 0),
             Limits = new(MathF.Max(camera.Near * .01f, 1e-6f), Vector3.Distance(scene.Asset.Minimum, scene.Asset.Maximum), rayReconstruction ? 1 : 0, scene.HasTransmission ? 1 : 0),
-            SunDirection = new(sun.Direction, 0), SunRadiance = new(sun.Radiance, 0),
+            SunDirection = new(sun.Direction, sun.ConeHeight), SunRadiance = new(sun.Radiance, 0),
             PreviousOrigin = _previous.Origin, PreviousForward = _previous.Forward, PreviousRight = _previous.Right, PreviousUp = _previous.Up, PreviousSize = _previous.Size,
             Lighting = new(RestirEnabled && !ReferenceMode ? 1 : 0, 0, 8, 32), CausticBounds = scene.CausticBounds,
             CausticSettings = new(CausticsEnabled && !ReferenceMode && scene.HasRefractiveVolumes && (scene.Asset.Lights.Length > 0 || sun.Radiance.LengthSquared() > 0) ? PhotonCount : 0,

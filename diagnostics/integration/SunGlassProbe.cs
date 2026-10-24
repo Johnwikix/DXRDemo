@@ -35,7 +35,7 @@ internal static unsafe class SunGlassProbe
         var asset = original with { Materials = materials, Instances = original.Instances[..^1] };
         // The camera is inside the window. Sun shadow rays exit through its back face.
         var camera = CameraFrame.Look(new(0, 0, .5f), -Vector3.UnitZ, .4f, .001f, 100);
-        var sun = new SunLightSettings(true, 48.5f, 0, 4);
+        var sun = new SunLightSettings(true, 48.5f, 0, 4, 0);
         Float4[,] Render(SceneAsset scene)
         {
             backend.SetScene(scene);

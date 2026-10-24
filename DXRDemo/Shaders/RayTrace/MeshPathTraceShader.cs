@@ -11,7 +11,7 @@ public readonly partial struct MeshPathTraceShader(
     ReadWriteTexture2D<Float4> output, ReadWriteTexture2D<Rgba32, Float4> normals,
     ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4> normalRoughness, ReadWriteTexture2D<Float4> directLight,
     Float3 cameraOrigin, Float3 cameraForward, Float3 cameraRight, Float3 cameraUp,
-    Float3 sunDirection, Float3 sunRadiance) : IComputeShader
+    Float3 sunDirection, Float3 sunRadiance, float sunConeHeight) : IComputeShader
 {
     private static float Random(ref uint state)
     {
@@ -95,7 +95,6 @@ public readonly partial struct MeshPathTraceShader(
         Int2 pixel = ThreadIds.XY;
         if (pixel.X >= width || pixel.Y >= height) return;
         Float3 origin = cameraOrigin, forward = cameraForward, right = cameraRight, up = cameraUp;
-        Float3 sun = sunDirection;
         uint rng = (uint)(pixel.X * 73856093 + pixel.Y * 19349663 + frame * 83492791 + 12345);
         Float3 sum = Float3.Zero;
         Float3 directSum = Float3.Zero;
@@ -149,13 +148,20 @@ public readonly partial struct MeshPathTraceShader(
                 Float3 albedo = ground ? new Float3(0.7f,0.7f,0.7f) : new Float3(0.65f,0.3f,0.12f);
                 Float3 point = ro + rd * t;
                 ro = point + normal * 0.0002f;
+                Float3 sun = sunDirection;
+                float sunWeight = 1;
+                if (sunConeHeight > 0)
+                {
+                    sun = SunSampling.Direction(sunDirection, sunConeHeight, Random(ref rng), Random(ref rng));
+                    sunWeight = 2 / (2 - sunConeHeight);
+                }
                 float ndotl = Hlsl.Max(Hlsl.Dot(normal,sun),0);
                 float shadowT; int shadowId;
                 if (ndotl > 0 && Hlsl.Dot(sunRadiance,sunRadiance) > 0 && !HitMesh(ro,sun,1000,true,out shadowT,out shadowId))
                 {
-                    Float3 direct = throughput * albedo * sunRadiance * (ndotl / 3.141592654f);
+                    Float3 direct = throughput * albedo * sunRadiance * (ndotl * sunWeight / 3.141592654f);
                     color += direct;
-                    if (bounce == 0) directSum += direct;
+                    if (bounce == 0 && sunConeHeight == 0) directSum += direct;
                 }
                 // Cosine-weighted diffuse continuation, same PRNG and arithmetic in both backends.
                 float r = Hlsl.Sqrt(Random(ref rng));

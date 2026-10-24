@@ -28,6 +28,7 @@
     <Compile Include="EnvironmentSamplingProbe.cs" />
     <Compile Include="OptixProbe.cs" />
     <Compile Include="SunGlassProbe.cs" />
+    <Compile Include="SunShadowProbe.cs" />
     <Compile Include="OfflineFeatureChecks.cs" />
     <Content Include="Shaders/*" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />

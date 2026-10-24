@@ -354,7 +354,7 @@ internal static class SceneProbe
         Console.WriteLine($"PASS: MASK/BLEND (ratio {transparencyRatio:F3}), reactive mask, directional/spot lights, emissive surfaces, scale-invariant texture LOD.");
 
         using var sr = new SuperResolutionRenderer(device);
-        var sunlight = new SunLightSettings(true, 315, 40, 3);
+        var sunlight = new SunLightSettings(true, 315, 40, 3, 0);
         backend.SetScene(asset with { Lights = [] }); Trace(0, sun: sunlight, bounces: 1);
         float sunEnergy = Energy(raw.ToArray()); Require(sunEnergy > .005, "Enabled sun is dark");
         var litPixels = raw.ToArray();
@@ -458,7 +458,7 @@ internal static class SceneProbe
         VerifyDebug(debugQueue);
     }
 
-    private static async Task BuiltinShadowTest(GraphicsDevice device)
+    internal static async Task BuiltinShadowTest(GraphicsDevice device)
     {
         const int width=480,height=270;
         var mesh=await MeshData.LoadAsync(0);
@@ -470,7 +470,7 @@ internal static class SceneProbe
         using var direct=device.AllocateReadWriteTexture2D<Float4>(width,height);
         using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
         using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true);
-        var sun=new SunLightSettings(true,315,45,5.5f);
+        var sun=new SunLightSettings(true,315,45,5.5f,0);
         double maxError=0;int shadowPixels=0;
         foreach(float yaw in new[]{0f,.35f})
         {
@@ -497,6 +497,23 @@ internal static class SceneProbe
         }
         Require(shadowPixels>100 && maxError<.0005,$"Bunny shadow edges changed: pixels={shadowPixels}, max={maxError}");
         Console.WriteLine($"PASS: built-in Bunny NRD direct shadows, {shadowPixels} shadow pixels; still/moving max error={maxError:E2}.");
+        // The optional finite disk must work in both legacy backends and enter NRD's noisy input.
+        var softSun=sun with { AngularDiameter=2 };
+        var softCamera=CameraFrame.FromOrbit(0,.165f,2.7f);
+        backend.Trace(mesh,width,height,16,1,0,default,2.7f,raw,normal,surface,default,guide,softCamera,softSun,direct,0);
+        var hardware=raw.ToArray();var positions=surface.ToArray();
+        Require(Energy(direct.ToArray())<1e-7,"Legacy solar disk bypasses denoising");
+        int penumbra=0;double unoccluded=softSun.Radiance.X*softSun.Direction.Y*.7/Math.PI;
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++)
+            if(positions[y,x].W>0 && Math.Abs(positions[y,x].Y)<.001 && hardware[y,x].X>unoccluded*.1 && hardware[y,x].X<unoccluded*.9)penumbra++;
+        Require(penumbra>8,"Legacy mesh solar disk has no partial shadow pixels");
+        using var software=new SoftwareMeshBackend();software.Initialize(device);
+        software.Trace(mesh,width,height,16,1,0,default,2.7f,raw,normal,surface,default,guide,softCamera,softSun,direct,0);
+        var softwarePixels=raw.ToArray();double error=0;
+        for(int y=0;y<height;y++)for(int x=0;x<width;x++)error+=Math.Pow(hardware[y,x].X-softwarePixels[y,x].X,2);
+        double rmse=Math.Sqrt(error/(width*height));
+        Require(rmse<.005,"Software/hardware solar disk sampling diverges");
+        Console.WriteLine($"PASS: built-in finite sun, {penumbra} partial shadow pixels; software/hardware RMSE={rmse:E2}.");
     }
     private static unsafe ID3D12Device5 NativeDevice(GraphicsDevice device)
     { Guid iid=typeof(ID3D12Device5).GUID; nint pointer; InteropServices.GetID3D12Device(device,&iid,(void**)&pointer); return new(pointer); }
