@@ -74,6 +74,22 @@ the actual application Bistro path at 1 SPP / 8 bounces, 67% input, 1280×720
 output and the first available DLSS/XeSS/FSR provider. Add `--temporal` to compare
 Temporal instead of OptiX; captures go to `output/sr-bistro`.
 
+`IntegrationProbe.exe --glass-temporal` executes the actual FSR/XeSS/DLSS SDKs
+with Temporal and OptiX on a 384×240 striped-background glass fixture, at 50%
+input and 1 SPP. It measures 16 of 48 stationary frames and eight camera-motion
+frames against independent optical depth, motion and radiance references.
+Assertions cover contrast, frame RMS, optical motion/depth, moving detail,
+energy, actual OptiX execution and D3D12 Error/Corruption messages. Add one of
+`--volume` (closed 0.01-thick slab), `--partial` (60% transmission), `--reflective`
+(reflection-dominant IOR), `--rough` (0.02 roughness) or `--layered` (two thin
+sheets). `--hdr-detail` adds bright emission with production firefly clipping;
+`--scale 67` / `--scale 100` check other input ratios. `--fsr-only` bounds
+iteration. JSON/PNG results go to `output/glass-temporal[-variant][-hdr][-scale]`.
+Opaque stripe reference classification, volume instance identity and analytic
+moving-image checks keep the feedback independent of the reconstruction shader.
+The partial-transmission energy check allows its additional foreground diffuse
+contribution. These tests do not replace noisy-scene or curved-glass evaluation.
+
 `IntegrationProbe.exe --optix` requires actual OptiX execution and checks noise
 reduction against known radiance, an independent raw arithmetic mean, oblique
 thin-glass background transmission, moving-camera motion vectors, camera/jitter

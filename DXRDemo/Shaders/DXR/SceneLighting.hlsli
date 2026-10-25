@@ -213,7 +213,7 @@ void PhotonGen() {
         float3 next;
         if(pick<fresnel) next=reflect(direction,micro);
         else if(pick<fresnel+(1-fresnel)*s.transmission) {
-            next=volume?refract(direction,micro,eta):-reflect(direction,micro); transmitted=true;
+            next=volume?refract(direction,micro,eta):reflect(reflect(direction,micro),s.n); transmitted=true;
             if(dot(next,next)<1e-10) { next=reflect(direction,micro); transmitted=false; }
         } else return;
         if((dot(s.g,next)<0)!=transmitted) return;

@@ -55,6 +55,11 @@ void ShaderContracts() {
         float3 view=normalize(float3(.2+pixel.y*.15,.1,1));
         result=Scatter(s,view,float3(.2,.3,.99));
         error+=!result.valid+!result.transmitted+length(result.direction+view);
+        // The rough thin-sheet model must approach the same direction continuously
+        // as roughness tends to zero, instead of flipping its tangential component.
+        s.roughness=.002+pixel.y*.001;
+        result=Scatter(s,view,float3(.2,.3,.99));
+        error+=!result.valid+!result.transmitted+max(length(result.direction+view)-.001,0);
     } else if(test==7) {
         uint rng=42, expected=pixel.y==3?0:pixel.y+2;
         float x=pixel.y==0?3.25:pixel.y==1?5.75:pixel.y==2?9.25:.25;

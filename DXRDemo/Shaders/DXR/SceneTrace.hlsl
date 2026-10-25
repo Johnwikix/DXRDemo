@@ -47,7 +47,7 @@ RWTexture2D<float4> NormalRoughness : register(u3);
 RWTexture2D<float4> Diffuse : register(u4);
 RWTexture2D<float4> Specular : register(u5);
 RWTexture2D<float4> Albedo : register(u6);
-RWTexture2D<float4> Unfiltered : register(u7); // Emission, sky and deterministic primary direct lighting.
+RWTexture2D<float4> Unfiltered : register(u7); // Emission/sky/direct terms, including bounded deterministic optical paths.
 RWTexture2D<float4> SpecularGuide : register(u8); // RR: integrated reflectance RGB, deterministic mirror hit distance A.
 RWTexture2D<float4> DiffuseSh : register(u13);
 RWTexture2D<float4> SpecularSh : register(u14);
@@ -378,27 +378,47 @@ void AccumulatePath(float3 value,int lobe,float3 direction,float3 factorD,float3
     else { sumS+=value; momentS+=direction*_NRD_Luminance(value/factorS); }
 }
 
-// Dedicated unlit OptiX features. Smooth glass/mirrors follow the dominant ideal
-// path to the visible surface; stochastic beauty paths and NRD/RR features are unchanged.
-void OptixGuide(Surface s,float3 direction,uint instance,out float3 albedo,out float3 normal) {
+// Unlit OptiX features and conventional SR optical geometry. Follow the dominant
+// ideal glass/mirror path; NRD/RR keep their separate feature conventions.
+void OptixGuide(Surface s,float3 direction,uint instance,out float3 albedo,out float3 normal,out float4 opticalSurface,out uint interfaces) {
     PathState path=BeginPath(CameraOrigin.xyz,direction,CameraForward.w*2/Size.y);
-    float3 tint=1; float3x3 rotation=float3x3(1,0,0,0,1,0,0,0,1); uint rng=0x4c1539u;
+    interfaces=0;
+    float3 tint=1,translation=0; float3x3 rotation=float3x3(1,0,0,0,1,0,0,0,1),image=rotation; uint rng=0x4c1539u;
     for(uint bounce=0;bounce<8;bounce++) {
         if(!SplitSurface(s)) break;
         float eta=s.thickness>0?InterfaceEta(path,s,instance):1/s.ior;
-        bool transmitted=s.transmission>0 && Fresnel(saturate(dot(-path.direction,s.n)),eta)<.5;
+        float f=Fresnel(saturate(dot(-path.direction,s.n)),eta);
+        float reflection=Luminance(ReflectionFresnel(s,saturate(dot(-path.direction,s.n)),f));
+        float transmission=(1-f)*s.transmission*(s.thickness>0?1:Luminance(s.base));
+        float diffuse=(1-f)*Luminance(DiffuseAlbedo(s));
+        if(diffuse>max(reflection,transmission)) break;
+        interfaces++;
+        bool transmitted=transmission>reflection;
         float3 outgoing=transmitted?(s.thickness>0?refract(path.direction,s.n,eta):path.direction):reflect(path.direction,s.n);
         if(dot(outgoing,outgoing)<1e-8) { transmitted=false; outgoing=reflect(path.direction,s.n); }
-        rotation=mul(rotation,InterfaceTransform(s,path.direction,outgoing,transmitted));
+        float3x3 local=InterfaceTransform(s,path.direction,outgoing,transmitted);
+        float3x3 positionTransform=local;
+        if(transmitted && s.thickness>0) {
+            // Preserve tangential coordinates and map the refracted ray back to
+            // its incident ray. At normal incidence a slab's apparent thickness
+            // is thickness/IOR; pure rotation incorrectly leaves its depth intact.
+            float scale=clamp(eta*abs(dot(path.direction,s.n))/max(abs(dot(outgoing,s.n)),1e-6),.001,1000);
+            float3 n=s.n;
+            positionTransform=float3x3(1,0,0,0,1,0,0,0,1)+(scale-1)*float3x3(n.x*n,n.y*n,n.z*n);
+        }
+        translation+=mul(image,s.p-mul(positionTransform,s.p)); image=mul(image,positionTransform);
+        rotation=mul(rotation,local);
         tint*=transmitted?s.transmission*(s.thickness>0?float3(1,1,1):s.base):F0(s);
         if(transmitted && s.thickness>0 && !UpdateMedium(path,s,instance)) break;
         path.origin=Offset(s,outgoing); path.direction=outgoing;
         Payload hit=Trace(path.origin,path.direction,CameraRight.w,false,rng,true);
-        if(hit.instance==0xffffffff) { albedo=0; normal=0; return; }
+        if(hit.instance==0xffffffff) { albedo=0; normal=0; opticalSurface=float4(SafeNormalize(mul(image,path.direction),path.direction),-1); return; }
         s=Evaluate(hit.instance,hit.primitive,hit.bary,hit.t*path.coneSpread,-outgoing); instance=hit.instance;
     }
     albedo=saturate(tint*(DiffuseAlbedo(s)+F0(s)+s.transmission));
     normal=SafeNormalize(mul(rotation,s.n),s.n);
+    float3 position=mul(image,s.p)+translation;
+    opticalSurface=float4(position,length(position-CameraOrigin.xyz));
 }
 
 void RenderPixel(bool transparentPass) {
@@ -421,12 +441,17 @@ void RenderPixel(bool transparentPass) {
     float3 stableReflection=0,stableTransmission=0;
     float4 reflectionSurface=float4(0,0,0,-1),transmissionSurface=reflectionSurface;
     float4 reflectionNormal=float4(0,0,1,1),transmissionNormal=reflectionNormal;
-    bool stableSplit=false;
+    bool stableSplit=false,splitGlass=false,srGlass=false;
+    uint glassBranches=2,glassStrata=1;
+    float4 closestGlassSurface=primarySurface,closestGlassNormal=0;
     if(guide.instance!=0xffffffff) {
         Surface g=Evaluate(guide.instance,guide.primitive,guide.bary,guide.t*CameraForward.w*2/Size.y,-primary);
         feedback.position=g.p; feedback.normal=g.n; feedback.material=g.material; feedback.roughness=g.roughness;
         glass=g.transmission>0;
         stableSplit=PathSettings.w!=0 && !coverage && SplitSurface(g);
+        srGlass=((uint)Environment.w&2)!=0 && !coverage && glass && g.roughness<=.05;
+        splitGlass=glass && (stableSplit || srGlass);
+        if(srGlass && g.transmission<1) glassBranches=3;
         if(stableSplit) {
             StableGuide(g,primary,guide.instance,false,reflectionSurface,reflectionNormal);
             if(glass) StableGuide(g,primary,guide.instance,true,transmissionSurface,transmissionNormal);
@@ -434,7 +459,22 @@ void RenderPixel(bool transparentPass) {
         if(!coverage) GatherCaustics(g,-primary,primaryCausticD,primaryCausticS,causticMomentD,causticMomentS);
         primarySurface=float4(g.p,guide.t); primaryNormal=g.n; primaryAlbedo=DiffuseAlbedo(g);
         roughness=g.roughness; primaryMaterial=g.material; reactive=coverage||g.transmission>0?1:0;
-        if(Environment.w!=0) OptixGuide(g,primary,guide.instance,optixAlbedo,optixNormal);
+        if(((uint)Environment.w&1)!=0 || srGlass) {
+            float4 opticalSurface;
+            uint opticalInterfaces;
+            OptixGuide(g,primary,guide.instance,optixAlbedo,optixNormal,opticalSurface,opticalInterfaces);
+            if(srGlass) {
+                // Bound splitting to two interfaces, including a slab's exit or
+                // a second window pane. Single sheets retain only two paths.
+                glassStrata=g.thickness>0 || opticalInterfaces>1?2:1;
+                closestGlassSurface=primarySurface; closestGlassNormal=float4(g.n,guide.instance+1);
+                primarySurface=opticalSurface; primaryNormal=optixNormal; primaryAlbedo=optixAlbedo;
+                float f=Fresnel(saturate(dot(-primary,g.n)),g.eta);
+                float t=(1-f)*g.transmission*(g.thickness>0?1:Luminance(g.base));
+                float d=(1-f)*Luminance(DiffuseAlbedo(g));
+                reactive=clamp(1-max(f,max(t,d))/max(f+t+d,1e-6),.08,.45);
+            }
+        }
         NRD_MaterialFactors(g.n,-primary,primaryAlbedo,F0(g),roughness,factorD,factorS);
         // Split-sum environment BRDF approximation (linear material reflectance, never lit radiance).
         float4 c0=float4(-1,-.0275,-.572,.022),c1=float4(1,.0425,1.04,-.04);
@@ -451,7 +491,7 @@ void RenderPixel(bool transparentPass) {
     }
     float3 cachedSum=0;
     float hitD=0,hitS=NRD_FrontEnd_SpecHitDistAveraging_Begin(),countD=0;
-    uint pathCount=(uint)Control.x*(transparentPass || (stableSplit && glass)?2u:1u);
+    uint pathCount=(uint)Control.x*(transparentPass || splitGlass?glassBranches*glassStrata:1u);
     for(uint sample=0;sample<pathCount;sample++) {
         uint sampleIndex=(uint)Control.z*pathCount+sample;
         float3 rayDirection=primary;
@@ -461,7 +501,7 @@ void RenderPixel(bool transparentPass) {
         }
         PathState path=BeginPath(CameraOrigin.xyz,rayDirection,CameraForward.w*2/Size.y);
         float secondaryDistance=0; int firstLobe=-1; float3 firstDirection=0;
-        bool hitDistanceRecorded=false;
+        bool hitDistanceRecorded=false,deterministicPath=false;
         uint plane=0;
         uint bounce=0;
         for(uint step=0;step<(uint)Control.y+16 && bounce<(uint)Control.y;step++) {
@@ -478,8 +518,9 @@ void RenderPixel(bool transparentPass) {
                     else NRD_FrontEnd_SpecHitDistAveraging_Add(hitS,min(secondaryDistance,65504));
                 }
                 float3 value=path.throughput*Sky(path.direction)*(bounce==0||path.transmitted||path.delta?1:Weight(path.previousPdf,EnvironmentPdf(path.direction)));
-                if(bounce>0) value*=FireflyWeight(value,path.fireflyK);
-                if(bounce==0) sumE+=value;
+                bool sharpSky=deterministicPath && (hit.transparency&1)==0;
+                if(bounce>0 && !sharpSky) value*=FireflyWeight(value,path.fireflyK);
+                if(bounce==0 || sharpSky) sumE+=value;
                 else AccumulatePath(value,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS,plane,stableReflection,stableTransmission);
                 break;
             }
@@ -488,6 +529,7 @@ void RenderPixel(bool transparentPass) {
             Surface s=Evaluate(hit.instance,hit.primitive,hit.bary,path.coneWidth,-path.direction);
             if(s.thickness>0) s.eta=InterfaceEta(path,s,hit.instance);
             Material m=Materials[s.material];
+            bool sharpDetail=deterministicPath && (hit.transparency&1)==0;
             if(path.mediumCount>0) path.throughput*=exp(-MediumAbsorption(path,ActiveMedium(path))*hit.t);
             else if(s.front==0 && s.transmission>0 && s.thickness>0) path.throughput*=exp(-Absorption(m)*hit.t);
             if(FalseInterface(path,s,hit.instance)) {
@@ -510,8 +552,8 @@ void RenderPixel(bool transparentPass) {
             float emissionWeight=bounce==0||path.transmitted||path.delta||s.emissionPdf==0?1:Weight(path.previousPdf,lightPdf);
             float3 radiance=s.emission*emissionWeight;
             if(m.flags.w!=0) radiance+=s.base;
-            if(bounce>0) radiance*=FireflyWeight(path.throughput*radiance,path.fireflyK);
-            if(bounce==0) sumE+=path.throughput*radiance;
+            if(bounce>0 && !sharpDetail) radiance*=FireflyWeight(path.throughput*radiance,path.fireflyK);
+            if(bounce==0 || sharpDetail) sumE+=path.throughput*radiance;
             else AccumulatePath(path.throughput*radiance,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS,plane,stableReflection,stableTransmission);
             if(m.flags.w!=0) break;
             float3 directD,directS,unfiltered,directMomentD,directMomentS;
@@ -523,21 +565,29 @@ void RenderPixel(bool transparentPass) {
             float3 causticD=primaryCausticD,causticS=primaryCausticS,cmD=causticMomentD,cmS=causticMomentS;
             if(bounce>0 || coverage || PathSettings.x!=0) GatherCaustics(s,-path.direction,causticD,causticS,cmD,cmS);
             directD+=causticD; directS+=causticS;
-            float filter=FireflyWeight(path.throughput*(directD+directS+unfiltered),path.fireflyK);
+            float3 deterministicDirect=unfiltered;
+            float filter=FireflyWeight(path.throughput*(directD+directS+(sharpDetail?0:unfiltered)),path.fireflyK);
             directD*=filter; directS*=filter; unfiltered*=filter;
             directMomentD*=filter; directMomentS*=filter; cmD*=filter; cmS*=filter;
             if(bounce==0) {
                 sumD+=path.throughput*directD; sumS+=path.throughput*directS; sumE+=path.throughput*unfiltered;
                 momentD+=directMomentD+cmD; momentS+=directMomentS+cmS;
             } else {
-                float3 localRadiance=directD+directS+unfiltered;
+                if(sharpDetail) sumE+=path.throughput*deterministicDirect;
+                float3 localRadiance=directD+directS+(sharpDetail?0:unfiltered);
                 AccumulatePath(path.throughput*localRadiance,firstLobe,firstDirection,factorD,factorS,sumD,sumS,momentD,momentS,plane,stableReflection,stableTransmission);
             }
             float3 u=ScatterSamples(pixel,sampleIndex,bounce);
-            // Deterministic first-event splitting keeps both glass lobes present in NRD.
-            float splitWeight=1;
-            if((transparentPass || (stableSplit && glass)) && bounce==0) {
-                if(s.transmission==1) {
+            // Stratify first-event glass closures for NRD and conventional SR.
+            float splitWeight=1; bool splitSecondary=false;
+            if((transparentPass || splitGlass) && bounce==0) {
+                if(srGlass && glassBranches==3) {
+                    float p=SpecProbability(s,-path.direction),t=TransmissionProbability(s);
+                    float pt=(1-p)*t,pd=(1-p)*(1-t);
+                    uint branch=sample%3;
+                    u.z=branch==0?p*.5:branch==1?p+pt*.5:p+pt+pd*.5;
+                    splitWeight=3*(branch==0?p:branch==1?pt:pd);
+                } else if(s.transmission==1) {
                     float p=SpecProbability(s,-path.direction);
                     bool reflection=(sample&1u)==0;
                     float pTrans=(1-p)*TransmissionProbability(s);
@@ -545,13 +595,19 @@ void RenderPixel(bool transparentPass) {
                     splitWeight=2*(reflection?p:pTrans);
                 } else u.z=(u.z+(sample&1u))*.5;
             }
+            if(srGlass && glassStrata==2 && bounce==1 && s.transmission==1 && s.roughness<.001) {
+                float p=SpecProbability(s,-path.direction),pt=(1-p)*TransmissionProbability(s);
+                bool reflection=((sample/glassBranches)&1u)==0;
+                u.z=reflection?p*.5:p+pt*.5; splitWeight=2*(reflection?p:pt); splitSecondary=true;
+            }
             ScatterResult scatter=Scatter(s,-path.direction,u);
             path.previousLightProposal=proposal;
             scatter.weight*=splitWeight;
             if(bounce==0) {
                 firstLobe=(int)scatter.lobe; firstDirection=scatter.direction;
+                deterministicPath=srGlass && scatter.delta && hit.instance==guide.instance;
                 if(stableSplit && hit.instance==guide.instance && scatter.lobe==1) plane=scatter.transmitted?2:1;
-            }
+            } else deterministicPath=deterministicPath && splitSecondary && scatter.delta && (hit.transparency&1)==0;
             if(!AdvancePath(path,s,hit.instance,scatter)) break;
             if(Control.y==1 && bounce==0) {
                 Payload secondary=Trace(path.origin,path.direction,CameraRight.w,false,rng);
@@ -591,12 +647,12 @@ void RenderPixel(bool transparentPass) {
     StableReflectionNormal[pixel]=reflectionNormal; StableTransmissionNormal[pixel]=transmissionNormal;
     Normals[pixel]=float4(primaryNormal*.5+.5,min(primaryMaterial,254)/255.0);
     Surfaces[pixel]=primarySurface;
-    NormalRoughness[pixel]=Environment.w!=0?float4(optixNormal,roughness):float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
+    NormalRoughness[pixel]=((uint)Environment.w&1)!=0?float4(optixNormal,roughness):float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
     DiffuseFactor[pixel]=float4(factorD,1); SpecularFactor[pixel]=float4(factorS,1);
-    GlassSurface[pixel]=primarySurface;
-    GlassFallback[pixel]=0; GlassNormal[pixel]=0;
+    GlassSurface[pixel]=srGlass?closestGlassSurface:primarySurface;
+    GlassFallback[pixel]=0; GlassNormal[pixel]=srGlass?closestGlassNormal:0;
     SpecularGuide[pixel]=float4(specularAlbedo,mirrorDistance);
-    Albedo[pixel]=float4(Environment.w!=0?optixAlbedo:primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
+    Albedo[pixel]=float4(((uint)Environment.w&1)!=0?optixAlbedo:primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
 }
 #ifdef DXR_VALIDATE_CONTRACTS
 #include "PathContracts.hlsli"

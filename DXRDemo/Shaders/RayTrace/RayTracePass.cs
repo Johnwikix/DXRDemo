@@ -317,7 +317,9 @@ public sealed class RayTracePass : IShaderPass, IRenderDiagnostics
                 _sceneBackend.Trace(camera, _frame, s.Samples, s.Bounces, jitter, environment, _raw!, _normal!, _surfaces!, _normalRoughness!,
                     _pbrSignals!, sun, _reconstruction.Active == ReconstructionMode.DlssRayReconstruction, lightingCut, nrd,
                     optixGuides: s.Denoiser == RayTraceDenoiserMode.Optix && _reconstruction.Active != ReconstructionMode.DlssRayReconstruction,
-                    textureLodBias: _reconstruction.TextureLodBias);
+                    textureLodBias: _reconstruction.TextureLodBias,
+                    stabilizeGlass: (_reconstruction.Active is ReconstructionMode.Dlss or ReconstructionMode.XeSS or ReconstructionMode.Fsr) &&
+                        (denoiserMode is RayTraceDenoiserMode.TemporalOnly or RayTraceDenoiserMode.Optix));
             }
             else _backend.Trace(mesh!, inputWidth, inputHeight, s.Samples, s.Bounces, _frame, s.Orbit, s.Distance, _raw!, _normal!, _surfaces!, jitter, _normalRoughness, camera, sun, _directLight, environment);
             bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, s.Orbit, s.Distance, jitter, denoiserMode, hdr, elapsed, _normalRoughness, camera, _pbrSignals, s.Exposure, _directLight, pbr && nrd ? _sceneBackend : null);

@@ -37,12 +37,15 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    reprojects lighting, with clipping and a 16-frame bound. Remodulation uses the current
    jittered reflectance; deterministic primary lighting and emission are added
    from the current frame. This preserves the subpixel detail the SR SDK needs,
-   while accumulating transport noise. Transparent/coverage surfaces reject this
-   lighting history because their primary depth cannot reproject the background.
+   while accumulating transport noise. Smooth glass uses the dominant visible
+   optical surface for depth and motion, including reflected virtual positions
+   and a volume's apparent thickness. Its lighting can therefore retain history.
+   Coverage transparency and unsupported rough transmission still reject it.
    OptiX receives the remodulated noisy contribution with current-frame guides;
    it no longer restarts its noisy input solely because SR jitter changed.
    The spatial AI output never enters the lighting history. Primary unfiltered
-   detail is composed after AI, then the actual SR SDK runs once. This differs
+   detail, including deterministically split smooth-glass paths, is composed after
+   AI, then the actual SR SDK runs once. This differs
    from both native progressive OptiX and DLSS Ray Reconstruction.
    These are floating-point means, not a claim of infinite numerical precision.
    Removing the fixed cap does not make heavy-tailed 1-SPP transport converge
@@ -99,6 +102,72 @@ resources in unused slots. OptiX composition has its own table to avoid overwrit
 encoding descriptors before their command list executes. Resources and descriptors
 are reused in steady state.
 No whole-application zero-allocation or FPS claim is made.
+
+## Glass with Temporal / OptiX and conventional SR
+
+For transmission with roughness at most 0.05 and no BLEND coverage, the tracer
+follows the dominant reflection/transmission closure to derive a virtual surface.
+The choice includes diffuse and tinted transmission weights. Reflection folds
+position about the interface; volume refraction also scales apparent depth.
+Physical closest-glass metadata remains separate. A reactive value based on
+competing closure energy (bounded to 0.08–0.45) limits trust in this single motion
+vector instead of unconditionally disabling history. The approach follows the
+[virtual-surface motivation described by NRD](https://github.com/NVIDIA-RTX/NRD),
+but does not run NRD in this path. Reactive transparency guidance is documented
+by [AMD](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/super-resolution-upscaler/).
+
+First-event reflection/transmission are stratified at every SPP; partially
+transmitting materials also sample their diffuse closure. A second ideal full
+transmission interface is stratified for a slab or another pane. This costs two
+paths for a full thin sheet, three for partial transmission, and twice that when
+the second interface is enabled; the extra work is restricted to glass pixels.
+Weights preserve the original sampling probabilities. Emission, sky and existing
+deterministic direct terms reached through these fully deterministic delta
+prefixes bypass spatial AI and stochastic firefly clipping. Noisy soft-light and
+indirect terms still enter the lighting history/denoiser. Rough thin-sheet
+scattering now approaches straight transmission continuously as roughness
+approaches zero, instead of reversing the tangential direction.
+
+This is one dominant motion vector per pixel, not independent histories for every
+optical layer. Curved refraction, competing moving reflections, more than two
+interfaces, frosted glass and BLEND coverage can retain artifacts. Native
+progressive accumulation, NRD's separate glass composition and DLSSD do not use
+this SR-specific stabilization path.
+
+`IntegrationProbe.exe --glass-temporal` checks actual FSR/XeSS/DLSS execution with
+Temporal and OptiX: 48 stationary frames, eight camera translations, independent
+analytic optical motion/depth, stripe contrast, temporal RMS and energy.
+`--volume`, `--partial`, `--reflective`, `--rough`, `--layered`, `--hdr-detail` and
+`--scale 67` / `--scale 100` exercise the corresponding cases. These controlled
+fixtures isolate glass reconstruction; they are not a general noisy-scene or FPS
+claim.
+
+2026-10-25, RTX 5070 Ti / NVIDIA 617.14: all 54 actual SDK combinations passed
+(seven 50% fixtures × three providers × two denoisers, plus thin glass at 67%
+and 100%). At 50%, contrast ranges and maximum stationary linear RMS across
+providers/denoisers were:
+
+| Fixture | Retained stripe contrast | Maximum frame RMS |
+| --- | ---: | ---: |
+| Thin glass | 99.7–99.9% | 0.001133 |
+| Closed slab | 99.4–99.9% | 0.001269 |
+| Partial transmission | 99.3–100.4% | 0.002521 |
+| Reflection-dominant | 99.5–99.7% | 0.001037 |
+| Roughness 0.02 | 95.5–99.0% | 0.001500 |
+| Two thin panes | 99.4–99.9% | 0.001004 |
+| HDR closed slab | 92.9–99.3% | 0.007571 |
+
+HDR RMS is normalized by its 101× source radiance. Maximum optical-motion error
+was below 0.000173 input pixels; maximum moving-image error was 0.01582.
+The original FSR thin-glass RMS was 0.144968 with Temporal and 0.026782 with
+OptiX; both become 0.000034 in that same controlled fixture. Contrast above 100%
+can result from SR ringing and does not mean added source detail.
+Both traversal backends' 36 GPU contracts, native OptiX isolation/convergence,
+native temporal means, clean/noisy SR detail and production mip-footprint checks
+also passed. The actual application Bistro path rendered 64 frames each with
+DLSS + OptiX and DLSS + Temporal at 67%, 1 SPP / 8 bounces, 1280×720 output;
+both captures were inspected. Pure Temporal still shows substantial indirect
+path noise there; the glass fixture's stability is not a whole-scene noise claim.
 
 With SR and NRD both off, the previous encoded-space filters and stochastic
 primary sampling remain. Temporal surfaces are allocated when SR or NRD is active.
