@@ -268,6 +268,12 @@ DXRDemo/                                  解决方案根
 
 ---
 
+## 光栅化与硬件 GI 管线设计
+
+新增管线的设计提案见 [现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md)：共享场景、相机、GPU 场景与超分组件；不透明物体采用分簇延迟着色，间接光和反射参考 Hardware Lumen 的表面缓存与探针架构。[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 进一步定义类似 Nanite 的动态无裂缝 LOD、分页阴影与缓存联动。目前处于设计阶段，尚未实现。
+
+---
+
 ## 验证入口 Diagnostics
 
 仓库根目录下：
