@@ -1,8 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -11,6 +9,8 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Vortice.DXGI;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Renders the actual Bistro camera through the production native Temporal path.</summary>
 internal static class TemporalSceneProbe
@@ -53,20 +53,20 @@ internal static class TemporalSceneProbe
         var controller = new CameraController(); controller.FrameScene(asset, width / (float)height);
         CameraFrame camera = controller.Advance(0, out _, out _);
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
+        using var device = DxrDevice.CreateDefault();
         using var native = NativeDevice(device);
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var backend = new DxrSceneBackend { ReferenceMode = false, CausticsEnabled = !args.Contains("--no-caustics"),
             AdaptiveLightingEnabled = !args.Contains("--no-adaptive-lighting"), FireflyThreshold = fireflyThreshold,
             UseInlineTraversal = !args.Contains("--legacy-trace"), ReorderThreads = false };
         backend.Initialize(device); backend.SetScene(asset);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         using var reconstruction = new SuperResolutionRenderer(device);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         reconstruction.Configure(ReconstructionMode.Off, 100, width, height, useNrd, true, useOptix);
         Require(reconstruction.LinearPipelineActive && reconstruction.Status.NrdActive == useNrd, reconstruction.Status.Message);
         Require(!useOptix || reconstruction.Status.OptixActive, reconstruction.Status.Message);
@@ -169,7 +169,7 @@ internal static class TemporalSceneProbe
             var message = messages.GetMessage(i);
             Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
         }
-        var result = new { scene = asset.Name, gpu = device.Name.ToString(), denoiser = useNrd ? "NrdRelax" : useOptix ? "Optix" : "TemporalOnly", width, height, samples, bounces, frames,
+        var result = new { scene = asset.Name, gpu = GpuName(device), denoiser = useNrd ? "NrdRelax" : useOptix ? "Optix" : "TemporalOnly", width, height, samples, bounces, frames,
             optixDispatches = reconstruction.OptixDispatchCount, optixGpuMilliseconds = reconstruction.OptixGpuMilliseconds,
             fireflyThreshold, adaptiveLighting = backend.AdaptiveLightingEnabled, caustics = backend.CausticsEnabled,
             referenceSamples = referenceFrames * referenceSpp, referenceKind, exposureStops, rawLateFrameRms = rawRms, temporalLateFrameRms = temporalRms,
@@ -318,12 +318,16 @@ internal static class TemporalSceneProbe
         SceneProbe.WritePng(path, width, height, rgba);
     }
 
-    private static unsafe ID3D12Device5 NativeDevice(GraphicsDevice device)
+    private static unsafe string GpuName(DxrDevice device)
     {
-        Guid iid = typeof(ID3D12Device5).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        return new(pointer);
+        long luid = device.Device.AdapterLuid;
+        using var adapter = device.DxgiFactory.EnumAdapterByLuid<IDXGIAdapter1>(*(Vortice.Luid*)&luid);
+        return adapter.Description1.Description;
+    }
+
+    private static ID3D12Device5 NativeDevice(DxrDevice device)
+    {
+        return device.Device.QueryInterface<ID3D12Device5>();
     }
 
     private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }

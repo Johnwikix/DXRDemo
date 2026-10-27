@@ -23,7 +23,6 @@ resolve/re-jittering 和降噪后玻璃合成，并移除自实现 RELAX；当�
 | `--scene` | 导入、默认场景、相机、模型光照、PBR、NRD/SR 与阴影回归通过 |
 | `--glass` | 2,888 个玻璃像素；相对 512 SPP 参考，2 SPP RMSE 0.351406 → NRD 0.131150 |
 | `--sr` | FSR/XeSS 的 80 组比例/降噪/SDR-HDR 组合及重投影、尺寸切换通过 |
-| 默认集成入口 | 24 组硬件/软件渲染对照、尺寸变化和 GPU HUD 通过 |
 | D3D12 调试层 | 上述启用调试层的场景、玻璃与 SR 检查无 Error/Corruption |
 | `--scene-preview` | 800×600、2 SPP、10 次反弹、NRD、仅模型光照；实际图保存至样例目录 |
 | 打包资产 | 输出 GLB、DLSSD DLL、桥接 DLL 与源资产哈希一致 |
@@ -34,4 +33,4 @@ resolve/re-jittering 和降噪后玻璃合成，并移除自实现 RELAX；当�
 
 **未创建或执行 DLSSD feature 进行运行验证。** 用户将在支持的 RTX 设备上验证兼容性、重建质量、运动和透明材质；本机 Intel 测试不构成 DLSSD 验证。构建与静态接线检查已完成。
 
-本地测试日志位于忽略的 `diagnostics/integration/output/final-{sr,parity,scene,glass}.log`。复现命令见 [场景渲染器](SCENE_RENDERER.md) 与 [超分/光线重建](SUPER_RESOLUTION.md)。
+本地测试日志位于忽略的 `diagnostics/integration/output/final-{sr,scene,glass}.log`。复现命令见 [场景渲染器](SCENE_RENDERER.md) 与 [超分/光线重建](SUPER_RESOLUTION.md)。

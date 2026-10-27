@@ -12,7 +12,6 @@
     <PackageReference Include="Microsoft.Direct3D.D3D12" Version="1.619.6" />
     <Content Include="$(NuGetPackageRoot)/microsoft.direct3d.d3d12/1.619.6/build/native/bin/x64/*.dll"
              Link="D3D12/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
-    <PackageReference Include="ComputeSharp" Version="3.2.0" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
@@ -34,7 +33,7 @@
     <Compile Include="OfflineFeatureChecks.cs" />
     <Content Include="Shaders/*" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />
-    <Compile Include="../../DXRDemo/DXR/*.cs" Exclude="../../DXRDemo/DXR/DxrRenderer.cs;../../DXRDemo/DXR/DxrSwapChain.cs" />
+    <Compile Include="../../DXRDemo/DXR/*.cs" />
     <Compile Include="../../DXRDemo/Shaders/RayTrace/*.cs" />
     <Compile Include="../../DXRDemo/SuperResolution/*.cs" />
     <Compile Include="../../DXRDemo/Camera/*.cs;../../DXRDemo/Scene/*.cs;../../DXRDemo/Assets/Importers/*.cs" />
@@ -42,6 +41,7 @@
     <Compile Include="../../DXRDemo/Hdr/IHdrShaderRunner.cs;../../DXRDemo/Hdr/IRenderDiagnostics.cs;../../DXRDemo/Hdr/GpuDiagnostics.cs" />
     <Content Include="../../DXRDemo/Assets/Models/**" Link="Assets/Models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../Samples/RainyCorner/RainyCorner.glb" Link="Assets/Models/RainyCorner.glb" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/FrameEffects.hlsl" Link="Shaders/DXR/FrameEffects.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Reconstruction.hlsl" Link="Shaders/DXR/Reconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/StableReconstruction.hlsl" Link="Shaders/DXR/StableReconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
+using DXRDemo.DXR;
 using Microsoft.UI.Dispatching;
 using SharpGen.Runtime;
 using Vortice;
@@ -47,14 +46,8 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
     /// </summary>
     private const long ResizeRetryIntervalMs = 500;
 
-    /// <summary>IID of <c>ID3D12Device</c>.</summary>
-    private static readonly Guid IID_ID3D12Device = new("189819F1-1DB6-4B57-BE54-1821339B85F7");
-
-    /// <summary>IID of <c>ID3D12Resource</c> as defined by ComputeSharp's interop bindings.</summary>
-    private static readonly Guid IID_ID3D12Resource = new("696442BE-A72E-4059-BC79-5B5C98040FAD");
-
     private readonly HdrShaderPanel _owner;
-    private readonly GraphicsDevice _device;
+    private readonly DxrDevice _device;
     private readonly DispatcherQueue _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
     private readonly SemaphoreSlim _setupSemaphore = new(1, 1);
 
@@ -91,8 +84,7 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
 
     // One frame texture + SRV per ring slot: in-flight frames must never share a texture
     // (a later dispatch would overwrite it while an earlier pass is still reading it).
-    private readonly ReadWriteTexture2D<Rgba64, Float4>?[] _frameBuffers = new ReadWriteTexture2D<Rgba64, Float4>?[MaxFramesInFlight];
-    private readonly ID3D12Resource?[] _frameResources = new ID3D12Resource?[MaxFramesInFlight];
+    private readonly GpuTexture<Rgba64>?[] _frameBuffers = new GpuTexture<Rgba64>?[MaxFramesInFlight];
 
     private volatile bool _isResizePending = true;
     private volatile float _width = 1;
@@ -127,7 +119,7 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
     /// Creates a new <see cref="HdrSwapChainRenderer"/> instance.
     /// Must be called on the UI thread.
     /// </summary>
-    public HdrSwapChainRenderer(HdrShaderPanel owner, GraphicsDevice device)
+    public HdrSwapChainRenderer(HdrShaderPanel owner, DxrDevice device)
     {
         _owner = owner;
         _device = device;
@@ -469,7 +461,7 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
 
                     IHdrShaderRunner? runner = _shaderRunner;
                     int slot = _frameIndex % MaxFramesInFlight;
-                    ReadWriteTexture2D<Rgba64, Float4>? frameBuffer = _frameBuffers[slot];
+                    GpuTexture<Rgba64>? frameBuffer = _frameBuffers[slot];
 
                     if (runner is null || frameBuffer is null || _isPaused)
                     {
@@ -563,14 +555,7 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
     /// </summary>
     private void InitializeD3D12()
     {
-        // Wrap the ID3D12Device that ComputeSharp is already using, so that the frame texture
-        // allocated by ComputeSharp and our swap chain/pipeline live on the same device.
-        Guid deviceIid = IID_ID3D12Device;
-        IntPtr devicePointer = IntPtr.Zero;
-
-        InteropServices.GetID3D12Device(_device, &deviceIid, (void**)&devicePointer);
-
-        _d3D12Device = new ID3D12Device(devicePointer);
+        _d3D12Device = _device.Device;
 
         _commandQueue = _d3D12Device.CreateCommandQueue(
             new CommandQueueDescription(CommandListType.Direct, CommandQueuePriority.Normal, CommandQueueFlags.None, 0));
@@ -797,7 +782,7 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
     {
         // Nothing to blit on the very first resize (no frame has been rendered yet).
         int lastSlot = (_frameIndex - 1 + MaxFramesInFlight) % MaxFramesInFlight;
-        ID3D12Resource? lastFrameResource = _frameIndex > 0 ? _frameResources[lastSlot] : null;
+        ID3D12Resource? lastFrameResource = _frameIndex > 0 ? _frameBuffers[lastSlot]?.Resource : null;
 
         if (lastFrameResource is null)
         {
@@ -938,23 +923,14 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
             // Recreate the frame textures (one per ring slot) and their shader resource views.
             for (int i = 0; i < MaxFramesInFlight; i++)
             {
-                _frameResources[i]?.Dispose();
                 _frameBuffers[i]?.Dispose();
-
-                ReadWriteTexture2D<Rgba64, Float4> frameBuffer = _device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+                GpuTexture<Rgba64> frameBuffer = _device.CreateTexture2D<Rgba64>(width, height);
                 _frameBuffers[i] = frameBuffer;
-
-                Guid resourceIid = IID_ID3D12Resource;
-                IntPtr resourcePointer = IntPtr.Zero;
-
-                InteropServices.GetID3D12Resource(frameBuffer, &resourceIid, (void**)&resourcePointer);
-
-                _frameResources[i] = new ID3D12Resource(resourcePointer);
 
                 // Use a null description so the runtime infers it from the resource
                 // (Texture2D, R16G16B16A16_UNORM, mip 0) — explicit Vortice descriptions
                 // have a layout that crashes the native call.
-                _d3D12Device.CreateShaderResourceView(_frameResources[i], null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + i * _srvIncrementSize);
+                _d3D12Device.CreateShaderResourceView(frameBuffer.Resource, null, _srvHeap.GetCPUDescriptorHandleForHeapStart() + i * _srvIncrementSize);
             }
 
             _presentedSinceResize = false;
@@ -982,8 +958,8 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
     {
         ID3D12CommandAllocator commandAllocator = _commandAllocators[slot];
         ID3D12GraphicsCommandList commandList = _commandLists[slot];
-        ID3D12Resource frameResource = _frameResources[slot]!;
-        ReadWriteTexture2D<Rgba64, Float4> frameBuffer = _frameBuffers[slot]!;
+        GpuTexture<Rgba64> frameBuffer = _frameBuffers[slot]!;
+        ID3D12Resource frameResource = frameBuffer.Resource;
         ID3D12Resource backBuffer = _backBuffers[_swapChain.CurrentBackBufferIndex];
 
         commandAllocator.Reset();
@@ -1192,7 +1168,6 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
 
             for (int i = 0; i < MaxFramesInFlight; i++)
             {
-                _frameResources[i]?.Dispose();
                 _frameBuffers[i]?.Dispose();
             }
 
@@ -1221,13 +1196,6 @@ internal sealed unsafe class HdrSwapChainRenderer : IDisposable
             // stopped and the GPU is idle, but before the D3D12 device is torn down.
             _diagnostics?.Dispose();
             beforeDeviceDispose?.Invoke();
-
-            // Release the reference we obtained on the underlying D3D12 device. The device
-            // itself is owned by the ComputeSharp GraphicsDevice instance, which is disposed
-            // here as well — it must happen after the render thread has exited so its queues
-            // and fences are not torn down while a dispatch could still be in flight.
-            _d3D12Device.Dispose();
-            _device.Dispose();
 
             if (_fenceEvent != IntPtr.Zero)
             {

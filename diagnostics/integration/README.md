@@ -14,7 +14,7 @@ without enabling photon passes. `--stable` checks three-plane recomposition;
 temporal warmup. These switches remain bounded single-frame commands. CPU checks
 also exercise HDR decoding, alias-table normalization and glTF lighting metadata.
 
-For the 30 FPS GPU budget, use `--offline --bistro --production --dlss-4k`:
+For single-frame 4K validation, use `--offline --bistro --production --dlss-4k`:
 3840×2160 output, 1920×1080 input, 1 SPP, 10 bounces, 1024 texture limit,
 three NRD contexts and DLSS Super Resolution. Exactly one traced frame and one
 reconstruction execution, with no temporal warmup. The actual 4K encoded output
@@ -53,9 +53,9 @@ its resource cost for iteration.
 Agility is activated before device creation. JSON records the reported shader
 model, actual SER setting, compressed texture count/bytes and GPU timestamps.
 Both GPU stages run before CPU readbacks and validation; all reconstruction
-pipeline creation occurs before the traced frame. The 33.33 ms budget covers
-trace plus reconstruction GPU work, excluding asset load, shader compilation,
-CPU checks, PNG encoding and presentation. It is not a sustained FPS measurement.
+pipeline creation occurs before the traced frame. GPU timestamps cover trace plus
+reconstruction work, excluding asset load, shader compilation, CPU checks, PNG
+encoding and presentation. They are not a sustained FPS measurement.
 
 The older commands below run multiple frames and should not be used while gaming.
 
@@ -93,8 +93,8 @@ contribution. These tests do not replace noisy-scene or curved-glass evaluation.
 `IntegrationProbe.exe --optix` requires actual OptiX execution and checks noise
 reduction against known radiance, an independent raw arithmetic mean, oblique
 thin-glass background transmission, moving-camera motion vectors, camera/jitter
-resets, resize, NRD transitions and an explicit unavailable adapter. The sphere
-example's encoded-only fallback is also checked. `--temporal-scene --optix`
+resets, resize, NRD transitions and an explicit unavailable adapter.
+`--temporal-scene --optix`
 captures actual Bistro checkpoints at 1/4/8/16/32/64/... frames and reports CUDA
 inference time separately from the complete reconstruction GPU stage.
 Use `--output <directory>` to avoid overwriting other ablation captures.
@@ -103,10 +103,7 @@ Known baseline failures on the current renderer: `--glass-sr` fails the rough
 glass detail contrast assertion (0.02541), and `--lighting` fails the old ReSTIR
 convergence assertion. Both reproduce with the pre-OptiX production shader files.
 The targeted OptiX/thin-sheet transmission checks do not count these as passing.
-The full `--scene` suite also has a stale startup assertion requiring the night
-demo while the application now defaults to Kitchen. The scene sun toggle,
-intensity, hard-shadow and NRD checks run before that assertion and pass;
-`--sun-shadow`, `--sun-glass` and `--builtin-shadow` are independent entry points.
+`--sun-shadow` and `--sun-glass` are independent entry points.
 
 `--sun-glass` isolates a directional sun shadow ray through the back of a thin
 IOR=1.9 window at 48.5 degrees. It first reproduced zero transmittance from one
@@ -121,17 +118,14 @@ shadows at zero diameter. It also checks normalized unoccluded irradiance at
 0.526 and 20 degrees, exact lobe recomposition, and that stochastic solar light
 does not bypass denoising in Unfiltered. `output/sun-shadow/profiles.json` records
 the measured radiance profiles. Add `--legacy-trace` for the fallback traversal.
-`--builtin-shadow` separately checks the old Bunny DXR/compute tracers: delta-sun
-NRD bypass and finite-sun soft shadows, noisy-light routing and backend parity.
-
 `IntegrationProbe.exe --temporal-convergence` feeds deterministic noisy samples
-through the production linear and encoded Temporal shaders at native resolution.
-It checks RMSE at 32 and 256 frames against both the known reference and an
-independent CPU arithmetic mean, then verifies per-pixel counts and the two-sample
-mean immediately after a depth discontinuity. It rejects the former 32/64-frame
-noise floors, stationary history clipping and global-frame-count reuse after
-history rejection. On the RTX 5070 Ti, linear RMSE falls from 0.024807 to 0.008759
-(CPU-mean RMSE 1.269e-6), and the post-disocclusion two-sample error is 1.376e-8.
+through the production linear Temporal shader at native resolution. It checks
+RMSE at 32 and 256 frames against both the known reference and an independent CPU
+arithmetic mean, then verifies per-pixel counts and the two-sample mean immediately
+after a depth discontinuity. It rejects fixed-frame-count noise floors, stationary
+history clipping and global-frame-count reuse after history rejection. On the
+RTX 5070 Ti, linear RMSE falls from 0.024807 to 0.008759 (CPU-mean RMSE
+1.269e-6), and the post-disocclusion two-sample error is 1.376e-8.
 
 `IntegrationProbe.exe --temporal-scene --bistro --width 1920 --height 1080 --frames 256 --reference-frames 16 --reference-spp 32 --spp 1 --bounces 8`
 renders the actual Bistro camera with native Temporal accumulation and a production
@@ -173,7 +167,7 @@ with independent CPU averages; changing jitter must preserve counts at stable
 glass instances. These regressions reject capped, clipped or reprojected means.
 Current metrics and limitations are recorded in [NRD verification](../../docs/NRD.md).
 The custom RELAX mode has been removed; current denoisers are Off, Temporal and
-official NRD. Old verification counts below are historical.
+official NRD.
 
 `IntegrationProbe.exe --lighting` exercises ReSTIR DI and refractive photon caustics
 with synthetic fixtures and the D3D12 debug layer. It checks many-light and emissive
@@ -184,7 +178,8 @@ The `DXR_DXC_PATH` environment override is honored by all probe modes.
 The lighting suite includes raw-radiance regressions for a wet floor behind
 parallel glass (including mirrored/scaled and densely tessellated variants),
 plus static photon reuse and light-change invalidation. These fail on the original
-photon-blotch implementation; sphere focusing must continue to pass.
+photon-blotch implementation; the glass-sphere caustic focusing fixture must
+continue to pass.
 
 `--lighting-scene baseline|no-restir|no-caustics|neither` captures the actual
 Rainy Corner scene at a fixed camera, frame sequence, 640×400, 2 SPP and 10 bounces,
@@ -205,12 +200,10 @@ bridge builds automatically; `SkipReconstructionNativeBuild=true` reuses it.
 Intel results and the DLSSD feasibility assessment are in
 [`docs/SUPER_RESOLUTION.md`](../../docs/SUPER_RESOLUTION.md).
 The new NRD contract and results are in [`docs/NRD.md`](../../docs/NRD.md).
-The notes below describe the original integration before the SR/NRD extensions.
 
-Both apps now load the same packaged Stanford Bunny (69,451 triangles), Armadillo
-(345,944) and Dragon (871,414). Each app has its own settings window; the main
-window's **设置** button or **F1** opens it. Closing settings hides that window and
-keeps rendering. Closing the main window closes settings and releases the renderer.
+The main window's **设置** button or **F1** opens settings. Closing settings hides
+that window and keeps rendering. Closing the main window closes settings and
+releases the renderer.
 
 The GPU HUD is a compute pass writing a bitmap font into the frame UAV after
 denoising. Text changes twice per second. There is no XAML frame counter. It shows
@@ -219,57 +212,12 @@ mode. RENDER counts completed render-loop frames; SUBMIT counts successful
 `Present` calls, which is not the monitor's display rate. FRAME includes rendering,
 denoising, synchronization, HUD and submission; it is not a GPU timestamp result.
 
-DXR uses a triangle BLAS/TLAS on the **same D3D12 device** as ComputeSharp's
-postprocessing. The renderer obtains the generated mesh HLSL, replaces only the
-software BVH traversal with `TraceRay`, and packs constants through ComputeSharp's
-generated descriptor. Its fence completes before the denoiser reads those UAVs.
-The ported HDR renderer uses a dedicated render thread and `Present(0, DoNotWait)`
-(plus `AllowTearing` when available); it does not wait for XAML rendering or vsync.
-
-The historical verification below used the former custom SVGF/RELAX-inspired
-implementation. Current rendering uses NVIDIA NRD; the old implementation is
-removed. The mesh HDR encoder transforms linear Rec.709 to Rec.2020
-and encodes ST.2084 into the HDR10 swap chain. The inherited filters operate on
-encoded normalized radiance. Material ids are packed into UNORM8 and decoded
-before edge filtering; camera, scene, size, samples, bounces, denoiser and HDR
-changes invalidate temporal history.
-
-## Verification (2026-09-28, RTX 5070 Ti)
-
-- Both WinUI projects built in Release. DXR has one generated WinUIEx obsolete
-  `Icon` warning; ComputeSharp additionally reports trimming warnings for buffer
-  allocation (the existing project enables trimming in Release).
-- The integration probe ran the actual production backend and filter sources:
-  **18 / 18** combinations (three models, three denoisers, SDR/HDR), twelve frames
-  per combination at 480×270, 2 SPP, 10 maximum bounces. Normalized RGBA RMSE between
-  DXR and software outputs was at most **0.000553**. Local differences at edge rays
-  are expected from hardware/software intersection arithmetic.
-- Render-target resize and GPU HUD dispatch passed in the same probe.
-- lvt verified real windows: opening/hiding settings repeatedly, switching all
-  three models, switching denoisers, HDR/SDR, and maximizing/restoring the
-  ComputeSharp window. Screenshots and machine-readable parity results are in
-  `output/` (ignored local artifacts).
-- ComputeSharp's existing clouds / Apple Music / path-trace switches, numeric
-  settings, and hiding/showing the GPU HUD were exercised with lvt as well.
-- Observed whole-app HUD readings with one app running at a time, 1280×720,
-  2 SPP and 10 bounces:
-
-| Scene / settings | DXR render FPS | ComputeSharp render FPS |
-|---|---:|---:|
-| Bunny, SDR, no denoiser | ~1070 | ~258 |
-| Dragon, SDR, no denoiser | ~1109 | ~178 |
-| Bunny, HDR10, RELAX-style | ~710 | ~250 |
-
-These are live half-second HUD samples, not benchmark medians. They include
-encoding, postprocessing and presentation overhead and use different settings
-from `../performance/MESH_RESULTS.md`'s isolated 4-SPP GPU timestamp benchmark.
-
 ## Run the verification probe
 
 From this directory:
 
 ```powershell
-dotnet build IntegrationProbe.csproj -c Release --configfile ../performance/NuGet.Config
+dotnet build IntegrationProbe.csproj -c Release --configfile ../NuGet.Config
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
 ```
 
@@ -277,14 +225,4 @@ Build DXR first so its bundled DXC exists. Model assets are copied into the prob
 output directory by MSBuild. `ui_settings.py MAIN_HWND SETTINGS_HWND MODEL DENOISER
 HDR` drives actual lvt controls using a fresh UIA tree before each action.
 
-For direct executable testing the GUI projects were built with
-`-p:Platform=x64 -p:WindowsSdkPackageVersion=10.0.22621.57 -p:WindowsPackageType=None`
-and `-p:WindowsAppSDKSelfContained=true`. These are build overrides; normal MSIX
-project configuration is preserved. The SDK version override uses this machine's
-cached Windows SDK package. Model attribution and terms are bundled in
-`Assets/Models/SOURCES.md` in both applications.
-
-The final DXR build used `-p:IntermediateOutputPath=obj/validation-final/`
-and `-p:OutputPath=bin/validation-final/` because a separate Visual Studio instance
-was building/running the normal Release output. That running instance was left
-alone; the final isolated build succeeded.
+Model attribution and terms are bundled with the assets in `SOURCES.md`.

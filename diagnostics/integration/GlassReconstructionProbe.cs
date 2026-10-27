@@ -1,7 +1,4 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -10,6 +7,8 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Checks detail, temporal stability and glass motion on the production NRD and SR pipelines.</summary>
 internal static class GlassReconstructionProbe
@@ -17,27 +16,25 @@ internal static class GlassReconstructionProbe
     internal static unsafe void Run()
     {
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var debug = native.QueryInterface<ID3D12InfoQueue>();
         using var backend = new DxrSceneBackend(); backend.Initialize(device);
         const int width = 256, height = 160;
         var view = CameraFrame.Look(new(0, 0, 3), new(0, 0, -1), .7f, .01f, 100);
         SceneAsset asset = Fixture();
         var opaque = asset with { Instances = asset.Instances[..^2] };
-        using var referenceRaw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var referenceNormal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var referenceSurface = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var referenceGuide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var referenceRaw = device.CreateTexture2D<Float4>(width, height);
+        using var referenceNormal = device.CreateTexture2D<Rgba32>(width, height);
+        using var referenceSurface = device.CreateTexture2D<Float4>(width, height);
+        using var referenceGuide = device.CreateTexture2D<Float4>(width, height);
         using var referenceSignals = new PbrSignals(device, width, height);
         backend.SetScene(opaque);
         backend.Trace(view, 0, 1, 8, default, 0, referenceRaw, referenceNormal, referenceSurface, referenceGuide, referenceSignals);
         Float4[,] reference = referenceRaw.ToArray();
         backend.SetScene(asset);
         using var sr = new SuperResolutionRenderer(device);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         Directory.CreateDirectory("output/glass-sr");
 
         void Case(ReconstructionMode mode, int scale)
@@ -45,10 +42,10 @@ internal static class GlassReconstructionProbe
             sr.Configure(mode, scale, width, height, true, true);
             Require(sr.Status.NrdActive && sr.Active == mode, sr.Status.Message);
             int w = sr.InputWidth, h = sr.InputHeight;
-            using var raw = device.AllocateReadWriteTexture2D<Float4>(w, h);
-            using var normal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(w, h);
-            using var surface = device.AllocateReadWriteTexture2D<Float4>(w, h);
-            using var guide = device.AllocateReadWriteTexture2D<Float4>(w, h);
+            using var raw = device.CreateTexture2D<Float4>(w, h);
+            using var normal = device.CreateTexture2D<Rgba32>(w, h);
+            using var surface = device.CreateTexture2D<Float4>(w, h);
+            using var guide = device.CreateTexture2D<Float4>(w, h);
             using var signals = new PbrSignals(device, w, h);
             double[] sum = new double[width * height], squares = new double[width * height];
             const int frames = 48, measured = 12;

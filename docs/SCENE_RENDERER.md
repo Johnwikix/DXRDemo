@@ -3,14 +3,14 @@
 ## 操作
 
 - 右上工具栏「打开模型」或 Ctrl+O，选择 `.gltf` / `.glb`；也可以将文件拖到视口。左上显示 GPU 调试信息。
-- 启动默认选中「RTXPT · Kitchen」，使用原作相机、程序化环境和固定曝光 +1.3 EV。Kitchen、Bistro 街角、Convergence Test、Rainy Corner 和三个 Stanford 模型随构建/发布打包，导入文件不会移除它们。资产转换、路径重写及单帧校验见 [RTXPT_REWRITE](RTXPT_REWRITE.md)。
+- 启动默认选中「RTXPT · Kitchen」，使用原作相机、程序化环境和固定曝光 +1.3 EV。内置场景索引固定为 Rainy Corner=0、Kitchen=1、Convergence Test=2、Bistro 街角=3；导入文件不会移除内置场景。资产转换、路径重写及单帧校验见 [RTXPT_REWRITE](RTXPT_REWRITE.md)。
 - `.gltf` 引用的 `.bin` 和图片需要保留原有相对路径；GLB 可以内嵌缓冲和图片。
-- 文件包含多个场景时，在设置窗口的「场景模型」中切换。内置 Stanford 模型仍可选择。
+- 文件包含多个场景时，在设置窗口的「场景模型」中切换。
 - 轨道相机：左键拖动旋转，中键平移，滚轮缩放。
 - 自由相机：先点击视口，W/S 前后、A/D 左右、Q/E 升降，右键拖动观察，Shift 加速，滚轮调速。
 - 工具栏和设置窗口的重置按钮、视口焦点下的 R，恢复当前场景的初始取景。模式切换保持当前视图。
 - 设置提供移动速度、环境亮度和曝光 EV。环境强度设为 0、太阳关闭时可以检查模型自身灯光；导入场景不自动添加太阳或地面。
-- 「全局太阳光」默认关闭，可设置方位角（0° 为 +Z，90° 为 +X）、高度角（0° 为地平线，90° 为正上方）、强度和角直径。角直径默认 0.526°，对远处太阳光盘按立体角采样，遮挡物与接收面距离越远，半影越宽；设为 0° 恢复硬阴影。应用于导入场景与内置光追场景，独立于模型嵌入灯光；改变太阳参数即时重置光照历史与焦散光子，无需重建场景。
+- 「全局太阳光」默认关闭，可设置方位角（0° 为 +Z，90° 为 +X）、高度角（0° 为地平线，90° 为正上方）、强度和角直径。角直径默认 0.526°，对远处太阳光盘按立体角采样，遮挡物与接收面距离越远，半影越宽；设为 0° 恢复硬阴影。应用于当前场景，独立于模型嵌入灯光；改变太阳参数即时重置光照历史与焦散光子，无需重建场景。
 - 薄片玻璃两侧的阴影查询使用空气→玻璃的 Fresnel 比例，避免从室内向太阳查询时误判全反射；有厚度介质保留入射/出射区别。`--sun-glass` 对照覆盖两侧透射、48.5° 斜射与不透明遮挡。
 - 「仅使用模型光照」统一禁用外加的天光与太阳，保留模型内嵌灯光、自发光材质和它们的间接照明；取消开关恢复原先外部光照参数。
 - 加载期间可取消；解析/上传失败保持先前场景。GPU 上传和加速结构构建期间可能暂停呈现，但 UI 线程仍可响应。
@@ -23,7 +23,7 @@
 | 场景 | 多 scene、节点层级、矩阵/TRS、重复网格实例、负缩放/非均匀缩放、包围盒自动取景 |
 | 网格 | TRIANGLES、TRIANGLE_STRIP、TRIANGLE_FAN；索引、法线、切线、顶点颜色、TEXCOORD_0/1；accessor 解码由 SharpGLTF 提供 |
 | 材质 | Metallic-Roughness；基础色、金属度/粗糙度、法线、遮蔽、自发光贴图及因子；双面材质 |
-| 图片 | PNG/JPEG，按用途区分 sRGB/线性；生成 mip 链，显式 ray-cone LOD；读取 wrap/filter |
+| 图片 | PNG/JPEG，按用途区分 sRGB/线性；上传为原生 `GpuTexture`，生成 mip 链，显式 ray-cone LOD；读取 wrap/filter |
 | 透明度/玻璃 | OPAQUE、MASK、BLEND；覆盖率透明与实体透射分开；`KHR_materials_transmission`、`KHR_materials_ior`、`KHR_materials_volume`，含透射/厚度贴图 |
 | 灯光 | `KHR_lights_punctual`：方向光、点光源、聚光灯；颜色、强度、范围、锥角和节点变换 |
 | 常用扩展 | `KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization` |
@@ -46,7 +46,7 @@ BLEND 表示覆盖率透明；玻璃使用独立的 transmission/IOR/volume 路�
 
 ## 渲染与重建
 
-`DxrSceneBackend` / `SceneTrace.hlsl` 为导入场景提供显式布局的索引几何、每网格 BLAS、节点 TLAS 实例、材质/灯光缓冲、纹理和采样器描述符表。旧 `DxrMeshBackend` 与软件 BVH 保留为内置模型的对照路径，共用新的相机帧。
+主路径由 `SceneAsset` 提供场景数据，`DxrSceneBackend` / `SceneTrace.hlsl` 管理显式布局的索引几何、每网格 BLAS、节点 TLAS 实例、材质/灯光缓冲、原生 `GpuTexture` 和采样器描述符表。
 
 主命中插值顶点属性，在世界空间使用逆转置法线；缺少法线时使用面法线，缺少切线时根据三角形 UV 构造切线基。纹理 LOD 使用世界 ray cone 到 UV 的面积换算，避免模型尺度改变贴图清晰度。
 
@@ -60,11 +60,9 @@ DLSSD 使用独立的 NGX feature 和评价入口，消费原始带噪线性辐�
 
 导入场景默认使用发光功率分布与重投影局部反馈混合的选光概率，保留全局分布支撑；每次重新查询可见性，NEE 与 BSDF 命中发光面的 MIS 使用同一 PDF。旧 ReSTIR DI 路径保留在关闭自适应选光后的兼容模式。历史贡献只用于选光，不直接复用历史辐射。HDR 环境使用按亮度与立体角构建的 alias 表；参考模式关闭反馈选光和 firefly 过滤。实现与验证限制见 [RTXPT_REWRITE](RTXPT_REWRITE.md)。
 
-角直径为 0° 时，内置 Bunny/Armadillo/Dragon 的旧漫反射管线独立输出主命中的确定性太阳直射光，NRD 只处理剩余的天空与间接照明，之后加回直射光。有限太阳光盘的随机直射光进入降噪输入；导入场景的太阳光盘也进入漫反射/镜面 lobe，避免随机半影绕过降噪。光盘按垂直入射照度归一化，改变尺寸不会同时增大能量。ReSTIR 缓存保留光盘采样坐标，焦散光子使用相同角分布。
+有限太阳光盘的随机直射光进入漫反射/镜面降噪输入，避免随机半影绕过降噪。光盘按垂直入射照度归一化，改变尺寸不会同时增大能量。ReSTIR 缓存保留光盘采样坐标，焦散光子使用相同角分布。
 
-`--sun-shadow` 隔离纯漫反射接收面与半平面遮挡物：0° 时过渡宽度为零；0.526° 时，1 米/8 米遮挡距离的 10%–90% 半影宽度为 10/82 像素；角直径加倍后为 162 像素。0.526°/20° 的无遮挡照度相对 0° 的最大误差为 2.7e-6/2.4e-4。两套 DXR 遍历均通过，同时验证带噪直射光没有写入 Unfiltered 旁路。HDRI 自带太阳仍使用环境采样，不受这个额外太阳的角直径控制。
-
-`--builtin-shadow` 单独覆盖旧内置模型后端：2° 太阳下 Bunny 有 137 个半影像素，软件/硬件原始辐射 RMSE 为 1.64e-8；0° 的原有 NRD 直射旁路仍通过。太阳角尺寸、稳定的 `1-cos(half_angle)` 与照度归一化可对照 [Cycles SunLight 实现](https://github.com/blender/blender/blob/main/intern/cycles/scene/light.cpp)。
+`--sun-shadow` 隔离纯漫反射接收面与半平面遮挡物：0° 时过渡宽度为零；0.526° 时，1 米/8 米遮挡距离的 10%–90% 半影宽度为 10/82 像素；角直径加倍后为 162 像素。0.526°/20° 的无遮挡照度相对 0° 的最大误差为 2.7e-6/2.4e-4。inline ray query 与 `--legacy-trace` 的 DXR TraceRay 回退遍历均通过，同时验证带噪直射光没有写入 Unfiltered 旁路。HDRI 自带太阳仍使用环境采样，不受这个额外太阳的角直径控制。太阳角尺寸、稳定的 `1-cos(half_angle)` 与照度归一化可对照 [Cycles SunLight 实现](https://github.com/blender/blender/blob/main/intern/cycles/scene/light.cpp)。
 
 连续相机运动保留可重投影历史；重置、场景/照明变化和长时间间隔清空历史。投影 FOV/near/far 同时传递给光追、深度、NRD 和 SR。SDK 失败会报告实际回退；PBR 可以继续运行原生分辨率的线性滤波管线。
 
@@ -74,7 +72,7 @@ DLSSD 使用独立的 NGX feature 和评价入口，消费原始带噪线性辐�
 
 ```powershell
 dotnet build DXRDemo/DXRDemo.csproj -c Release -p:Platform=x64 -p:WindowsSdkPackageVersion=10.0.22621.57 -p:WindowsPackageType=None
-dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/performance/NuGet.Config
+dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/NuGet.Config
 ```
 
 在 `diagnostics/integration` 目录运行实际 EXE（厂商 SDK provider discovery 依赖进程目录）：

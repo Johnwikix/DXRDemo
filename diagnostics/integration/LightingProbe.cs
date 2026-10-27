@@ -2,8 +2,6 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
@@ -13,6 +11,8 @@ using DXRDemo.Assets.Importers;
 using DXRDemo.SuperResolution;
 using DXRDemo.Shaders.RayTrace;
 using DXRDemo.Hdr;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 internal static class LightingProbe
 {
@@ -21,21 +21,21 @@ internal static class LightingProbe
     {
         var document = await GltfImporter.LoadAsync(Path.GetFullPath("../../Samples/RainyCorner/RainyCorner.glb"));
         var asset = document.Scenes[document.DefaultScene];
-        using var device = GraphicsDevice.GetDefault();
+        using var device = DxrDevice.CreateDefault();
         using var backend = new DxrSceneBackend(); backend.Initialize(device); backend.SetScene(asset);
         backend.RestirEnabled = !mode.Contains("no-restir") && mode != "neither";
         backend.CausticsEnabled = !mode.Contains("no-caustics") && mode != "neither";
         const int width=640,height=400;
-        using var raw=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var normal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(width,height);
-        using var surface=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var guide=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var raw=device.CreateTexture2D<Float4>(width,height);
+        using var normal=device.CreateTexture2D<Rgba32>(width,height);
+        using var surface=device.CreateTexture2D<Float4>(width,height);
+        using var guide=device.CreateTexture2D<Float4>(width,height);
         using var signals=new PbrSignals(device,width,height);
         var camera=new CameraController(); camera.FrameBounds(asset.Minimum,asset.Maximum,width/(float)height);
         camera.Rotate(0,.18f); camera.Zoom(3); var view=camera.Advance(0,out _,out _);
         bool nrd=mode.StartsWith("nrd"),rr=mode.StartsWith("dlssd");
         using var reconstruction=nrd||rr?new SuperResolutionRenderer(device):null;
-        using var target=nrd||rr?device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height):null;
+        using var target=nrd||rr?device.CreateTexture2D<Rgba64>(width,height):null;
         var reconstructionMode=rr?ReconstructionMode.DlssRayReconstruction:ReconstructionMode.Off;
         reconstruction?.Configure(reconstructionMode,100,width,height,nrd,true);
         if(rr) Require(reconstruction!.Active==reconstructionMode,reconstruction.Status.Message);
@@ -64,20 +64,18 @@ internal static class LightingProbe
         Console.WriteLine($"Captured {mode}: ReSTIR={backend.RestirEnabled}, caustics={backend.CausticsEnabled}, photon builds={backend.PhotonBuildCount}, 640x400, 2 SPP, 10 bounces, frame={frames-1}, exposure=-2, NRD={nrd}, DLSSD={rr}.");
     }
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
-    internal static unsafe void Run()
+    internal static void Run()
     {
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var debug = native.QueryInterface<ID3D12InfoQueue>();
         using var backend = new DxrSceneBackend(); backend.Initialize(device);
         const int width = 192, height = 144;
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surface = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normal = device.CreateTexture2D<Rgba32>(width, height);
+        using var surface = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         var view = CameraFrame.Look(new(0, 4, 3.5f), new(0, -4, -3.5f), .8f, .001f, 100);
         SunLightSettings lightOverride=default;
@@ -236,10 +234,10 @@ internal static class LightingProbe
         backend.SetScene(glass with { Lights = [] }); Trace(1);
         Require(raw.ToArray().Cast<Float4>().All(v => v.X == 0 && v.Y == 0 && v.Z == 0), "Disabled lights retain photon energy");
         // Rebind/resizing allocates fresh history; returning to the original resources must also be valid.
-        using (var smallRaw = device.AllocateReadWriteTexture2D<Float4>(32, 24))
-        using (var smallNormal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(32, 24))
-        using (var smallSurface = device.AllocateReadWriteTexture2D<Float4>(32, 24))
-        using (var smallGuide = device.AllocateReadWriteTexture2D<Float4>(32, 24))
+        using (var smallRaw = device.CreateTexture2D<Float4>(32, 24))
+        using (var smallNormal = device.CreateTexture2D<Rgba32>(32, 24))
+        using (var smallSurface = device.CreateTexture2D<Float4>(32, 24))
+        using (var smallGuide = device.CreateTexture2D<Float4>(32, 24))
         using (var smallSignals = new PbrSignals(device, 32, 24))
             backend.Trace(view, 2, 1, 1, default, 0, smallRaw, smallNormal, smallSurface, smallGuide,
                 smallSignals);

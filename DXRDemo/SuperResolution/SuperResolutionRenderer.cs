@@ -1,5 +1,3 @@
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
 using DXRDemo.Shaders.RayTrace;
@@ -10,6 +8,8 @@ using Vortice.Direct3D12;
 using Vortice.DXGI;
 using DXRDemo.Camera;
 using DXRDemo.Scene;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 namespace DXRDemo.SuperResolution;
 
@@ -56,10 +56,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private readonly ID3D12Resource[] _history = new ID3D12Resource[2];
     private ID3D12Resource? _raw, _normals, _surfaces;
     private ID3D12Resource? _nrdNormals;
-    private ReadWriteTexture2D<Float4>? _boundRaw;
-    private readonly ReadWriteTexture2D<Rgba64, Float4>?[] _targets = new ReadWriteTexture2D<Rgba64, Float4>?[2];
-    private readonly ID3D12Resource?[] _targetResources = new ID3D12Resource?[2];
-    private int _targetSlot;
+    private GpuTexture<Float4>? _boundRaw;
     private (ReconstructionMode Mode, int Scale, int Width, int Height, bool Nrd, bool Pbr, bool Optix) _configuration;
     private bool _linearReady;
     private bool _glassComposed;
@@ -69,12 +66,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private CameraFrame _previousCamera;
     private ReconstructionStatus _status;
 
-    internal SuperResolutionRenderer(GraphicsDevice device)
+    internal SuperResolutionRenderer(DxrDevice device)
     {
-        Guid iid = typeof(ID3D12Device5).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        _gpu.Initialize(new ID3D12Device5(pointer));
+        _gpu.Initialize(device.Device);
         _gpuInterval = new GpuInterval(_gpu);
         try
         {
@@ -350,52 +344,25 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         return sum;
     }
 
-    private static ID3D12Resource Resource<T>(ReadWriteTexture2D<T> texture) where T : unmanaged
-    {
-        Guid iid = typeof(ID3D12Resource).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Resource(texture, &iid, (void**)&pointer);
-        return new(pointer);
-    }
-
-    private static ID3D12Resource Resource<T>(ReadWriteTexture2D<T, Float4> texture)
-        where T : unmanaged, IPixel<T, Float4>
-    {
-        Guid iid = typeof(ID3D12Resource).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Resource(texture, &iid, (void**)&pointer);
-        return new(pointer);
-    }
-
-    private void BindInputs(ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Float4>? nrdNormals, PbrSignals? pbr, ReadWriteTexture2D<Float4>? directLight)
+    private void BindInputs(GpuTexture<Float4> raw, GpuTexture<Rgba32> normals,
+        GpuTexture<Float4> surfaces, GpuTexture<Float4>? nrdNormals, PbrSignals? pbr, GpuTexture<Float4>? directLight)
     {
         if (ReferenceEquals(raw, _boundRaw)) return;
         // Static ranges include unused entries. A different scene/configuration may
         // release the old PBR/OptiX resources, so remove every stale descriptor.
         ClearDescriptorTables();
-        _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
-        _raw = Resource(raw); _normals = Resource(normals); _surfaces = Resource(surfaces);
-        _nrdNormals = nrdNormals == null ? null : Resource(nrdNormals);
-        for (int i = 0; i < _pbrInputs.Length; i++) { _pbrInputs[i]?.Dispose(); _pbrInputs[i] = null; }
+        _raw = raw.Resource; _normals = normals.Resource; _surfaces = surfaces.Resource;
+        _nrdNormals = nrdNormals?.Resource;
+        Array.Clear(_pbrInputs);
         if (pbr != null)
         {
-            _pbrInputs[0] = Resource(pbr.Diffuse); _pbrInputs[1] = Resource(pbr.Specular); _pbrInputs[2] = Resource(pbr.Albedo); _pbrInputs[3] = Resource(pbr.Unfiltered); _pbrInputs[4] = Resource(pbr.SpecularGuide);
-            _pbrInputs[5] = Resource(pbr.DiffuseSh); _pbrInputs[6] = Resource(pbr.SpecularSh); _pbrInputs[7] = Resource(pbr.GlassSurface);
-            _pbrInputs[8] = Resource(pbr.DiffuseFactor); _pbrInputs[9] = Resource(pbr.SpecularFactor);
-            _pbrInputs[10] = Resource(pbr.GlassFallback); _pbrInputs[11] = Resource(pbr.GlassNormal);
+            _pbrInputs[0] = pbr.Diffuse.Resource; _pbrInputs[1] = pbr.Specular.Resource; _pbrInputs[2] = pbr.Albedo.Resource; _pbrInputs[3] = pbr.Unfiltered.Resource; _pbrInputs[4] = pbr.SpecularGuide.Resource;
+            _pbrInputs[5] = pbr.DiffuseSh.Resource; _pbrInputs[6] = pbr.SpecularSh.Resource; _pbrInputs[7] = pbr.GlassSurface.Resource;
+            _pbrInputs[8] = pbr.DiffuseFactor.Resource; _pbrInputs[9] = pbr.SpecularFactor.Resource;
+            _pbrInputs[10] = pbr.GlassFallback.Resource; _pbrInputs[11] = pbr.GlassNormal.Resource;
         }
-        else if (directLight != null) _pbrInputs[3] = Resource(directLight);
+        else if (directLight != null) _pbrInputs[3] = directLight.Resource;
         _boundRaw = raw;
-    }
-
-    private ID3D12Resource BindTarget(ReadWriteTexture2D<Rgba64, Float4> target)
-    {
-        for (int i = 0; i < 2; i++) if (ReferenceEquals(_targets[i], target)) return _targetResources[i]!;
-        int slot = _targetSlot++ % 2;
-        _targetResources[slot]?.Dispose();
-        _targets[slot] = target;
-        return _targetResources[slot] = Resource(target);
     }
 
     private void Srv(int set, int index, ID3D12Resource resource)
@@ -417,11 +384,11 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private void Transition(ID3D12Resource resource, ResourceStates before, ResourceStates after)
         => _gpu.CommandList.ResourceBarrierTransition(resource, before, after);
 
-    internal bool Execute(ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normals,
-        ReadWriteTexture2D<Float4> surfaces, ReadWriteTexture2D<Rgba64, Float4> target,
+    internal bool Execute(GpuTexture<Float4> raw, GpuTexture<Rgba32> normals,
+        GpuTexture<Float4> surfaces, GpuTexture<Rgba64> target,
         Float2 orbit, float distance, Float2 jitter, RayTraceDenoiserMode denoiser, in HdrRenderParameters hdr, double seconds,
-        ReadWriteTexture2D<Float4>? nrdNormals = null, CameraFrame? cameraFrame = null, PbrSignals? pbr = null, float exposure = 0,
-        ReadWriteTexture2D<Float4>? directLight = null, DxrSceneBackend? transparentBackend = null)
+        GpuTexture<Float4>? nrdNormals = null, CameraFrame? cameraFrame = null, PbrSignals? pbr = null, float exposure = 0,
+        GpuTexture<Float4>? directLight = null, DxrSceneBackend? transparentBackend = null)
     {
         GpuMilliseconds = 0;
         if (seconds > 0.25 || seconds <= 0) Reset();
@@ -433,7 +400,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         bool useOptix = denoiser == RayTraceDenoiserMode.Optix && _optixContext != 0;
         if (denoiser == RayTraceDenoiserMode.Optix) denoiser = RayTraceDenoiserMode.TemporalOnly;
         BindInputs(raw, normals, surfaces, nrdNormals, pbr, directLight);
-        ID3D12Resource encoded = BindTarget(target);
+        ID3D12Resource encoded = target.Resource;
         CameraFrame camera = cameraFrame ?? CameraFrame.FromOrbit(orbit.X, orbit.Y, distance);
         // .NET 10: 值类型相机比较无分配；SR 采样抖动不属于镜头变化。
         bool cameraChanged = !_reset && camera != _previousCamera;
@@ -677,7 +644,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_surfaces!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             if (pbr != null) foreach (var inputResource in _pbrInputs) Transition(inputResource!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             else if (directLight != null) Transition(_pbrInputs[3]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-            End(); // Complete before ComputeSharp HUD or presentation consumes the shared target.
+            End(); // Complete before the HUD or presentation consumes the shared target.
             _previousCamera = camera; _previousJitter = jitter; _frame++; _reset = false;
             return true;
         }
@@ -749,14 +716,9 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         if (_nrdContext != 0) { NativeNrd.Destroy(_nrdContext); _nrdContext = 0; }
         if (_optixContext != 0) { NativeOptix.Destroy(_optixContext); _optixContext = 0; }
         _stablePlanes?.Dispose(); _stablePlanes = null;
-        _raw?.Dispose(); _normals?.Dispose(); _surfaces?.Dispose(); _nrdNormals?.Dispose();
         _nrdNormals = null;
         _raw = _normals = _surfaces = null; _boundRaw = null;
-        for (int i = 0; i < _pbrInputs.Length; i++) { _pbrInputs[i]?.Dispose(); _pbrInputs[i] = null; }
-        for (int i = 0; i < 2; i++)
-        {
-            _targetResources[i]?.Dispose(); _targetResources[i] = null; _targets[i] = null;
-        }
+        Array.Clear(_pbrInputs);
         for (int i = _sizeResources.Count - 1; i >= 0; i--) _sizeResources[i].Dispose();
         _sizeResources.Clear();
         for (int i = 0; i < 2; i++) _temporalSampleCounts[i] = null!;

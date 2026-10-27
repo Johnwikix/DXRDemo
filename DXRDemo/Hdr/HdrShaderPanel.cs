@@ -1,5 +1,5 @@
 using System.Numerics;
-using ComputeSharp;
+using DXRDemo.DXR;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -21,7 +21,7 @@ public sealed class HdrShaderPanel : SwapChainPanel, IDisposable
     /// <summary>
     /// Creates a new <see cref="HdrShaderPanel"/> instance bound to the given GPU device.
     /// </summary>
-    public HdrShaderPanel(GraphicsDevice device)
+    public HdrShaderPanel(DxrDevice device)
     {
         _renderer = new HdrSwapChainRenderer(this, device);
 
@@ -172,7 +172,7 @@ public sealed class HdrShaderPanel : SwapChainPanel, IDisposable
     /// </summary>
     /// <param name="beforeDeviceDispose">
     /// Optional callback invoked on the background teardown thread after the render thread has
-    /// stopped and the GPU is idle, but before the <see cref="GraphicsDevice"/> is disposed
+    /// stopped and the GPU is idle, but before the <see cref="DxrDevice"/> is disposed
     /// (used to release runner resources that depend on the device).
     /// </param>
     public void Dispose(Action? beforeDeviceDispose)

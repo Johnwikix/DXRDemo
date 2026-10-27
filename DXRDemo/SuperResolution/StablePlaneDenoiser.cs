@@ -1,12 +1,11 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
 using Vortice.Direct3D12;
 using Vortice.DXGI;
+using Float2 = System.Numerics.Vector2;
 
 namespace DXRDemo.SuperResolution;
 
@@ -75,11 +74,6 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
         }
         catch { Dispose(); throw; }
     }
-    private static ID3D12Resource Resource(ReadWriteTexture2D<Float4> texture)
-    {
-        Guid iid = typeof(ID3D12Resource).GUID; nint pointer;
-        InteropServices.GetID3D12Resource(texture, &iid, (void**)&pointer); return new(pointer);
-    }
     private void Srv(int set, int slot, ID3D12Resource resource) => _gpu.Device.CreateShaderResourceView(resource, null,
         _heap.GetCPUDescriptorHandleForHeapStart() + (set * Descriptors + slot) * _stride);
     private void Uav(int set, int slot, ID3D12Resource resource) => _gpu.Device.CreateUnorderedAccessView(resource, null, null,
@@ -95,9 +89,8 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
     {
         if (!ReferenceEquals(_bound, signals))
         {
-            foreach (var old in _inputs) old?.Dispose();
-            _inputs[0] = Resource(signals.StableReflection); _inputs[1] = Resource(signals.StableReflectionSurface); _inputs[2] = Resource(signals.StableReflectionNormal);
-            _inputs[3] = Resource(signals.StableTransmission); _inputs[4] = Resource(signals.StableTransmissionSurface); _inputs[5] = Resource(signals.StableTransmissionNormal);
+            _inputs[0] = signals.StableReflection.Resource; _inputs[1] = signals.StableReflectionSurface.Resource; _inputs[2] = signals.StableReflectionNormal.Resource;
+            _inputs[3] = signals.StableTransmission.Resource; _inputs[4] = signals.StableTransmissionSurface.Resource; _inputs[5] = signals.StableTransmissionNormal.Resource;
             _bound = signals; reset = true;
         }
         bool restarting = reset || _frame == 0;
@@ -151,7 +144,6 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
     {
         if (_gpu.Device != null) _gpu.SignalAndWait();
         foreach (nint context in _contexts) if (context != 0) NativeNrd.Destroy(context);
-        foreach (var input in _inputs) input?.Dispose();
         for (int i = _owned.Count - 1; i >= 0; i--) _owned[i].Dispose();
     }
 }

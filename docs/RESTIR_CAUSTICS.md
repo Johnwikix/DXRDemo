@@ -1,6 +1,6 @@
 # ReSTIR DI、直射阴影与折射焦散
 
-`DxrSceneBackend` 的 glTF/GLB 场景默认启用。旧球体、Stanford mesh 和软件后端保持原有算法。实现位于 `SceneTrace.hlsl`、`SceneLighting.hlsli` 和 `DxrSceneBackend.cs`；无新增 SDK 依赖。后端 `RestirEnabled` / `CausticsEnabled` 属性用于诊断 A/B，不新增 UI 设置。
+`DxrSceneBackend` 的 glTF/GLB 场景默认启用。实现位于 `SceneTrace.hlsl`、`SceneLighting.hlsli` 和 `DxrSceneBackend.cs`；无新增 SDK 依赖。后端 `RestirEnabled` / `CausticsEnabled` 属性用于诊断 A/B，不新增 UI 设置。
 
 ## ReSTIR DI
 

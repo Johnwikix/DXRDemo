@@ -83,17 +83,6 @@ public sealed class CameraController
         }
     }
 
-    /// <summary>Restores the original framing of a packaged demo.</summary>
-    public void FrameDemo(int scene)
-    {
-        lock (_gate)
-        {
-            _resetTarget = new(0, .9f, 0); _resetDistance = scene == 3 ? 6.5f : 2.7f;
-            _verticalFov = 2 * MathF.Atan(.5f); _resetPitch = .165f;
-            _resetYaw = scene == 1 ? MathF.PI : 0; _scale = 1; _near = .01f; _far = 1000; ResetCore();
-        }
-    }
-
     /// <summary>Restores the current scene's initial framing and invalidates temporal history.</summary>
     public void Reset() { lock (_gate) ResetCore(); }
     private void ResetCore()

@@ -1,7 +1,4 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -10,6 +7,8 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Measures stationary temporal convergence against an independent arithmetic mean.</summary>
 internal static unsafe class TemporalConvergenceProbe
@@ -20,11 +19,8 @@ internal static unsafe class TemporalConvergenceProbe
     {
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
         layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        var native = device.Device;
         using var debug = native.QueryInterface<ID3D12InfoQueue>();
         var failures = new List<Exception>();
         void Case(Action test)
@@ -34,20 +30,19 @@ internal static unsafe class TemporalConvergenceProbe
         }
         Case(() => VerifyLinear(device, native, debug));
         Case(() => VerifyStationaryIsolation(device, native));
-        Case(() => VerifyEncoded(device, debug));
         if (failures.Count != 0) throw new AggregateException("Temporal convergence regression failed", failures);
         Console.WriteLine("PASS stationary temporal convergence continues beyond the old 32/64-frame limits.");
     }
 
-    private static void VerifyLinear(GraphicsDevice device, ID3D12Device5 native, ID3D12InfoQueue debug)
+    private static void VerifyLinear(DxrDevice device, ID3D12Device5 native, ID3D12InfoQueue debug)
     {
         using var sr = new SuperResolutionRenderer(device);
         sr.Configure(ReconstructionMode.Off, 100, Width, Height, false, true);
         Require(sr.LinearPipelineActive && !sr.Status.NrdActive, "The native linear Temporal path was not active: " + sr.Status.Message);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(Width, Height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(Width, Height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(Width, Height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(Width, Height);
+        using var raw = device.CreateTexture2D<Float4>(Width, Height);
+        using var normals = device.CreateTexture2D<Rgba32>(Width, Height);
+        using var surfaces = device.CreateTexture2D<Float4>(Width, Height);
+        using var target = device.CreateTexture2D<Rgba64>(Width, Height);
         using var signals = new PbrSignals(device, Width, Height);
         var samples = new Float4[Height, Width];
         var reference = new Float4[Height, Width];
@@ -124,14 +119,14 @@ internal static unsafe class TemporalConvergenceProbe
         VerifyDebug(debug);
     }
 
-    private static void VerifyStationaryIsolation(GraphicsDevice device, ID3D12Device5 native)
+    private static void VerifyStationaryIsolation(DxrDevice device, ID3D12Device5 native)
     {
         using var sr = new SuperResolutionRenderer(device);
         sr.Configure(ReconstructionMode.Off, 100, Width, Height, false, true);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(Width, Height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(Width, Height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(Width, Height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(Width, Height);
+        using var raw = device.CreateTexture2D<Float4>(Width, Height);
+        using var normals = device.CreateTexture2D<Rgba32>(Width, Height);
+        using var surfaces = device.CreateTexture2D<Float4>(Width, Height);
+        using var target = device.CreateTexture2D<Rgba64>(Width, Height);
         using var signals = new PbrSignals(device, Width, Height);
         var camera = CameraFrame.Look(new Vector3(-20, 1.8f, 12), Vector3.Normalize(new(1, .03f, -.17f)), 1.04f, .001f, 1000);
         var geometry = new Float4[Height, Width];
@@ -186,39 +181,6 @@ internal static unsafe class TemporalConvergenceProbe
         Require(jitterError < .002, "Changed sampling jitter bypassed history reprojection");
     }
 
-    private static void VerifyEncoded(GraphicsDevice device, ID3D12InfoQueue debug)
-    {
-        using var signal = device.AllocateReadWriteTexture2D<Rgba64, Float4>(Width, Height);
-        using var history = device.AllocateReadWriteTexture2D<Rgba64, Float4>(Width, Height);
-        using var output = device.AllocateReadWriteTexture2D<Rgba64, Float4>(Width, Height);
-        var samples = new Float4[Height, Width];
-        var encoded = new Rgba64[Height, Width];
-        var reference = new Float4[Height, Width];
-        double[] sums = new double[Width * Height * 3];
-        for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
-            reference[y, x] = new(.25f + .35f * x / (Width - 1), .3f + .3f * y / (Height - 1), .45f, 1);
-        double early = 0, late = 0;
-        for (int frame = 0; frame < TotalFrames; frame++)
-        {
-            FillSamples(samples, reference, frame + 10000, .24f);
-            Encode(samples, encoded);
-            Accumulate(sums, encoded);
-            signal.CopyFrom(encoded);
-            device.ForEach(output, new NaiveTemporalAccumulationShader(frame, signal, history));
-            if (frame == EarlyFrames - 1) early = Rmse(output.ToArray(), reference);
-            if (frame == TotalFrames - 1)
-            {
-                Rgba64[,] result = output.ToArray();
-                late = Rmse(result, reference);
-                double meanError = RmseFromMean(result, sums, frame + 1);
-                Console.WriteLine($"Encoded Temporal: RMSE {early:F6} @ {EarlyFrames} -> {late:F6} @ {TotalFrames}; CPU-mean RMSE={meanError:E3}");
-                Require(late < early * .45, "Encoded Temporal retained a noise floor after its old 64-frame limit");
-                Require(meanError < .002, "Encoded Temporal does not converge to the independent arithmetic mean");
-            }
-        }
-        VerifyDebug(debug);
-    }
-
     private static void FillSamples(Float4[,] samples, Float4[,] reference, int frame, float amplitude)
     {
         for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
@@ -228,16 +190,6 @@ internal static unsafe class TemporalConvergenceProbe
                 Math.Clamp(expected.X + Noise(x, y, frame, 0) * amplitude, 0, 1),
                 Math.Clamp(expected.Y + Noise(x, y, frame, 1) * amplitude, 0, 1),
                 Math.Clamp(expected.Z + Noise(x, y, frame, 2) * amplitude, 0, 1), 1);
-        }
-    }
-
-    private static void Encode(Float4[,] samples, Rgba64[,] encoded)
-    {
-        static ushort Channel(float value) => (ushort)Math.Clamp((int)MathF.Round(value * 65535), 0, 65535);
-        for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
-        {
-            Float4 value = samples[y, x];
-            encoded[y, x] = new(Channel(value.X), Channel(value.Y), Channel(value.Z), Channel(value.W));
         }
     }
 
@@ -259,18 +211,6 @@ internal static unsafe class TemporalConvergenceProbe
         }
     }
 
-    private static void Accumulate(double[] sums, Rgba64[,] samples)
-    {
-        for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
-        {
-            int index = (y * Width + x) * 3;
-            Rgba64 value = samples[y, x];
-            sums[index] += value.R / 65535.0;
-            sums[index + 1] += value.G / 65535.0;
-            sums[index + 2] += value.B / 65535.0;
-        }
-    }
-
     private static double Rmse(float[] actual, Float4[,] reference)
     {
         double error = 0;
@@ -281,19 +221,6 @@ internal static unsafe class TemporalConvergenceProbe
             error += (actual[source] - expected.X) * (actual[source] - expected.X);
             error += (actual[source + 1] - expected.Y) * (actual[source + 1] - expected.Y);
             error += (actual[source + 2] - expected.Z) * (actual[source + 2] - expected.Z);
-        }
-        return Math.Sqrt(error / (Width * Height * 3));
-    }
-
-    private static double Rmse(Rgba64[,] actual, Float4[,] reference)
-    {
-        double error = 0;
-        for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
-        {
-            Rgba64 a = actual[y, x];
-            Float4 expected = reference[y, x];
-            double dx = a.R / 65535.0 - expected.X, dy = a.G / 65535.0 - expected.Y, dz = a.B / 65535.0 - expected.Z;
-            error += dx * dx + dy * dy + dz * dz;
         }
         return Math.Sqrt(error / (Width * Height * 3));
     }
@@ -309,20 +236,6 @@ internal static unsafe class TemporalConvergenceProbe
         return Math.Sqrt(error / (Width * Height * 3));
     }
 
-    private static double RmseFromMean(Rgba64[,] actual, double[] sums, int frames)
-    {
-        double error = 0;
-        for (int y = 0; y < Height; y++) for (int x = 0; x < Width; x++)
-        {
-            int index = (y * Width + x) * 3;
-            Rgba64 value = actual[y, x];
-            double dx = value.R / 65535.0 - sums[index] / frames;
-            double dy = value.G / 65535.0 - sums[index + 1] / frames;
-            double dz = value.B / 65535.0 - sums[index + 2] / frames;
-            error += dx * dx + dy * dy + dz * dz;
-        }
-        return Math.Sqrt(error / (Width * Height * 3));
-    }
 
     internal static uint[] ReadSampleCounts(ID3D12Device5 device, ID3D12Resource source)
     {

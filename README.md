@@ -12,7 +12,7 @@
 - **轨道 / 自由** 两种相机、轨道 + 拖动 glTF/GLB 打开
 - **实体玻璃**（Snell 折射 / 全反射 / Beer-Lambert 吸收）
 
-启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），提供 Bistro 街角、Convergence Test、Rainy Corner 和 Stanford 模型。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
+启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），并提供 Bistro 街角、Convergence Test 和 Rainy Corner。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
 
 新配置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已有保存设置仍优先恢复。RTX 5070 Ti 上，Bistro 的 4K 单帧离线 GPU 总耗时为 30.7–32.0 ms，进入 30 FPS 的 GPU 预算；已加入原生 4K NRD 与 1080p→4K NRD+DLSS 的离线相机运动序列验证，连续呈现帧率仍未验证。
 
@@ -25,7 +25,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 启动后自动加载随构建打包的 **RTXPT Kitchen**，使用原作相机、程序化环境与固定曝光 +1.3 EV。
 
 - 317 个实例、1,474,751 个三角形、102 个纹理视图；不需要运行时下载或本地 RTXPT checkout。
-- 新增 **RTXPT Bistro 街角**（README 中的咖啡馆街区，4,209,006 个三角形）与 **Convergence Test**，保留 Stanford **Bunny / Armadillo / Dragon** 与 **Rainy Corner**。
+- 另提供 **RTXPT Bistro 街角**（4,209,006 个三角形）、**Convergence Test** 与 **Rainy Corner**。
 - Kitchen 原作 Jay-Artist，RTXPT 修改 Kate Anderson；来源、许可证和转换记录见 [`Assets/Models/RTXPT`](DXRDemo/Assets/Models/RTXPT/SOURCES.md)。
 - 默认纹理上限 1024；打包 BC7 mip 链并保留 PNG 回退。严格校验下修复原始数据的无效法线/切线，缺失的可选 specular 贴图采用标准材质回退。
 - Rainy Corner 的 `.blend`、参考图和脚本仍在 [`Samples/RainyCorner`](Samples/RainyCorner/README.md)。
@@ -46,14 +46,14 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **常用扩展**：`KHR_texture_transform`、`KHR_materials_unlit`、`KHR_materials_emissive_strength`、`KHR_mesh_quantization`
 - **光照**：RTXPT GGX VNDF 与 correlated Smith、理想反射/折射、Owen-Sobol 采样、按发光功率与历史贡献反馈选光、HDR 环境 alias 采样及匹配的 MIS、带优先级的实例介质列表、累计 ray cone、带 eta 补偿的 Russian roulette
 - **路径空间分层**：NRD 使用主表面、平滑反射与透射三层，分别保存虚拟几何引导和历史后合成；参考模式关闭 firefly 过滤与历史选光。范围及限制见 [RTXPT 核心实现](docs/RTXPT_REWRITE.md)。
-- **轨迹后端**：`DxrMeshBackend`（硬件 DXR，`DxrSceneBackend` 提供导入场景；旧 5-球体程序化 `DxrRenderer` 与 ComputeSharp `SoftwareMeshBackend` 保留为对照路径）
+- **轨迹后端**：唯一生产路径为 `SceneAsset + DxrSceneBackend`，共享 glTF/GLB 与打包场景的几何、材质、灯光和 BLAS/TLAS。
 - **SM 6.9 / DXR 1.2**：正确查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 inline RayQuery，旧运行时回退 `lib_6_5` 的 TraceRay。保留可选的材质 SER（`HitObject::FromRayQuery` + `MaybeReorderThread`）；实测开销较大，默认关闭。阴影查询提前终止并使用独立实例掩码，减少无关求交与着色。
 - **神经 DXR 评估**：SM 6.9 零售特性没有通用的神经辐射缓存或 Cooperative Vector。项目已有 DLSS Ray Reconstruction（DLSSD）作为神经降噪/重建路径；没有引入未经训练和画质验证的 NRC 网络，避免把训练、缓存更新和额外推理开销叠加到实时路径追踪上。
 
 ### 降噪 / 超分
 
 - **降噪**：关闭、时间累积、**NVIDIA NRD · RELAX** 三档；PBR 使用官方 RELAX_DIFFUSE_SPECULAR_SH、材质去调制、SG resolve 和 SR 前的 re-jittering。玻璃在不透明表面降噪后合成，使用当前帧重投影和独立运动矢量；静止镜头下玻璃持续累积，不设帧数上限，镜头变化立即重置，SR 采样抖动不触发重置。旧 RELAX 风格实现已移除，旧设置自动迁移到 NRD。
-- **时间累积收敛**：静止时按每像素 64 位历史计数进行无固定帧数上限、无邻域裁剪的运行均值，历史被拒绝的像素从 1 重新计数。运动时保留 32 帧上限和邻域裁剪以控制拖影，镜头停止后继续累积；旧编码路径也移除了 64 帧上限。NRD 仍使用自身静止 30 / 运动 8 帧的自适应历史，并非无限样本参考累积器。无上限只保证可以继续求均值；Bistro 的 1-SPP 重尾路径噪声仍可能需要远超数百帧才能收敛，不能据此承诺实时画质接近干净参考。
+- **时间累积收敛**：静止时按每像素 64 位历史计数进行无固定帧数上限、无邻域裁剪的运行均值，历史被拒绝的像素从 1 重新计数。运动时保留 32 帧上限和邻域裁剪以控制拖影，镜头停止后继续累积。NRD 仍使用自身静止 30 / 运动 8 帧的自适应历史，并非无限样本参考累积器。无上限只保证可以继续求均值；Bistro 的 1-SPP 重尾路径噪声仍可能需要远超数百帧才能收敛，不能据此承诺实时画质接近干净参考。
 - **超分辨率 / 光线重建**：原生分辨率、AMD FSR 3.1、Intel XeSS、NVIDIA DLSS SR、**NVIDIA DLSS Ray Reconstruction（DLSSD，已在 RTX 上完成运行验证）**；统一 **1–100% 渲染比例**滑块（默认 67%）；不支持的算法在 UI 中禁用；初始化失败显示具体回退原因
 - NR 与 NRD 正交：可单独开 NRD、可与 FSR/XeSS/DLSS SR 组合；启用 DLSSD 时旁路 NRD 和常规降噪
 
@@ -81,7 +81,6 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 | Vortice.Direct3D12 / DXGI / Dxc | 3.8.3 |
 | Vortice.Mathematics | 2.1.1 |
 | Vortice.D3DCompiler | 3.6.2 |
-| ComputeSharp | 3.2.0 |
 | SharpGLTF.Core | 1.0.6（glTF 解析） |
 | Microsoft.Direct3D.DXC | 1.9.2609.5（DXC NuGet + 本机复制） |
 | Microsoft.Direct3D.D3D12 | 1.619.6（Agility runtime，SM 6.9 / DXR 1.2） |
@@ -112,7 +111,7 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Debug
 dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 ```
 
-生成产物：`bin\x64\{Debug|Release}\net10.0-windows10.0.22621.0\DXRDemo.exe`，同级还有 `dxc.exe / dxcompiler.dll / dxil.dll` 和 `Assets\Models\`（含预烘焙 Stanford 模型与 `RainyCorner.glb`）。
+生成产物：`bin\x64\{Debug|Release}\net10.0-windows10.0.22621.0\DXRDemo.exe`，同级还有 `dxc.exe / dxcompiler.dll / dxil.dll` 和打包的 `Assets\Models\` 场景资源。
 
 仓库的 `global.json` 选择已安装的 .NET 10 稳定 SDK。Debug 和 Release 必须分别构建；确认构建成功后再运行对应目录的程序，避免运行残留的旧产物。
 
@@ -143,7 +142,7 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 ## 设置窗口 Settings（`F1`）
 
 - **渲染程序**（`ShaderSelector`）：当前唯一条目 `RT Demo`（DXR Path Trace，Hailuo-3 / DXR）
-- **场景模型**：RTXPT Kitchen / Bistro 街角 / Convergence Test / Bunny / Armadillo / Dragon / 雨后便利店 / 当前已导入的 GLB
+- **场景模型**：RTXPT Kitchen / Bistro 街角 / Convergence Test / 雨后便利店 / 当前已导入的 GLB
 - **降噪**：关闭 / 时间累积 / NRD · RELAX
 - **超分辨率 / 光线重建**：关闭 / FSR 3.1 / XeSS / DLSS / DLSSD；不支持的算法自动禁用
 - **SR 渲染比例**：1–100% 滑块（默认 67%，200 ms 防抖）
@@ -171,26 +170,21 @@ DXRDemo/                                  解决方案根
 │   ├── SettingsWindow.xaml(.cs)          # 设置面板（独立 WindowEx）
 │   ├── AppSettings.cs                    # 持久化设置（System.Text.Json source generator）
 │   ├── Assets/
-│   │   ├── Models/                       # 预烘焙的 Stanford Bunny / Armadillo / Dragon (.mesh.gz)
+│   │   ├── Models/                       # 打包 glTF/GLB 与 RTXPT 场景资源
 │   │   └── Importers/GltfImporter.cs     # SharpGLTF → SceneAsset
 │   ├── Camera/CameraController.cs        # 轨道 / 自由相机、值类型帧、零分配
-│   ├── DXR/                              # 原始 5-球体 DXR 引擎（保留）
-│   │   ├── DxrDevice.cs                  # 设备 / 队列 / 围栏 / 双缓冲分配器
-│   │   ├── DxrRootSignature.cs           # 全局根签名（4 槽）
+│   ├── DXR/                              # 原生 D3D12 / DXR 基础设施
+│   │   ├── DxrDevice.cs                  # 设备、队列、fence 与纹理上传/读回
+│   │   ├── DxrSceneBackend.cs            # SceneAsset BLAS / TLAS / 材质 / 灯光与追踪
 │   │   ├── DxrShaderCompiler.cs          # DXC 运行时编译 HLSL → DXIL
-│   │   ├── DxrAccelerationStructure.cs   # 5-AABB BLAS + 单实例 TLAS
-│   │   ├── DxrPipelineState.cs           # RT PSO（DxilLibrary + HitGroup + 配置）
 │   │   ├── DxrShaderTable.cs             # 着色器表
-│   │   ├── DxrRenderer.cs                # 命令录制 + DispatchRays + 累积 + 呈现
-│   │   ├── DxrResources.cs               # 上传 / 默认缓冲、UAV 纹理、描述符堆
-│   │   ├── DxrSwapChain.cs               # DXGI 合成交换链 + ISwapChainPanelNative
-│   │   ├── DxrMeshBackend.cs             # 新版硬件 DXR 三角形追踪后端
-│   │   ├── DxrSceneBackend.cs            # 导入场景 BLAS / TLAS / 材质 / 灯光缓冲
-│   │   └── REMAINING_WORK.md             # 历史工作档案
+│   │   ├── DxrResources.cs               # 上传 / 默认缓冲与 UAV 纹理
+│   │   ├── GpuTexture.cs                 # 原生纹理所有权与像素布局
+│   │   └── GpuFrameEffects.cs            # 原生加载画面与 GPU HUD
 │   ├── Hdr/                              # HDR10 输出与全屏通道
 │   │   ├── HdrDisplayInfo.cs             # 显示器 HDR 能力检测
-│   │   ├── HdrSwapChainRenderer.cs       # SDR/HDR 编码
-│   │   ├── HdrShaderPanel.cs             # 持有 GPU 表面 / dispatch 的画板
+│   │   ├── HdrSwapChainRenderer.cs       # DXGI 交换链、双槽 fence 与呈现
+│   │   ├── HdrShaderPanel.cs             # 持有 GPU 表面的画板
 │   │   └── HdrFullScreenPass.cs
 │   ├── Scene/                            # 场景资源布局
 │   │   ├── SceneAsset.cs                 # 顶点 / 材质 / 纹理 / 灯光 CPU 结构
@@ -198,22 +192,17 @@ DXRDemo/                                  解决方案根
 │   │   └── SunLightSettings.cs
 │   ├── Shaders/
 │   │   ├── ShaderFactory / Catalog       # 选择 / 缓存 pass 实例
-│   │   ├── DXR/                          # 原始 5-球体 HLSL
-│   │   │   ├── RayTrace.hlsl             # RayGen / ClosestHit / Intersection / Miss
-│   │   │   ├── SceneData.hlsli           # 共享结构
-│   │   │   ├── Reconstruction.hlsl       # 时间累积、NRD SH resolve、SR 引导与编码
-│   │   │   ├── SceneTrace.hlsl           # glTF/GLB PBR 路径追踪
-│   │   │   └── Minimal.hlsl
-│   │   └── RayTrace/                     # ComputeSharp 着色器
-│   │       ├── RayTracePass.cs           # 主 pass（场景 + 后端选择）
-│   │       ├── RayTraceShader.cs         # 5-球体 ComputeSharp 实现
-│   │       ├── MeshPathTraceShader.cs    # 软件 BVH 三角形追踪
-│   │       ├── MeshEncodeShader.cs       # mesh 编码
-│   │       ├── MeshScene.cs              # 内置 Stanford 模型选择与加载
-│   │       └── NaiveTemporalAccumulationShader.cs
+│   │   ├── DXR/                          # 当前 DXR / 重建 HLSL
+│   │   │   ├── SceneTrace.hlsl           # SceneAsset PBR 路径追踪
+│   │   │   ├── SceneLighting.hlsli       # CPU/HLSL 场景与光照契约
+│   │   │   ├── Reconstruction.hlsl       # 时间累积、NRD、SR 引导与编码
+│   │   │   ├── StableReconstruction.hlsl # 反射 / 透射稳定平面
+│   │   │   └── FrameEffects.hlsl         # 加载画面与 GPU HUD
+│   │   └── RayTrace/
+│   │       └── RayTracePass.cs           # SceneAsset-only 主 pass
 │   ├── SuperResolution/                  # 降噪 + 厂商 SR 路径
 │   │   ├── SuperResolutionRenderer.cs    # NRD + FSR / XeSS / DLSS / DLSSD 接线
-│   │   ├── NativeNrd.cs / NativeReconstruction.cs   # C# → C++/CLI / 原生 DLL 绑定
+│   │   ├── NativeNrd.cs / NativeReconstruction.cs   # C# → 原生 DLL 绑定
 │   │   ├── ReconstructionMode.cs         # Off / Fsr / XeSS / Dlss / DlssRayReconstruction
 │   │   └── ReconstructionAssets.targets  # MSBuild：复制 NRD / FSR / XeSS / DLSS DLL 与校验
 │   └── app.manifest
@@ -242,7 +231,8 @@ DXRDemo/                                  解决方案根
 │   │   ├── IntegrationProbe.csproj
 │   │   ├── ui_regression.py / ui_settings.py
 │   │   └── README.md
-│   └── performance/                      # PerfProbe：CPU/GPU 计时、mesh throughput
+│   ├── settings/                         # SettingsProbe：设置迁移、损坏恢复与原子保存
+│   └── NuGet.Config                      # diagnostics 共用离线 NuGet 配置
 ├── DXRDemo.slnx                          # 解决方案文件
 ├── DXRDemo (Package)/                    # （可选）MSIX 打包项目
 ├── .gitattributes / .gitignore
@@ -255,13 +245,13 @@ DXRDemo/                                  解决方案根
 
 1. **初始化**
    - 创建 D3D12 设备（`DxrDevice`）→ 检查 DXR Tier
-   - DXC 运行时编译 HLSL（`RayTrace.hlsl` / `SceneTrace.hlsl`）→ DXIL
+   - DXC 运行时编译 HLSL（`SceneTrace.hlsl` / `Reconstruction.hlsl`）→ DXIL
    - 加载 glTF / GLB：`SharpGLTF` → `SceneAsset`（CPU）；后台解码 PNG/JPEG、生成 mip；GPU 上传 BLAS / TLAS / 材质 / 灯光缓冲 / 纹理
    - 创建 RT PSO、Shader Table、根签名、SR/NRD 描述符
    - 创建并绑定 DXGI 合成交换链（`ISwapChainPanelNative`）
 2. **逐帧（渲染线程）**
    - 更新常量（分辨率、相机、帧号、SPP / bounces、SR jitter、太阳参数）
-   - 轨迹：`DxrSceneBackend`（硬件 DXR，`DispatchRays`）或 `SoftwareMeshBackend`（ComputeSharp 软件 BVH）二选一
+   - 轨迹：`DxrSceneBackend` 通过 `DispatchRays` 追踪当前 SceneAsset
    - 深度 / 运动 / 法线粗糙度 / 反应遮罩准备 → 厂商 SR / 自定义 / NRD → 线性输出
    - SDR 编码（sRGB）或 HDR 编码（Rec.2020 / PQ）→ Present
 3. **渐进累积**：时间模式对历史帧 reprojection；运动时保留 32 帧短期历史，静止时持续运行均值，遮挡拒绝或显式重置的像素重新计数
@@ -283,11 +273,11 @@ DXRDemo/                                  解决方案根
 dotnet build DXRDemo/DXRDemo.csproj -c Release -p:Platform=x64 -p:WindowsSdkPackageVersion=10.0.22621.57
 
 # 设置文件回归（损坏 JSON、备份恢复、序列化/IO 失败、原子替换）
-dotnet build diagnostics/settings/SettingsProbe.csproj -c Release --configfile diagnostics/performance/NuGet.Config
+dotnet build diagnostics/settings/SettingsProbe.csproj -c Release --configfile diagnostics/NuGet.Config
 dotnet run --project diagnostics/settings/SettingsProbe.csproj -c Release --no-build --no-restore
 
 # 集成探针（含场景、玻璃、SR、NRD、模型回归）
-dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/performance/NuGet.Config
+dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/NuGet.Config
 cd diagnostics/integration
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
@@ -322,7 +312,6 @@ cd diagnostics/integration
 ## 参考 References
 
 - [Vortice.Windows](https://github.com/amerkoleci/Vortice.Windows) — C# DirectX 绑定
-- [ComputeSharp](https://github.com/Sergio0694/ComputeSharp) — C# → DXIL
 - [WinUIEx](https://github.com/dotMorten/WinUIEx) — WinUI 3 WindowEx
 - [SharpGLTF](https://github.com/vpenades/SharpGLTF) — glTF 2.0 解析
 - [NVIDIA NRD](https://github.com/NVIDIA-RTX/NRD) — 4.17.3 RELAX
@@ -340,8 +329,8 @@ cd diagnostics/integration
 
 第三方 SDK / 模型 / 资源的许可证：
 
-- Stanford 模型：见 [`Assets/Models/SOURCES.md`](DXRDemo/Assets/Models/SOURCES.md)
+- 打包场景与转换资产：见 [`Assets/Models/SOURCES.md`](DXRDemo/Assets/Models/SOURCES.md)
 - NVIDIA NRD：见 [`External/NRD/LICENSE.txt`](DXRDemo/External/NRD/LICENSE.txt)、`External/NRD/MathLib-LICENSE.txt`、`External/NRD/ShaderMake-LICENSE.txt`
 - AMD FSR / Intel XeSS / NVIDIA DLSS / DLSSD：见 [`External/Upscalers/NOTICE.txt`](DXRDemo/External/Upscalers/NOTICE.txt)
 - NVIDIA OptiX：见 [`External/OptiX/LICENSE.txt`](External/OptiX/LICENSE.txt)、[构建依赖](External/OptiX/README.md)
-- Vortice、ComputeSharp、WinUIEx、SharpGLTF、Microsoft.Direct3D.DXC 等：见各自仓库
+- Vortice、WinUIEx、SharpGLTF、Microsoft.Direct3D.DXC 等：见各自仓库

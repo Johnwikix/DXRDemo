@@ -1,8 +1,5 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
 using System.Text.Json;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -11,6 +8,8 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 // Actual glass BSDF + actual SR: stationary shimmer, fine background detail and optical motion.
 internal static unsafe class GlassTemporalProbe
@@ -18,10 +17,8 @@ internal static unsafe class GlassTemporalProbe
     internal static void Run(string[] args)
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid=typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device,&iid,(void**)&pointer);
-        using var native=new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native=device.Device.QueryInterface<ID3D12Device5>();
         using var messages=native.QueryInterface<ID3D12InfoQueue>();
         using var backend=new DxrSceneBackend { CausticsEnabled=false,FireflyThreshold=0 };
         backend.Initialize(device);
@@ -71,16 +68,16 @@ internal static unsafe class GlassTemporalProbe
                 Instances=[..scene.Instances,new("reflection card",scene.Meshes.Length,Matrix4x4.Identity)] };
         }
         // An exact, noise-free reference isolates glass filtering from Monte Carlo error.
-        using var referenceRaw=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var referenceNormal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(width,height);
-        using var referenceSurface=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var referenceGuide=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var referenceRaw=device.CreateTexture2D<Float4>(width,height);
+        using var referenceNormal=device.CreateTexture2D<Rgba32>(width,height);
+        using var referenceSurface=device.CreateTexture2D<Float4>(width,height);
+        using var referenceGuide=device.CreateTexture2D<Float4>(width,height);
         using var referenceSignals=new PbrSignals(device,width,height);
         backend.SetScene(scene with { Instances=scene.Instances.Where(i=>i.Mesh is not (48 or 49)).ToArray() });
         backend.Trace(view,0,1,4,default,0,referenceRaw,referenceNormal,referenceSurface,referenceGuide,referenceSignals);
         var reference=referenceRaw.ToArray();backend.SetScene(scene);
         using var sr=new SuperResolutionRenderer(device);
-        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
+        using var target=device.CreateTexture2D<Rgba64>(width,height);
         var results=new List<Result>();Directory.CreateDirectory(output);
         foreach(var mode in new[] { ReconstructionMode.Fsr,ReconstructionMode.XeSS,ReconstructionMode.Dlss })
         {
@@ -91,10 +88,10 @@ internal static unsafe class GlassTemporalProbe
                 sr.Configure(mode,scale,width,height,false,true,denoiser==RayTraceDenoiserMode.Optix);sr.Reset();
                 Require(sr.Active==mode,sr.Status.Message);
                 int w=sr.InputWidth,h=sr.InputHeight;
-                using var raw=device.AllocateReadWriteTexture2D<Float4>(w,h);
-                using var normal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(w,h);
-                using var surface=device.AllocateReadWriteTexture2D<Float4>(w,h);
-                using var guide=device.AllocateReadWriteTexture2D<Float4>(w,h);
+                using var raw=device.CreateTexture2D<Float4>(w,h);
+                using var normal=device.CreateTexture2D<Rgba32>(w,h);
+                using var surface=device.CreateTexture2D<Float4>(w,h);
+                using var guide=device.CreateTexture2D<Float4>(w,h);
                 using var signals=new PbrSignals(device,w,h);
                 void Frame(int frame,CameraFrame camera)
                 {

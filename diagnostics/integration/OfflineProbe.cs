@@ -2,8 +2,6 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
@@ -12,6 +10,9 @@ using DXRDemo.SuperResolution;
 using DXRDemo.Shaders.RayTrace;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Vortice.DXGI;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Bounded headless single-frame and temporal camera-motion checks, including NRD/DLSS up to 4K.</summary>
 internal static class OfflineProbe
@@ -32,7 +33,7 @@ internal static class OfflineProbe
         await OfflineFeatureChecks.RunCpu();
         ValidateLightWeights();
         Require(Recompose(new(2, 3, 5, 0), new(7, 11, 13, 1), new(1, 1, 1, 0), new(.5f, 1, 2, 1), new(1, 2, 3, 0)) ==
-            new Vector3(15.5f, 36, 70), "CPU signal validation must use scalar arithmetic, not GPU-only Float4 operators");
+            new Vector3(15.5f, 36, 70), "CPU signal validation must use scalar arithmetic and remain independent of shader vector operators");
         int Option(string name, int fallback, int maximum)
         {
             int index = Array.IndexOf(args, name);
@@ -100,7 +101,7 @@ internal static class OfflineProbe
         if (cpuOnly) { Console.WriteLine("PASS: CPU assets, light PDFs and authored camera. GPU dispatches: 0."); return; }
 
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
+        using var device = DxrDevice.CreateDefault();
         using var native = NativeDevice(device);
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var backend = new DxrSceneBackend { ReferenceMode = !production, CausticsEnabled = false,
@@ -109,13 +110,13 @@ internal static class OfflineProbe
             ShaderLibraryFile = contracts ? "ContractTracer.hlsl" : "SceneTrace.hlsl" };
         backend.Initialize(device); backend.SetScene(asset);
         Console.WriteLine($"Runtime: {backend.ActualShaderModel}, SER active: {backend.SerActive}");
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         using var reconstruction = (nrd || rr) && !contracts ? new SuperResolutionRenderer(device) : null;
-        using var target = reconstruction != null ? device.AllocateReadWriteTexture2D<Rgba64, Float4>(dlss ? 3840 : width, dlss ? 2160 : height) : null;
+        using var target = reconstruction != null ? device.CreateTexture2D<Rgba64>(dlss ? 3840 : width, dlss ? 2160 : height) : null;
         float exposureStops = RtxptAssets.InitialExposure(bistro ? RtxptScene.Bistro : convergence ? RtxptScene.Convergence : RtxptScene.Kitchen);
         if (reconstruction != null)
         {
@@ -195,7 +196,7 @@ internal static class OfflineProbe
                 Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption), message.Description);
             }
             Require(backend.TraceDispatchCount == frameCount && backend.PhotonBuildCount == 0, "Motion sequence frame contract violated");
-            var motionResult = new { scene = asset.Name, gpu = device.Name.ToString(), width, height, outputWidth = target!.Width, outputHeight = target.Height,
+            var motionResult = new { scene = asset.Name, gpu = GpuName(device), width, height, outputWidth = target!.Width, outputHeight = target.Height,
                 samples, bounces, textureLimit, frames = frameCount, stablePlanes = true, nrd = true, dlss,
                 temporalValidation = true, maxMotionError, frameDetails = frames };
             string motionJson = JsonSerializer.Serialize(motionResult, new JsonSerializerOptions { WriteIndented = true });
@@ -320,7 +321,7 @@ internal static class OfflineProbe
         if (denoisedRgba != null) SceneProbe.WritePng(Path.Combine(directory, name + "-nrd.png"), width, height, denoisedRgba);
         if (outputRgba != null) SceneProbe.WritePng(Path.Combine(directory, name + "-4k.png"), 3840, 2160, outputRgba);
         File.WriteAllBytes(Path.Combine(directory, name + ".rgba32f"), MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref pixels[0, 0], pixels.Length)).ToArray());
-        var result = new { scene = asset.Name, gpu = device.Name.ToString(), width, height, samples, bounces, exposureStops,
+        var result = new { scene = asset.Name, gpu = GpuName(device), width, height, samples, bounces, exposureStops,
             textureLimit, compressedTextures = asset.Textures.Count(t => t.Bc7Mips != null),
             textureGpuBytes = asset.Textures.Sum(t => (t.Bc7Mips ?? t.Mips).Sum(m => (long)m.Length)),
             frames = backend.TraceDispatchCount, photonPasses = backend.PhotonBuildCount,
@@ -374,8 +375,8 @@ internal static class OfflineProbe
     }
 
     private static void Require(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
-    // ComputeSharp vector arithmetic is a GPU intrinsic and returns undefined results on the CPU.
-    // Read individual components for the independent validation of the shader's signal contract.
+    // Keep CPU signal validation scalar and independent of the shader's vector arithmetic.
+    // Read individual components so this remains an independent check of the signal contract.
     private static Vector3 Recompose(Float4 d, Float4 df, Float4 s, Float4 sf, Float4 e) =>
         new(d.X * df.X + s.X * sf.X + e.X, d.Y * df.Y + s.Y * sf.Y + e.Y, d.Z * df.Z + s.Z * sf.Z + e.Z);
     private static void ValidateLightWeights()
@@ -391,9 +392,12 @@ internal static class OfflineProbe
         Require(MathF.Abs(distribution.Emitters[0].Meta.Y - .1f) < 1e-6f, "Equal-area lights must be selected in proportion to emitted power");
         Require(MathF.Abs(distribution.InstanceAreaPdf[1] / distribution.InstanceAreaPdf[0] - 9) < 1e-5f, "Hit-light PDFs lost the power distribution");
     }
-    private static unsafe ID3D12Device5 NativeDevice(GraphicsDevice device)
+    private static ID3D12Device5 NativeDevice(DxrDevice device) => device.Device.QueryInterface<ID3D12Device5>();
+
+    private static unsafe string GpuName(DxrDevice device)
     {
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer); return new(pointer);
+        long luid = device.Device.AdapterLuid;
+        using var adapter = device.DxgiFactory.EnumAdapterByLuid<IDXGIAdapter1>(*(Vortice.Luid*)&luid);
+        return adapter.Description1.Description;
     }
 }

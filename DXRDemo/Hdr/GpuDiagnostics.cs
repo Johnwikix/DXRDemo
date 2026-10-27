@@ -1,32 +1,38 @@
-using ComputeSharp;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
+using DXRDemo.DXR;
+using Vortice.Direct3D12;
 
 namespace DXRDemo.Hdr;
 
-/// <summary>A small bitmap font drawn into the frame UAV; no XAML frame counter or readback.</summary>
 internal sealed class GpuDiagnostics : IDisposable
 {
     private const int Columns = 76, Rows = 7;
-    private readonly GraphicsDevice _device;
-    private readonly ReadOnlyBuffer<int> _font, _text;
+    private readonly ID3D12Resource _font, _text;
+    private readonly GpuFrameEffects _effects;
     private readonly int[] _characters = new int[Columns * Rows];
     private long _start = Stopwatch.GetTimestamp(), _frames, _lastPresented;
     private int _columns = 48, _rows = 6;
     private double _frameMs;
-    public GpuDiagnostics(GraphicsDevice device)
+
+    public GpuDiagnostics(DxrDevice device)
     {
-        _device = device;
-        _font = device.AllocateReadOnlyBuffer(CreateFont());
-        _text = device.AllocateReadOnlyBuffer(_characters);
+        _effects = new(device);
+        _font = DxrResources.CreateUploadBuffer(device.Device, 128 * 7 * sizeof(int), "HUD font");
+        _text = DxrResources.CreateUploadBuffer(device.Device, (Columns * Rows * sizeof(int) + 255) & ~255, "HUD text");
+        Write(_font, CreateFont());
+        Write(_text, _characters);
     }
-    public void Draw(ReadWriteTexture2D<Rgba64, Float4> texture, IHdrShaderRunner runner, HdrRenderParameters hdr, long presented, double frameMs)
+
+    public void Draw(GpuTexture<Rgba64> texture, IHdrShaderRunner runner, HdrRenderParameters hdr, long presented, double frameMs)
     {
-        _frames++; _frameMs += frameMs;
+        _frames++;
+        _frameMs += frameMs;
         double seconds = Stopwatch.GetElapsedTime(_start).TotalSeconds;
         if (seconds >= 0.5 || _frames == 1 && _characters[0] == 0)
         {
-            string description = runner is IRenderDiagnostics diagnostics ? diagnostics.DiagnosticText : "COMPUTESHARP";
+            string description = runner is IRenderDiagnostics diagnostics ? diagnostics.DiagnosticText : "D3D12";
             string text = description + "\n" + FormattableString.Invariant($"RENDER {_frames / Math.Max(seconds, 0.001):F1} FPS   SUBMIT {(presented - _lastPresented) / Math.Max(seconds, 0.001):F1} FPS")
                 + "\n" + FormattableString.Invariant($"FRAME {_frameMs / _frames:F2} MS   {texture.Width} X {texture.Height}   {(hdr.IsHdrEnabled ? "HDR10" : "SDR")}")
                 + "\nUNLIMITED";
@@ -40,8 +46,11 @@ internal sealed class GpuDiagnostics : IDisposable
             longest = Math.Max(longest, col);
             _columns = longest;
             _rows = Math.Min(Rows, row + 1);
-            _text.CopyFrom(_characters);
-            _start = Stopwatch.GetTimestamp(); _frames = 0; _frameMs = 0; _lastPresented = presented;
+            Write(_text, _characters);
+            _start = Stopwatch.GetTimestamp();
+            _frames = 0;
+            _frameMs = 0;
+            _lastPresented = presented;
         }
         float white = 0.92f;
         if (hdr.IsHdrEnabled)
@@ -50,14 +59,28 @@ internal sealed class GpuDiagnostics : IDisposable
             white = MathF.Pow((0.8359375f + 18.8515625f * n) / (1 + 18.6875f * n), 78.84375f);
         }
         int scale = texture.Width >= _columns * 12 + 32 ? 2 : 1;
-        _device.For(Math.Min(_columns * 6 * scale + 16, Math.Max(1, texture.Width - 16)), Math.Min(_rows * 9 * scale + 8, Math.Max(1, texture.Height - 16)),
-            new HudShader(texture, _font, _text, white, scale));
+        _effects.DrawHud(texture, _font, _text, white, scale,
+            Math.Min(_columns * 6 * scale + 16, Math.Max(1, texture.Width - 16)),
+            Math.Min(_rows * 9 * scale + 8, Math.Max(1, texture.Height - 16)));
     }
-    public void Dispose() { _font.Dispose(); _text.Dispose(); }
+
+    private static unsafe void Write(ID3D12Resource buffer, ReadOnlySpan<int> values)
+    {
+        void* pointer;
+        buffer.Map(0, null, &pointer).CheckError();
+        MemoryMarshal.AsBytes(values).CopyTo(new Span<byte>(pointer, values.Length * sizeof(int)));
+        buffer.Unmap(0);
+    }
+
+    public void Dispose()
+    {
+        _font.Dispose();
+        _text.Dispose();
+        _effects.Dispose();
+    }
 
     private static int[] CreateFont()
     {
-        // Each row is five bits, most significant pixel on the left.
         var result = new int[128 * 7];
         string keys = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:/-?+()";
         string[] glyphs =
@@ -74,30 +97,5 @@ internal sealed class GpuDiagnostics : IDisposable
         for (int i = 0; i < keys.Length; i++)
             for (int row = 0; row < 7; row++) result[keys[i] * 7 + row] = Convert.ToInt32(glyphs[i].Substring(row * 2, 2), 16);
         return result;
-    }
-}
-
-[ThreadGroupSize(DefaultThreadGroupSizes.XY)]
-[GeneratedComputeShaderDescriptor]
-internal readonly partial struct HudShader(ReadWriteTexture2D<Rgba64, Float4> target, ReadOnlyBuffer<int> font, ReadOnlyBuffer<int> text, float white, int scale) : IComputeShader
-{
-    public void Execute()
-    {
-        Int2 p = ThreadIds.XY;
-        Int2 dest = p + 8;
-        if (dest.X >= target.Width || dest.Y >= target.Height) return;
-        int x = p.X - 8, y = p.Y - 4;
-        bool ink = false;
-        if (x >= 0 && y >= 0)
-        {
-            int col = x / (6 * scale), row = y / (9 * scale), gx = x / scale % 6, gy = y / scale % 9;
-            if (col < 76 && row < 7 && gx < 5 && gy < 7)
-            {
-                int c = text[row * 76 + col];
-                ink = ((uint)font[c * 7 + gy] & (1u << (4 - gx))) != 0;
-            }
-        }
-        Float4 old = target[dest];
-        target[dest] = new Float4(ink ? new Float3(white, white, white) : old.XYZ * 0.24f, old.W);
     }
 }

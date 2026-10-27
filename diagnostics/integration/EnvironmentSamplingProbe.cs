@@ -1,7 +1,7 @@
 using System.Numerics;
-using ComputeSharp;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
+using Float4 = System.Numerics.Vector4;
 
 internal static class EnvironmentSamplingProbe
 {
@@ -11,13 +11,13 @@ internal static class EnvironmentSamplingProbe
         var map = SceneEnvironment.LoadRadiance(Path.Combine(AppContext.BaseDirectory,
             "Assets", "Models", "RTXPT", "EnvironmentMaps", "shanghai_bund_1k.hdr"));
         var asset = OfflineFeatureChecks.Fixture() with { EnvironmentMap = map };
-        using var device = GraphicsDevice.GetDefault();
+        using var device = DxrDevice.CreateDefault();
         using var backend = new DxrSceneBackend { ShaderLibraryFile = "EnvironmentSamplerTracer.hlsl" };
         backend.Initialize(device); backend.SetScene(asset);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         backend.Trace(asset.DefaultCamera!.Value, 0, 1, 1, default, 1, raw, normals, surfaces, guide, signals);
         var pixels = raw.ToArray();

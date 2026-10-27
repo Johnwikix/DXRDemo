@@ -1,7 +1,5 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -10,16 +8,16 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 internal static unsafe class OptixProbe
 {
     internal static void Run()
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var sr = new SuperResolutionRenderer(device);
         Require(sr.Status.OptixAvailable, "OptiX must actually be available on this test GPU: " + Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()));
@@ -38,14 +36,6 @@ internal static unsafe class OptixProbe
             Verify(device, native, fallback, 64, 64, unavailable: true);
         }
         finally { Environment.SetEnvironmentVariable("DXR_DISABLE_OPTIX", previous); }
-        using (var spheres = new RayTracePass())
-        using (var sphereTarget = device.AllocateReadWriteTexture2D<Rgba64, Float4>(64, 64))
-        {
-            spheres.Initialize(device, default); spheres.SceneIndex = MeshData.Choices.Length;
-            spheres.ReconstructionMode = ReconstructionMode.Off; spheres.DenoiserMode = RayTraceDenoiserMode.Optix;
-            for (int i = 0; i < 3; i++) Require(spheres.TryExecute(sphereTarget, 64, 64, TimeSpan.Zero, HdrRenderParameters.Default), "Sphere fallback failed");
-            Require(!spheres.SupportsOptix && spheres.ReconstructionStatus?.OptixActive == false, "Encoded-only spheres must use the explicit Temporal fallback");
-        }
         for (ulong i = 0; i < messages.NumStoredMessagesAllowedByRetrievalFilter; i++)
         {
             var message = messages.GetMessage(i);
@@ -54,7 +44,7 @@ internal static unsafe class OptixProbe
         Console.WriteLine("PASS actual OptiX AI dispatch, noise reduction, isolated raw mean, thin-glass transmission, camera/jitter resets, resize, mode transition and unavailable fallback.");
     }
 
-    private static void VerifyGlass(GraphicsDevice device, ID3D12Device5 native)
+    private static void VerifyGlass(DxrDevice device, ID3D12Device5 native)
     {
         const int width = 256, height = 160;
         var fixture = GlassReconstructionProbe.Fixture();
@@ -62,12 +52,12 @@ internal static unsafe class OptixProbe
         materials[2].Factors.Y = 0; materials[2].Transmission = new(1, 1, 0, 0);
         var glass = fixture with { Materials = materials, Instances = fixture.Instances[..^1] };
         using var backend = new DxrSceneBackend { CausticsEnabled = false }; backend.Initialize(device);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surface = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normal = device.CreateTexture2D<Rgba32>(width, height);
+        using var surface = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         using var sr = new SuperResolutionRenderer(device);
         var view = CameraFrame.Look(new(.3f, 0, 3), Vector3.Normalize(new(-.12f, 0, -1)), .7f, .01f, 100);
         backend.SetScene(glass with { Instances = fixture.Instances[..^2] });
@@ -100,17 +90,17 @@ internal static unsafe class OptixProbe
         Directory.CreateDirectory("output/optix"); SceneProbe.Save(target, "output/optix/thin-glass.png");
     }
 
-    private static void Verify(GraphicsDevice device, ID3D12Device5 native, SuperResolutionRenderer sr, int width, int height, bool unavailable = false)
+    private static void Verify(DxrDevice device, ID3D12Device5 native, SuperResolutionRenderer sr, int width, int height, bool unavailable = false)
     {
         sr.Configure(ReconstructionMode.Off, 100, width, height, false, true, true);
         Require(sr.Status.OptixActive != unavailable && !sr.Status.NrdActive, sr.Status.Message);
         if (unavailable) Require(sr.Status.Message.Contains("时间累积"), "Unavailable OptiX was not reported as Temporal fallback");
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         var camera = CameraFrame.Look(new(0, 0, 3), -Vector3.UnitZ, 2 * MathF.Atan(.5f), .01f, 1000);
         var geometry = new Float4[height, width]; var albedo = new Float4[height, width]; var normalGuide = new Float4[height, width];
         for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)

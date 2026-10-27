@@ -200,8 +200,6 @@ a negative control, which reproduces the loss of detail.
   startup, camera/reset, hard shadows, ReSTIR and photon caustics, plus 60
   FSR/XeSS × five-scale × three-denoiser × SDR/HDR combinations. Odd dimensions,
   tiny input execution, history/disocclusion checks and mode transitions pass.
-- The default probe passes all **18** model/denoiser/SDR-HDR hardware/software
-  parity cases (maximum normalized RGBA RMSE **0.0007662**), resize and GPU HUD.
 - With only the probe's NRD.dll temporarily renamed, `--nrd-missing` reports
   **Temporal** fallback and FSR still executes. The DLL was restored afterward.
 - Native bridge, integration probe and WinUI Release builds pass. WinUI retains
@@ -212,40 +210,6 @@ a negative control, which reproduces the loss of detail.
 Run the probe from `diagnostics/integration`; captures and logs are in its ignored
 `output/` directory. `--glass-sr` captures are under `output/glass-sr/`, while the
 actual scene's raw, NRD and reference images are under `output/scenes/`.
-
-## Historical mesh verification on Intel Arc 140T (2026-09-29)
-
-- Real SDK available and active at native resolution; stable-frame dispatch
-  count is 12. D3D12 debug Error/Corruption messages fail the probe.
-- 80 SR cases: FSR/XeSS × five scales × four denoisers × SDR/HDR. An NRD selection
-  must report an actual NRD context and dispatches, so fallback cannot pass.
-- Odd sizes, 16×9 input, model switching, mode transitions and existing jitter/
-  motion/history regressions remain covered. Extreme ratios test execution,
-  not useful reconstruction quality.
-- NRD guide readback checks signed view depth, sky exclusion, normal/roughness
-  packing and real secondary-hit/miss distances.
-- All 24 model/denoiser/SDR-HDR comparisons pass between hardware DXR and software
-  BVH tracing (maximum normalized RGBA RMSE 0.001193), including leaving NRD for
-  another denoiser. Resize and the GPU HUD pass in that probe.
-- With NRD.dll temporarily absent from the probe output, the app explicitly
-  falls back to its legacy filter and still executes FSR. The source SDK and
-  normal deployment files are restored/retained.
-- At 320×180, Bunny, 2 SPP, 10 bounces, after 64 frames: linear RGB RMSE against an
-  independently sampled 512-SPP reference is **0.055809** for the last raw frame
-  and **0.038540** for NRD; mean RGB energy ratio is **0.98931**. This is a regression
-  check for one scene and settings, not a general quality/performance benchmark.
-- Moving/zooming the camera produces finite output. Clearing history at a camera
-  cut matches a fresh NRD context, including the one-bounce tracing case.
-- Native and NRD+SR image captures were inspected. Release build passes with the
-  pre-existing generated WinUIEx Icon warning. Sustained performance, subjective
-  motion quality, physical HDR and slider interaction were not UI-tested.
-- NVIDIA DLSS execution was not tested on this Intel device in that historical
-  probe. DLSS Ray Reconstruction uses a separate pipeline.
-
-Run `IntegrationProbe.exe --sr` from `diagnostics/integration` for the contract and
-quality checks; run without arguments for model/backend parity. `--nrd-missing`
-is a negative deployment check and expects NRD.dll to be absent from the probe's
-output directory. Do not remove the vendored SDK file to run it.
 
 Settings also use a **1–100% slider**, step 1%, for SR scale. The value is shown
 beside it; arrow/PageUp/PageDown input is supported. Changes are applied after

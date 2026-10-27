@@ -1,8 +1,5 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
 using System.Text.Json;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -11,6 +8,8 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 // Analytic textured plane: varying Halton footprints must reach the real SR SDK intact.
 internal static unsafe class DenoiserSrProbe
@@ -18,16 +17,14 @@ internal static unsafe class DenoiserSrProbe
     internal static void Run(string[] args)
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = NativeDevice(device);
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var sr = new SuperResolutionRenderer(device);
         if(args.Contains("--sr-mips")) { VerifyMipFootprint(device,sr); VerifyDebug(messages); return; }
         if(args.Contains("--sr-bistro")) { VerifyBistro(device,sr,args); VerifyDebug(messages); return; }
         const int width = 512, height = 288, frames = 48;
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width,height);
+        using var target = device.CreateTexture2D<Rgba64>(width,height);
         var results = new List<Result>();
         bool noisy=args.Contains("--noisy"),emissive=args.Contains("--emissive"),sparse=args.Contains("--sparse"),impulse=args.Contains("--impulse");
         Require(!sparse || !emissive,"Sparse transport must enter the noisy lighting history");
@@ -42,10 +39,10 @@ internal static unsafe class DenoiserSrProbe
                 sr.Configure(mode,50,width,height,false,true,denoiser == RayTraceDenoiserMode.Optix); sr.Reset();
                 Require(sr.Active == mode,sr.Status.Message);
                 int iw=sr.InputWidth,ih=sr.InputHeight;
-                using var raw=device.AllocateReadWriteTexture2D<Float4>(iw,ih);
-                using var normal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(iw,ih);
-                using var surfaces=device.AllocateReadWriteTexture2D<Float4>(iw,ih);
-                using var guide=device.AllocateReadWriteTexture2D<Float4>(iw,ih);
+                using var raw=device.CreateTexture2D<Float4>(iw,ih);
+                using var normal=device.CreateTexture2D<Rgba32>(iw,ih);
+                using var surfaces=device.CreateTexture2D<Float4>(iw,ih);
+                using var guide=device.CreateTexture2D<Float4>(iw,ih);
                 using var signals=new PbrSignals(device,iw,ih);
                 var color=new Float4[ih,iw];var reflectance=new Float4[ih,iw];var geometry=new Float4[ih,iw];var normals=new Float4[ih,iw];
                 var random=new Random(58431);
@@ -149,7 +146,7 @@ internal static unsafe class DenoiserSrProbe
         Require(results.Count>=3,"No actual SR/denoiser combinations were exercised");
         Console.WriteLine("PASS jittered texture detail through actual temporal SR/denoiser combinations.");
     }
-    private static void VerifyMipFootprint(GraphicsDevice device,SuperResolutionRenderer sr)
+    private static void VerifyMipFootprint(DxrDevice device,SuperResolutionRenderer sr)
     {
         const int width=512,height=288,edge=1024;
         var levels=new List<byte[]>();var mip=new byte[edge*edge*4];
@@ -181,10 +178,10 @@ internal static unsafe class DenoiserSrProbe
         var camera=CameraFrame.Look(new(0,0,3),-Vector3.UnitZ,2*MathF.Atan(.5f),.01f,1000);
         Float4[,] Render(int w,int h,Float2 jitter,float bias)
         {
-            using var raw=device.AllocateReadWriteTexture2D<Float4>(w,h);
-            using var normal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(w,h);
-            using var surface=device.AllocateReadWriteTexture2D<Float4>(w,h);
-            using var guide=device.AllocateReadWriteTexture2D<Float4>(w,h);
+            using var raw=device.CreateTexture2D<Float4>(w,h);
+            using var normal=device.CreateTexture2D<Rgba32>(w,h);
+            using var surface=device.CreateTexture2D<Float4>(w,h);
+            using var guide=device.CreateTexture2D<Float4>(w,h);
             using var signals=new PbrSignals(device,w,h);
             backend.Trace(camera,0,1,1,jitter,0,raw,normal,surface,guide,signals,textureLodBias:bias);
             return raw.ToArray();
@@ -203,14 +200,14 @@ internal static unsafe class DenoiserSrProbe
         Require(before>.01 && after<1e-4,"SR texture LOD did not preserve the output-resolution footprint");
         Console.WriteLine("PASS production SR mip footprint matches the native-resolution texture reference.");
     }
-    private static void VerifyBistro(GraphicsDevice device,SuperResolutionRenderer capabilities,string[] args)
+    private static void VerifyBistro(DxrDevice device,SuperResolutionRenderer capabilities,string[] args)
     {
         var mode=new[] { ReconstructionMode.Dlss,ReconstructionMode.XeSS,ReconstructionMode.Fsr }.First(capabilities.Status.Supports);
         var denoiser=args.Contains("--temporal")?RayTraceDenoiserMode.TemporalOnly:RayTraceDenoiserMode.Optix;
-        using var pass=new RayTracePass(new DxrMeshBackend());pass.Initialize(device,default);
+        using var pass=new RayTracePass();pass.Initialize(device,default);
         pass.SceneIndex=RayTracePass.RtxptBistroSceneIndex;
         pass.ReconstructionMode=mode;pass.RenderScalePercent=67;pass.DenoiserMode=denoiser;pass.Samples=1;pass.MaxBounces=8;
-        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(1280,720);
+        using var target=device.CreateTexture2D<Rgba64>(1280,720);
         var watch=System.Diagnostics.Stopwatch.StartNew();int rendered=0;
         while(rendered<64)
         {
@@ -226,6 +223,7 @@ internal static unsafe class DenoiserSrProbe
         Directory.CreateDirectory("output/sr-bistro");SceneProbe.Save(target,$"output/sr-bistro/{mode}-{denoiser}.png");
         Console.WriteLine($"PASS actual Bistro: {denoiser}+{mode}, {pass.ReconstructionStatus!.InputWidth}x{pass.ReconstructionStatus.InputHeight} -> 1280x720, 1 SPP, 8 bounces, 64 frames.");
     }
+    private static ID3D12Device5 NativeDevice(DxrDevice device) => device.Device.QueryInterface<ID3D12Device5>();
     private static void VerifyDebug(ID3D12InfoQueue messages)
     {
         for(ulong i=0;i<messages.NumStoredMessagesAllowedByRetrievalFilter;i++)

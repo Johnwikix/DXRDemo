@@ -42,6 +42,24 @@ internal sealed partial class AppSettingsContext : JsonSerializerContext;
 
 internal static class AppSettingsStore
 {
+    internal static (int? Index, bool UseKitchenDefaults) SceneSelection(AppSettings settings)
+    {
+        if (settings.SceneCatalogVersion >= 2)
+            return (settings.SceneIndex is >= 0 and < 4 ? settings.SceneIndex : null, false);
+        if (settings.SceneIndex is not int index) return (null, false);
+        if (settings.SceneCatalogVersion < 1 && index == 3) return (1, true);
+        int? mapped = index switch
+        {
+            >= 0 and <= 2 => 1,
+            3 => 0,
+            4 => 1,
+            5 => 2,
+            6 => 3,
+            _ => null
+        };
+        return (mapped, false);
+    }
+
     // Older catalogs used value 3 for NRD; version 1 adds OptiX at that index.
     internal static int? DenoiserSelection(AppSettings settings) => settings.DenoiserCatalogVersion < 1 && settings.DenoiserMode >= 2
         ? 2 : settings.DenoiserMode is >= 0 and <= 3 ? settings.DenoiserMode : null;

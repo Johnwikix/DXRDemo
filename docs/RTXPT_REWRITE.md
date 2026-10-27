@@ -25,18 +25,17 @@ C# 继续负责 D3D12 资源、BLAS/TLAS、描述符、Shader Table 和命令提
 材质和顶点布局保持 432/80 字节；实例布局增加面积 PDF，变为 160 字节。
 NRD/SR 原生桥接 ABI 不变；PBR 信号新增六张纹理，供反射/透射层的辐射、虚拟位置和法线使用。
 SM 6.5 和 SM 6.9/SER 均保留。
-旧 Stanford/软件 BVH 路径保留作比较。
 
-SM 6.9 默认使用 inline ray query：候选三角形的 alpha/透射判断与旧 any-hit 共用
+SM 6.9 默认使用 inline ray query：候选三角形的 alpha/透射判断与 any-hit 共用
 同一函数，单面剔除交给硬件，阴影分别用不透明和透射 instance mask。材质提示
-SER 仍可显式开启；目前这个包含多种引导和路径状态的 shader 在 RTX 5070 Ti 上
-关闭重排更快，因此默认关闭重排。Shader Model 查询必须先填写请求版本，再检查
-返回值；旧的零初始化查询会误关闭高级路径。主程序和离线入口现在都启用 Agility。
+SER 仍可显式开启，默认关闭重排；`--legacy-trace` 选择当前 DXR TraceRay 回退遍历。
+Shader Model 查询必须先填写请求版本，再检查返回值；零初始化查询会误关闭高级路径。
+主程序和离线入口现在都启用 Agility。
 
 介质状态用 24-bit instance ID＋4-bit 优先级打包，材质 IOR/吸收从场景表读取。
 接近 delta 的 GGX 使用避免相消的 NDF 形式；MIS 先归一化 PDF 再平方，防止溢出。
 NRD 三层在同一命令列表中执行；其管线初始化移到追踪之前，避免首帧阶段之间编译。
-资产新增 BC7 GPU mip 链，保留 PNG 回退；详见资产 `SOURCES.md` 和各场景 `bc7-manifest.json`。
+纹理由原生 `GpuTexture` 持有；资产使用 BC7 GPU mip 链并保留 PNG 回退，详见资产 `SOURCES.md` 和各场景 `bc7-manifest.json`。
 
 金属/透射混合遵循 [glTF transmission 材质分层](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_transmission)：
 `transmission` 在表面求值时已包含非金属比例，因此漫反射使用
@@ -80,7 +79,8 @@ NRD 模式下，主层与反射/透射层使用三个独立 NRD context，逐层
 ## 默认资产
 
 启动默认是 **RTXPT Kitchen**，1,474,751 个三角形、317 个实例、102 个纹理视图。
-同时提供 **RTXPT Bistro 街角**（4,209,006 个三角形）和 **Convergence Test**；Rainy Corner 与 Stanford 三个模型仍可选择。
+内置场景索引为 **Rainy Corner=0、Kitchen=1、Convergence Test=2、Bistro 街角=3**；
+Bistro 包含 4,209,006 个三角形。
 Kitchen 使用原作相机和固定曝光 +1.3 EV，允许程序化环境光。
 新的实时设置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已保存的
 用户设置仍优先。光线重建不可用时沿原有能力检查回退，NRD＋DLSS 超分仍可选择。
@@ -125,8 +125,7 @@ $env:DXR_DXC_PATH = (Resolve-Path 'DXRDemo/bin/rtxpt/dxc.exe').Path
 输出在运行目录的 `output/rtxpt-offline/`：PNG 预览、线性 RGBA32F 和 JSON 指标。
 检查包括资产导入、相机恢复、按功率选光的比例、CDF/PDF 归一化与一致性、有效
 辐射、主表面命中、NRD 信号重组、D3D12 Error/Corruption 消息。
-CPU 重组逐分量读取回传值；ComputeSharp 的向量算术是 GPU intrinsic，不能在
-CPU 验证代码里使用。此陷阱已有纯 CPU 已知值回归检查。
+CPU 重组逐分量读取回传值，并有纯 CPU 已知值回归检查。
 
 此次验证单帧路径、CPU/GPU 数值契约和单帧 NRD 合成；没有验证运动、时间稳定性、
 多帧 NRD/DLSS 视觉质量或实时帧率。4 SPP 原始预览有明显采样噪声，不能作为收敛图。
@@ -140,8 +139,6 @@ CPU 验证代码里使用。此陷阱已有纯 CPU 已知值回归检查。
 - RTX 5070 Ti，Kitchen，256×144、4 SPP、8 次反弹、纹理上限 256。
   单次 `Trace`，0 次光子 pass，0 个 D3D12 错误，0 个无效信号；
   NRD 通道重组最大相对误差 `1.1863429e-7`。
-- 单帧命令提交及等待约 15.9 ms，初始化约 24 秒。这是游戏同时运行时的
-  一次离线检查，不是 GPU 性能基准或实时帧率测量。
 
 ### 核心功能补齐后的验证（同日）
 
@@ -172,10 +169,9 @@ CPU 验证代码里使用。此陷阱已有纯 CPU 已知值回归检查。
   预览为 `output/rtxpt-offline/bistro-production-hdr-planes-nrd.png`，已目视核对街角、咖啡馆与车辆。
   这是低采样冷启动验收；仍有噪点，不能当作多帧收敛画质或上游逐像素等价结果。
 
-### 30 FPS 预算检查（2026-10-23/24）
+### 4K 单帧功能验收
 
-用户允许 1 SPP；固定 RTX 5070 Ti、3840×2160 输出、1920×1080 输入、完整打包
-1024 纹理和 10 次反弹。每个命令严格只追踪一帧，不运行窗口、连续基准或历史预热。
+用户允许 1 SPP；固定 3840×2160 输出、1920×1080 输入、完整打包 1024 纹理和 10 次反弹。每个命令严格只追踪一帧，不运行窗口、连续基准或历史预热。
 
 ```powershell
 IntegrationProbe.exe --offline --bistro --production --rr-4k --spp 1 --bounces 10
@@ -184,34 +180,16 @@ IntegrationProbe.exe --offline --contracts
 ```
 
 `--rr-4k` 使用 DLSS 光线重建，`--dlss-4k` 使用三层 NRD＋DLSS 超分。
-`--texture-size 256` 仅用于与早期低纹理预算对照；4K 默认使用 1024。
+`--texture-size` 可覆盖纹理上限；4K 默认使用 1024。
 `--uncompressed` 禁用 BC7，`--reorder` 启用材质 SER，`--legacy-trace` 使用 TraceRay。
 JSON 记录实际 shader model、inline/SER 状态、纹理驻留字节和 GPU timestamp。
 初始化在追踪前完成，两段 GPU 工作之间没有像素读回或 CPU 图像校验；这些检查
 随后进行。输出既包含输入分辨率的原始信号，也包含真正的 `*-4k.png`。
 
-早期 2 SPP/10 反弹/256 纹理对照中，单独追踪从 378.4 ms 改善到 68.8 ms；
-后者仍启用重排。最终目标配置改为 1 SPP/1024 纹理，并关闭重排，不能把两组
-数值当作相同画质设置的直接 FPS 倍率。NRD＋DLSS 超分单帧 GPU 总耗时仍处于
-约 33.6–40.2 ms；6 次反弹检查也没有证明稳定收益，因此保持 10 次默认值。
-DLSS 光线重建的两次独立单帧检查为 30.66 ms 与 31.97 ms；最后一次包含完整的
-4K 线性输出有限值检查，追踪 25.47 ms＋重建 6.50 ms，进入 33.33 ms GPU 预算。
-结果见 `output/rtxpt-offline/bistro-production-hdr-rr.json` 与对应的 `-4k.png`。
-该预算不包含呈现和 CPU 调度，**不是已实测稳定 30 FPS 的宣称**。
 单帧无法验证运动稳定性、时间累积画质和长时间帧率。
+
+Kitchen、Bistro 与 Convergence Test 的 4K 功能回归均只有一帧、零光子 pass、零无效信号、零 D3D12 错误，通道重组最大相对误差低于 `2.4e-7`。光线重建额外检查完整 4K 线性输出有限值；Kitchen 与 Bistro 的 4K 输出已目视检查。
 
 36 项单次 GPU 契约覆盖原有材质/介质/PDF，加上单面、双面、镜像实例和低粗糙度
 NDF／大 PDF 的 MIS。BC7 reader 拒绝错误尺寸、颜色空间和截断数据。
-
-最终回归使用相同的 4K 输出／50% 输入、1 SPP、10 次反弹：
-
-| 场景 | 重建模式 | 追踪 GPU | 重建 GPU | GPU 合计 |
-| --- | --- | ---: | ---: | ---: |
-| Bistro | DLSS 光线重建 | 25.47 ms | 6.50 ms | 31.97 ms |
-| Kitchen | DLSS 光线重建 | 10.30 ms | 6.50 ms | 16.80 ms |
-| Convergence Test | 三层 NRD＋DLSS 超分 | 15.59 ms | 12.67 ms | 28.26 ms |
-
-三者均只有一帧、零光子 pass、零无效信号、零 D3D12 错误，通道重组最大相对
-误差低于 `2.4e-7`。光线重建额外检查完整 4K 线性输出有限值；Kitchen 与 Bistro
-的 4K 输出已目视检查。36 项 GPU 契约分别通过 inline、legacy TraceRay、材质 SER
-三个单次 dispatch。SM 6.5 编译和 Release 主程序构建通过；后者仅有既有 Icon 过时警告。
+这些契约分别通过 inline、`--legacy-trace` TraceRay、材质 SER 三个单次 dispatch。SM 6.5 编译和 Release 主程序构建通过；后者仅有既有 Icon 过时警告。

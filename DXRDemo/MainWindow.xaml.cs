@@ -1,4 +1,3 @@
-using ComputeSharp;
 using DXRDemo.Hdr;
 using DXRDemo.Shaders;
 using DXRDemo.Shaders.RayTrace;
@@ -40,7 +39,7 @@ public sealed partial class MainWindow : WindowEx
     private FrameworkElement RayTraceParamBar => _settings.RayTraceParamBar;
     private ToggleSwitch HdrToggle => _settings.HdrToggle;
     private TextBlock HdrStatusText => _settings.HdrStatusText;
-    private GraphicsDevice _device = null!;
+    private readonly DxrDevice _device = new();
     private ShaderFactory _factory = null!;
     private HdrShaderPanel _shaderPanel = null!;
     private HdrDisplayInfoTracker? _hdrTracker;
@@ -104,13 +103,10 @@ public sealed partial class MainWindow : WindowEx
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
         _settings.ResolutionButton.Click += (_, _) => AppWindow.ResizeClient(new SizeInt32(1920,
             1080 + (int)Math.Round((RootGrid.ActualHeight - ViewportFocus.ActualHeight) * DpiScale)));
-        // Select the app-local Agility runtime before ComputeSharp creates its
-        // shared D3D12 device. If activation is unavailable, DxrDevice keeps
-        // the 6.5 fallback and the app remains compatible with older systems.
         DxrDevice.TryActivateAgilityRuntime();
 
         // Create the GPU device and shader panel
-        _device = GraphicsDevice.GetDefault();
+        _device.Initialize();
         _factory = new ShaderFactory();
 
         _shaderPanel = new HdrShaderPanel(_device);
@@ -201,11 +197,11 @@ public sealed partial class MainWindow : WindowEx
         // Cached passes stay alive until the renderer has stopped. Never dispose GPU resources on this UI thread.
 
         var pass = _factory.GetOrCreate(info.Id);
-        Int2 size = default;
+        RenderSize size = default;
 
         if (_shaderPanel.ActualWidth > 0 && _shaderPanel.ActualHeight > 0)
         {
-            size = new Int2((int)_shaderPanel.ActualWidth, (int)_shaderPanel.ActualHeight);
+            size = new RenderSize((int)_shaderPanel.ActualWidth, (int)_shaderPanel.ActualHeight);
         }
 
         if (_initializedPasses.Add(pass)) pass.Initialize(_device, size);
@@ -312,8 +308,6 @@ public sealed partial class MainWindow : WindowEx
         ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.OptixAvailable && pass.SupportsOptix;
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;
-        if (pass.DenoiserMode == RayTraceDenoiserMode.Optix && !pass.SupportsOptix)
-            _settings.ReconstructionStatusText.Text = "当前球体渲染不提供线性 HDR 输入，使用时间累积。";
     }
 
     private void OnDenoiserSelected(object sender, Microsoft.UI.Xaml.Controls.SelectionChangedEventArgs e)
@@ -354,8 +348,9 @@ public sealed partial class MainWindow : WindowEx
     {
         if (_savedSettings is not { } s) return;
 
-        bool migrateDefault = s.SceneCatalogVersion < 1 && s.SceneIndex == RayTracePass.RainyCornerSceneIndex;
-        RestoreSelection(ModelSelector, migrateDefault ? RayTracePass.RtxptKitchenSceneIndex : s.SceneIndex);
+        var sceneSelection = AppSettingsStore.SceneSelection(s);
+        bool migrateDefault = sceneSelection.UseKitchenDefaults;
+        RestoreSelection(ModelSelector, sceneSelection.Index);
         // 旧设置中的自实现 RELAX(2) 和 NRD(3) 均迁移到官方 NRD；保留已保存的关闭/时间累积。
         RestoreSelection(DenoiserSelector, AppSettingsStore.DenoiserSelection(s));
         RestoreSelection(_settings.ReconstructionSelector, s.ReconstructionMode);
@@ -444,7 +439,7 @@ public sealed partial class MainWindow : WindowEx
     {
         ShaderId = (ShaderSelector.SelectedItem as ShaderAuthoringInfo)?.Id,
         SceneIndex = CaptureSceneIndex(),
-        SceneCatalogVersion = 1,
+        SceneCatalogVersion = 2,
         DenoiserMode = DenoiserSelector.SelectedIndex,
         DenoiserCatalogVersion = 1,
         ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex,
@@ -597,7 +592,7 @@ public sealed partial class MainWindow : WindowEx
     {
         if (_activePass is null) return;
 
-        var size = new Int2((int)e.NewSize.Width, (int)e.NewSize.Height);
+        var size = new RenderSize((int)e.NewSize.Width, (int)e.NewSize.Height);
         _activePass.OnResize(size);
     }
 
@@ -828,13 +823,12 @@ public sealed partial class MainWindow : WindowEx
 
         AppWindow.Changed -= OnAppWindowChanged;
 
-        // Pass resources and the HDR tracker are released by the renderer's background
-        // teardown: after the render thread has exited and the GPU is idle, but before
-        // the GraphicsDevice itself is disposed (it is disposed by the renderer, last).
+        // Pass resources and the root device are released after the render thread
+        // has exited and the GPU is idle.
         _shaderPanel.Dispose(() =>
         {
             _factory.Dispose();
-
+            _device.Dispose();
         });
 
         _stopwatch.Stop();

@@ -1,4 +1,4 @@
-using ComputeSharp;
+using DXRDemo.DXR;
 using DXRDemo.Hdr;
 
 namespace DXRDemo.Shaders;
@@ -36,12 +36,12 @@ public interface IShaderPass
     /// <summary>
     /// Called once after the D3D12 device is ready, before the first dispatch.
     /// </summary>
-    void Initialize(GraphicsDevice device, Int2 initialSize);
+    void Initialize(DxrDevice device, RenderSize initialSize);
 
     /// <summary>
     /// Called whenever the swap chain is resized.
     /// </summary>
-    void OnResize(Int2 newSize);
+    void OnResize(RenderSize newSize);
 
     /// <summary>
     /// Reports mouse position (panel-space coordinates). Called only when

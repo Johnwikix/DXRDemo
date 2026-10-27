@@ -18,7 +18,7 @@
 
 新选项的索引为 3。`DenoiserCatalogVersion=1` 区分旧配置中曾表示 NRD 的索引 3，
 避免旧用户设置被误迁移成 OptiX。NVIDIA 驱动/适配器不可用或创建、执行失败时，
-状态栏明确报告时间累积回退；编码空间的旧球体示例不提供 OptiX 输入。
+状态栏明确报告时间累积回退。
 
 `Native/Reconstruction/Optix.cpp` 动态加载 CUDA driver API 与 OptiX 9.1 AOV 模型。
 共享 D3D12 线性缓冲包含 beauty、albedo、normal、output 四个 float4 平面；

@@ -1,7 +1,7 @@
-using ComputeSharp;
-using ComputeSharp.Interop;
+using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
+using DXRDemo.Scene;
 using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using System.Runtime.InteropServices;
@@ -9,6 +9,8 @@ using System.Numerics;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
 using Vortice.DXGI;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Exercises actual vendor dispatch, shared texture states and temporal camera guides without a window.</summary>
 internal static unsafe class ReconstructionProbe
@@ -17,18 +19,19 @@ internal static unsafe class ReconstructionProbe
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>();
         debug.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Console.WriteLine($"GPU: {device.Name}");
-        Guid iid = typeof(ID3D12Device5).GUID;
-        nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        long luid = device.Device.AdapterLuid;
+        using var adapter = device.DxgiFactory.EnumAdapterByLuid<IDXGIAdapter1>(*(Vortice.Luid*)&luid);
+        Console.WriteLine($"GPU: {adapter.Description1.Description}");
+        using var native = NativeDevice(device);
         using var queue = native.QueryInterface<ID3D12InfoQueue>();
-        using var pass = new RayTracePass(new DxrMeshBackend());
+        using var pass = new RayTracePass();
         pass.Initialize(device, default);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(480, 270);
-        MeshData.LoadAsync(0).GetAwaiter().GetResult();
-        Render(pass, target, false, 3);
+        pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+        pass.ReconstructionMode = ReconstructionMode.Off;
+        pass.DenoiserMode = RayTraceDenoiserMode.NrdRelax;
+        using var target = device.CreateTexture2D<Rgba64>(480, 270);
+        Render(pass, target, false, 3, queue);
         var status = pass.ReconstructionStatus!;
         Console.WriteLine($"Capabilities: 0x{status.Capabilities:X}");
         Console.WriteLine($"NRD available: {status.NrdAvailable}; active: {status.NrdActive}; dispatches: {pass.NrdDispatchCount}; {status.Message}");
@@ -79,19 +82,18 @@ internal static unsafe class ReconstructionProbe
                 }
                 Console.WriteLine($"PASS {mode} {scale}% / all denoisers / SDR+HDR");
             }
-            using (var odd = device.AllocateReadWriteTexture2D<Rgba64, Float4>(401, 227))
+            using (var odd = device.CreateTexture2D<Rgba64>(401, 227))
             {
                 Render(pass, odd, false, 3);
                 Require(pass.ReconstructionStatus!.Active == mode, pass.ReconstructionStatus.Message);
                 Require(pass.ReconstructionStatus.InputWidth == 148 && pass.ReconstructionStatus.InputHeight == 83, "Odd resize dimensions");
                 VerifyPixels(odd); VerifyDebug(queue);
             }
-            pass.SceneIndex = 1;
-            MeshData.LoadAsync(1).GetAwaiter().GetResult();
+            pass.SceneIndex = RayTracePass.RtxptKitchenSceneIndex;
             Render(pass, target, false, 3);
             VerifyPixels(target); VerifyDebug(queue);
-            pass.SceneIndex = 0;
-            using (var tinyInput = device.AllocateReadWriteTexture2D<Rgba64, Float4>(1600, 900))
+            pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+            using (var tinyInput = device.CreateTexture2D<Rgba64>(1600, 900))
             {
                 pass.RenderScalePercent = 1;
                 Render(pass, tinyInput, false, 3);
@@ -112,7 +114,7 @@ internal static unsafe class ReconstructionProbe
         Console.WriteLine("PASS reconstruction mode/scale/denoiser/HDR transitions, odd resize, scene switch, fallback and camera guides.");
     }
 
-    private static void SavePpm(ReadWriteTexture2D<Rgba64, Float4> target, string path)
+    private static void SavePpm(GpuTexture<Rgba64> target, string path)
     {
         var pixels = target.ToArray();
         var channels = MemoryMarshal.Cast<Rgba64, ushort>(MemoryMarshal.CreateReadOnlySpan(ref pixels[0, 0], pixels.Length));
@@ -124,12 +126,37 @@ internal static unsafe class ReconstructionProbe
         }
     }
 
-    private static void Render(RayTracePass pass, ReadWriteTexture2D<Rgba64, Float4> target, bool hdr, int frames)
+    private static void Render(RayTracePass pass, GpuTexture<Rgba64> target, bool hdr, int frames, ID3D12InfoQueue? debug = null)
     {
-        for (int i = 0; i < frames; i++) pass.TryExecute(target, target.Width, target.Height, TimeSpan.Zero, new HdrRenderParameters(hdr, 200, 1000));
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        for (int rendered = 0; rendered < frames;)
+        {
+            try
+            {
+                pass.TryExecute(target, target.Width, target.Height, TimeSpan.Zero, new HdrRenderParameters(hdr, 200, 1000));
+            }
+            catch
+            {
+                if (debug != null)
+                    for (ulong i = 0; i < debug.NumStoredMessagesAllowedByRetrievalFilter; i++)
+                    {
+                        var message = debug.GetMessage(i);
+                        if (message.Severity is MessageSeverity.Error or MessageSeverity.Corruption)
+                            Console.Error.WriteLine(message.Description);
+                    }
+                throw;
+            }
+            if (pass.DiagnosticText.Contains("LOADING", StringComparison.Ordinal) || pass.ReconstructionStatus is null)
+            {
+                Require(watch.Elapsed.TotalSeconds < 240, "SceneAsset loading did not produce a reconstruction frame");
+                Thread.Sleep(10);
+                continue;
+            }
+            rendered++;
+        }
     }
 
-    private static void VerifyPixels(ReadWriteTexture2D<Rgba64, Float4> target)
+    private static void VerifyPixels(GpuTexture<Rgba64> target)
     {
         var pixels = target.ToArray();
         var channels = MemoryMarshal.Cast<Rgba64, ushort>(MemoryMarshal.CreateReadOnlySpan(ref pixels[0, 0], pixels.Length));
@@ -142,26 +169,30 @@ internal static unsafe class ReconstructionProbe
         Require(rgb / (pixels.Length * 3) > 500 && hi - lo > 1000, "Empty or constant reconstructed RGB");
     }
 
-    private static void VerifyGuides(GraphicsDevice device, ID3D12Device5 native, ID3D12InfoQueue info, ReconstructionStatus status)
+    private static void VerifyGuides(DxrDevice device, ID3D12Device5 native, ID3D12InfoQueue info, ReconstructionStatus status)
     {
         var mode = status.Supports(ReconstructionMode.Fsr) ? ReconstructionMode.Fsr : ReconstructionMode.XeSS;
         Require(status.Supports(mode), "No SR provider available for guide verification");
         using var sr = new SuperResolutionRenderer(device);
-        using var backend = new DxrMeshBackend();
+        using var backend = new DxrSceneBackend { CausticsEnabled = false };
         backend.Initialize(device);
+        backend.SetScene(GlassReconstructionProbe.Fixture());
         sr.Configure(mode, 101, 320, 180); // Force the native ABI to reject an oversized input before allocation.
         Require(sr.Active == ReconstructionMode.Off, "SDK initialization failure did not fall back");
         sr.Configure(mode, 67, 320, 180);
         Require(sr.Active == mode, sr.Status.Message);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(320, 180);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(sr.InputWidth, sr.InputHeight);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(sr.InputWidth, sr.InputHeight);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(sr.InputWidth, sr.InputHeight);
-        MeshData mesh = MeshData.LoadAsync(0).GetAwaiter().GetResult();
+        using var target = device.CreateTexture2D<Rgba64>(320, 180);
+        using var raw = device.CreateTexture2D<Float4>(sr.InputWidth, sr.InputHeight);
+        using var normals = device.CreateTexture2D<Rgba32>(sr.InputWidth, sr.InputHeight);
+        using var surfaces = device.CreateTexture2D<Float4>(sr.InputWidth, sr.InputHeight);
+        using var guide = device.CreateTexture2D<Float4>(sr.InputWidth, sr.InputHeight);
+        using var signals = new PbrSignals(device, sr.InputWidth, sr.InputHeight);
         void Frame(Float2 orbit, Float2 jitter, int index)
         {
-            backend.Trace(mesh, sr.InputWidth, sr.InputHeight, 2, 10, index, orbit, 2.7f, raw, normals, surfaces, jitter);
-            Require(sr.Execute(raw, normals, surfaces, target, orbit, 2.7f, jitter, RayTraceDenoiserMode.TemporalOnly, HdrRenderParameters.Default, 1.0 / 60), sr.Status.Message);
+            CameraFrame camera = CameraFrame.FromOrbit(orbit.X, orbit.Y, 2.7f);
+            backend.Trace(camera, index, 2, 10, jitter, 1, raw, normals, surfaces, guide, signals);
+            Require(sr.Execute(raw, normals, surfaces, target, orbit, 2.7f, jitter, RayTraceDenoiserMode.TemporalOnly,
+                HdrRenderParameters.Default, 1.0 / 60, cameraFrame: camera), sr.Status.Message);
             VerifyDebug(info);
         }
         Frame(new(0, 0.165f), new(-0.37f, 0.29f), 0);
@@ -211,7 +242,7 @@ internal static unsafe class ReconstructionProbe
     }
 
     /// <summary>Checks that a stationary analytic signal does not advect when the Halton jitter repeats.</summary>
-    private static void VerifyTemporalReprojection(GraphicsDevice device, ID3D12Device5 native,
+    private static void VerifyTemporalReprojection(DxrDevice device, ID3D12Device5 native,
         ID3D12InfoQueue info, ReconstructionStatus status)
     {
         foreach (var mode in new[] { ReconstructionMode.Fsr, ReconstructionMode.XeSS })
@@ -221,10 +252,10 @@ internal static unsafe class ReconstructionProbe
             sr.Configure(mode, 67, 320, 180);
             Require(sr.Active == mode, sr.Status.Message);
             int width = sr.InputWidth, height = sr.InputHeight;
-            using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(320, 180);
-            using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-            using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-            using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
+            using var target = device.CreateTexture2D<Rgba64>(320, 180);
+            using var raw = device.CreateTexture2D<Float4>(width, height);
+            using var normals = device.CreateTexture2D<Rgba32>(width, height);
+            using var surfaces = device.CreateTexture2D<Float4>(width, height);
             // Reuse CPU staging arrays; the production render loop gains no new allocations.
             var radiance = new Float4[height, width];
             var positions = new Float4[height, width];
@@ -295,48 +326,60 @@ internal static unsafe class ReconstructionProbe
     }
 
     /// <summary>Compares the actual NRD output with an independently sampled 512-SPP reference.</summary>
-    private static void VerifyNrdQuality(GraphicsDevice device, ID3D12Device5 native, ID3D12InfoQueue info)
+    private static void VerifyNrdQuality(DxrDevice device, ID3D12Device5 native, ID3D12InfoQueue info)
     {
         const int width = 320, height = 180;
+        SceneDocument document = RtxptAssets.LoadAsync(RtxptScene.Convergence).GetAwaiter().GetResult();
+        SceneAsset asset = document.Scenes[document.DefaultScene];
+        CameraFrame camera = asset.DefaultCamera ?? throw new InvalidOperationException("Convergence fixture has no authored camera");
         using var sr = new SuperResolutionRenderer(device);
-        sr.Configure(ReconstructionMode.Off, 100, width, height, true);
+        sr.Configure(ReconstructionMode.Off, 100, width, height, true, true);
         Require(sr.Status.NrdActive, sr.Status.Message);
-        using var backend = new DxrMeshBackend(); backend.Initialize(device);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normalRoughness = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        MeshData mesh = MeshData.LoadAsync(0).GetAwaiter().GetResult();
-        Float2 orbit = new(0, 0.165f);
-        void Frame(int frame, Float2 camera, float distance, int bounces = 10)
+        sr.PrepareStablePlanes();
+        // Keep the noisy input and 512-SPP reference on identical independent transport.
+        using var backend = new DxrSceneBackend { ReferenceMode = true, CausticsEnabled = false };
+        backend.Initialize(device);
+        backend.SetScene(asset);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var normalRoughness = device.CreateTexture2D<Float4>(width, height);
+        using var signals = new PbrSignals(device, width, height);
+        void Frame(int frame, CameraFrame view, int bounces = 10)
         {
-            backend.Trace(mesh, width, height, 2, bounces, frame, camera, distance, raw, normals, surfaces, default, normalRoughness);
-            Require(sr.Execute(raw, normals, surfaces, target, camera, distance, default,
-                RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness), sr.Status.Message);
+            backend.Trace(view, frame, 2, bounces, default, 1, raw, normals, surfaces, normalRoughness, signals, opaqueForNrd: true);
+            Require(sr.Execute(raw, normals, surfaces, target, default, 0, default,
+                RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness, view, signals,
+                transparentBackend: backend), sr.Status.Message);
             Require(sr.NrdDispatchCount > 5, "Official NRD dispatch missing");
         }
-        for (int frame = 0; frame < 64; frame++) Frame(frame, orbit, 2.7f);
+        for (int frame = 0; frame < 64; frame++) Frame(frame, camera);
         SavePpm(target, "output/NRD-native-sdr.ppm");
         float[] denoised = ReadTexture(native, sr.DenoisedColor, true);
         float[] viewZ = ReadTexture(native, sr.NrdViewZ, false);
-        Float4[,] noisy = raw.ToArray(), geometry = surfaces.ToArray(), normalGuide = normalRoughness.ToArray();
+        Float4[,] noisy = raw.ToArray(), geometry = surfaces.ToArray(), normalGuide = normalRoughness.ToArray(), diffuse = signals.Diffuse.ToArray();
+        Rgba32[,] primaryNormals = normals.ToArray();
         int shortHits = 0, escapedHits = 0;
         for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
         {
             if (geometry[y, x].W < 0) { Require(viewZ[y * width + x] == -1000000, "Sky entered NRD denoising range"); continue; }
             Require(viewZ[y * width + x] < 0 && viewZ[y * width + x] > -1000, "NRD linear view Z disagrees with RH camera");
-            Require(normalGuide[y, x].W == 1 && Math.Max(Math.Abs(normalGuide[y, x].X), Math.Max(Math.Abs(normalGuide[y, x].Y), Math.Abs(normalGuide[y, x].Z))) > 0.999f,
+            int material = primaryNormals[y, x].A;
+            Require(material < asset.Materials.Length && normalGuide[y, x].W == asset.Materials[material].Factors.Y &&
+                Math.Max(Math.Abs(normalGuide[y, x].X), Math.Max(Math.Abs(normalGuide[y, x].Y), Math.Abs(normalGuide[y, x].Z))) > 0.999f,
                 "NRD normal/roughness encoding invalid");
-            Require(noisy[y, x].W > 0 && noisy[y, x].W <= 65504, "Diffuse hit distance is not a positive world-space distance");
-            if (noisy[y, x].W < 5) shortHits++;
-            if (noisy[y, x].W > 60000) escapedHits++;
+            // Zero means that this PBR pixel sampled no diffuse continuation lobe; actual hits and misses retain the old limits.
+            float hitDistance = diffuse[y, x].W;
+            Require(float.IsFinite(hitDistance) && hitDistance is >= 0 and <= 65504, "Diffuse hit distance is not a finite world-space distance or miss sentinel");
+            if (hitDistance > 0 && hitDistance < 5) shortHits++;
+            if (hitDistance > 60000) escapedHits++;
         }
         Require(shortHits > 100 && escapedHits > 100, "Diffuse hit distances do not distinguish secondary hits and misses");
         var reference = new Vector3[width * height];
         for (int frame = 0; frame < 32; frame++)
         {
-            backend.Trace(mesh, width, height, 16, 10, 10000 + frame, orbit, 2.7f, raw, normals, surfaces, default, normalRoughness);
+            backend.Trace(camera, 10000 + frame, 16, 10, default, 1, raw, normals, surfaces, normalRoughness, signals, opaqueForNrd: true);
             var sample = raw.ToArray();
             for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
                 reference[y * width + x] += new Vector3(sample[y, x].X, sample[y, x].Y, sample[y, x].Z) / 32;
@@ -355,20 +398,31 @@ internal static unsafe class ReconstructionProbe
         }
         Console.WriteLine($"NRD vs 512-SPP reference: raw RMSE={Math.Sqrt(rawError / (count * 3)):F6}, NRD RMSE={Math.Sqrt(nrdError / (count * 3)):F6}, energy={actualEnergy / expectedEnergy:F5}");
         Require(nrdError < rawError * 0.8 && actualEnergy / expectedEnergy is > 0.8 and < 1.2, "NRD did not reduce noise or changed material energy");
-        for (int frame = 0; frame < 12; frame++) Frame(100 + frame, new(0.2f + frame * 0.01f, 0.25f), 2.2f);
+        var controller = new CameraController();
+        controller.FrameScene(asset, width / (float)height);
+        for (int frame = 0; frame < 12; frame++)
+        {
+            controller.Rotate(0.01f, 0.002f);
+            controller.Zoom(0.05f);
+            Frame(100 + frame, controller.Advance(1.0 / 60, out _, out _));
+        }
         VerifyPixels(target);
         Require(ReadTexture(native, sr.DenoisedColor, true).All(float.IsFinite), "Nonfinite NRD output while moving camera");
-        sr.Reset(); Frame(0, orbit, 2.7f, 1);
+        sr.Reset(); Frame(0, camera, 1);
         float[] reset = ReadTexture(native, sr.DenoisedColor, true);
         using var fresh = new SuperResolutionRenderer(device);
-        fresh.Configure(ReconstructionMode.Off, 100, width, height, true);
-        Require(fresh.Execute(raw, normals, surfaces, target, orbit, 2.7f, default,
-            RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness), fresh.Status.Message);
+        fresh.Configure(ReconstructionMode.Off, 100, width, height, true, true);
+        fresh.PrepareStablePlanes();
+        Require(fresh.Execute(raw, normals, surfaces, target, default, 0, default,
+            RayTraceDenoiserMode.NrdRelax, HdrRenderParameters.Default, 1.0 / 60, normalRoughness, camera, signals,
+            transparentBackend: backend), fresh.Status.Message);
         float[] clean = ReadTexture(native, fresh.DenoisedColor, true);
         Require(reset.Zip(clean, (a, b) => Math.Abs(a - b)).Max() < 0.0001f, "NRD reset differs from a new context");
         VerifyDebug(info);
         Console.WriteLine("PASS NRD guide semantics, energy/noise, camera motion/zoom, direct-light-only tracing and reset");
     }
+
+    private static ID3D12Device5 NativeDevice(DxrDevice device) => device.Device.QueryInterface<ID3D12Device5>();
 
     internal static float[] ReadTexture(ID3D12Device5 device, ID3D12Resource source, bool half2,
         ResourceStates sourceState = ResourceStates.NonPixelShaderResource)

@@ -1,12 +1,10 @@
 using System.Numerics;
-using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Exercises the real analytic-sun shadow query through both sides of a thin window.</summary>
 internal static unsafe class SunGlassProbe
@@ -14,18 +12,16 @@ internal static unsafe class SunGlassProbe
     internal static void Run(string[] args)
     {
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var backend = new DxrSceneBackend { CausticsEnabled = false, UseInlineTraversal = !args.Contains("--legacy-trace") };
         backend.Initialize(device);
         const int width = 64, height = 32;
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normal = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surface = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normal = device.CreateTexture2D<Rgba32>(width, height);
+        using var surface = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         var original = GlassReconstructionProbe.Fixture();
         var materials = (SceneMaterial[])original.Materials.Clone();

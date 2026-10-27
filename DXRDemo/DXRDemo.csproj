@@ -55,8 +55,8 @@
   </ItemGroup>
 
   <!-- DirectX 12 Agility 1.619 supplies the SM 6.9 runtime. The app activates
-       it through ID3D12DeviceFactory and falls back to the inbox runtime when
-       the DLL is unavailable or the device does not expose SM 6.9. -->
+       it through ID3D12SDKConfiguration.SetSDKVersion before device creation
+       and falls back to the inbox runtime when it is unavailable. -->
   <ItemGroup Condition="'$(_D3d12SourceArch)' != ''">
     <None Include="$(_D3d12SourceDir)\D3D12Core.dll" Link="D3D12\D3D12Core.dll"
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
@@ -75,7 +75,6 @@
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="ComputeSharp" Version="3.2.0" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.6.2" />
     <PackageReference Include="WinUIEx" Version="2.9.2" />
   </ItemGroup>

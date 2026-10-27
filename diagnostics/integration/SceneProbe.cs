@@ -4,7 +4,6 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
-using ComputeSharp;
 using DXRDemo.Assets.Importers;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
@@ -12,9 +11,10 @@ using DXRDemo.Hdr;
 using DXRDemo.Scene;
 using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
-using ComputeSharp.Interop;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 internal static class SceneProbe
 {
@@ -24,16 +24,16 @@ internal static class SceneProbe
         var document=await GltfImporter.LoadAsync(Path.GetFullPath(path)); var asset=document.Scenes[document.DefaultScene];
         Require(Marshal.SizeOf<SceneMaterial>()==432,"Material GPU ABI changed");
         Require(asset.Materials.Any(m=>m.Transmission.X>0 && m.Transmission.Z>0),"Demo has no refractive volume");
-        using var device=GraphicsDevice.GetDefault(); using var native=NativeDevice(device);
+        using var device=DxrDevice.CreateDefault(); using var native=NativeDevice(device);
         using var debug=native.QueryInterface<ID3D12InfoQueue>();
         using var backend=new DxrSceneBackend();backend.Initialize(device);backend.SetScene(asset);
         const int width=320,height=240;
-        using var raw=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var normals=device.AllocateReadWriteTexture2D<Rgba32,Float4>(width,height);
-        using var surface=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var guide=device.AllocateReadWriteTexture2D<Float4>(width,height);
+        using var raw=device.CreateTexture2D<Float4>(width,height);
+        using var normals=device.CreateTexture2D<Rgba32>(width,height);
+        using var surface=device.CreateTexture2D<Float4>(width,height);
+        using var guide=device.CreateTexture2D<Float4>(width,height);
         using var signals=new PbrSignals(device,width,height);
-        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
+        using var target=device.CreateTexture2D<Rgba64>(width,height);
         var camera=new CameraController();camera.FrameBounds(asset.Minimum,asset.Maximum,width/(float)height);camera.Rotate(.50f,.23f);camera.Zoom(3);
         var view=camera.Advance(0,out _,out _);
         void Trace(int frame,int spp,bool opaque=false)=>backend.Trace(view,frame,spp,10,default,0,raw,normals,surface,guide,signals,opaqueForNrd:opaque);
@@ -123,10 +123,10 @@ internal static class SceneProbe
             if(!sr.Status.Supports(mode))return;
             sr.Configure(mode,67,width,height,true,true);
             int w=sr.InputWidth,h=sr.InputHeight;
-            using var input=device.AllocateReadWriteTexture2D<Float4>(w,h);
-            using var inputNormals=device.AllocateReadWriteTexture2D<Rgba32,Float4>(w,h);
-            using var inputSurface=device.AllocateReadWriteTexture2D<Float4>(w,h);
-            using var inputGuide=device.AllocateReadWriteTexture2D<Float4>(w,h);
+            using var input=device.CreateTexture2D<Float4>(w,h);
+            using var inputNormals=device.CreateTexture2D<Rgba32>(w,h);
+            using var inputSurface=device.CreateTexture2D<Float4>(w,h);
+            using var inputGuide=device.CreateTexture2D<Float4>(w,h);
             using var inputSignals=new PbrSignals(device,w,h);
             double[] sums=new double[w*h*3],squares=new double[w*h*3],resolvedSums=new double[w*h*3],resolvedSquares=new double[w*h*3];
             double[] fallbackSum=new double[w*h*3],historySum=new double[w*h*3],historySquare=new double[w*h*3];
@@ -232,9 +232,9 @@ internal static class SceneProbe
     }
     internal static async Task Preview(string path)
     {
-        using var device=GraphicsDevice.GetDefault();
-        using var pass=new RayTracePass(new DxrMeshBackend());pass.Initialize(device,default);
-        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(800,600);
+        using var device=DxrDevice.CreateDefault();
+        using var pass=new RayTracePass();pass.Initialize(device,default);
+        using var target=device.CreateTexture2D<Rgba64>(800,600);
         Task<SceneDocument> load=pass.ImportAsync(Path.GetFullPath(path));
         while(!load.IsCompleted){pass.TryExecute(target,800,600,TimeSpan.Zero,HdrRenderParameters.Default);await Task.Delay(1);}
         var document=await load;var asset=document.Scenes[document.DefaultScene];
@@ -277,18 +277,18 @@ internal static class SceneProbe
         }
         Console.WriteLine("PASS: camera integration, glTF/GLB import, shared geometry, texture mips, lights, extension rejection, cancellation.");
 
-        using var device = GraphicsDevice.GetDefault();
+        using var device = DxrDevice.CreateDefault();
         using var native = NativeDevice(device); using var debugQueue = native.QueryInterface<ID3D12InfoQueue>();
         debugQueue.SetBreakOnSeverity(MessageSeverity.Error, false); debugQueue.SetBreakOnSeverity(MessageSeverity.Corruption, false);
         using var backend = new DxrSceneBackend(); backend.Initialize(device);
         try { backend.SetScene(asset); } catch { VerifyDebug(debugQueue); throw; }
         const int width = 192, height = 128;
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surface = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surface = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         var camera = new CameraController(); camera.FrameBounds(asset.Minimum, asset.Maximum, width / (float)height);
         var view = camera.Advance(0, out _, out _);
         void Trace(int frame, float env = 0, SunLightSettings sun = default, int bounces = 3) => backend.Trace(view, frame, 4, bounces, default, env, raw, normals, surface, guide, signals, sun);
@@ -402,12 +402,13 @@ internal static class SceneProbe
         Console.WriteLine($"PASS: DXR PBR energy={energy:F6}, lobe error={difference:E2}, metal, explicit lights, 3 denoisers, actual NRD {sr.NrdDispatchCount} dispatches.");
 
         using var pass = (RayTracePass)DXRDemo.Shaders.ShaderCatalog.All[0].Factory(); pass.Initialize(device, default);
-        var packagedDocument = await GltfImporter.LoadAsync(Path.Combine(AppContext.BaseDirectory, "Assets", "Models", "RainyCorner.glb"));
+        var packagedDocument = await RtxptAssets.LoadAsync(RtxptScene.Kitchen);
         var packagedAsset = packagedDocument.Scenes[packagedDocument.DefaultScene];
         string packagedLightCount = $"{packagedAsset.Lights.Length} LIGHTS";
-        Require(pass.SceneIndex == RayTracePass.RainyCornerSceneIndex && !pass.ExternalLightingEnabled && pass.Exposure == -2,
-            "The application does not start with the packaged night demo");
-        for (int attempt = 0; attempt < 300 && pass.ReconstructionStatus?.NrdActive != true; attempt++)
+        Require(pass.SceneIndex == RayTracePass.RtxptKitchenSceneIndex && pass.ExternalLightingEnabled &&
+            pass.Exposure == RtxptAssets.InitialExposure(RtxptScene.Kitchen),
+            "The application does not start with the packaged Kitchen demo");
+        for (int attempt = 0; attempt < 24000 && pass.ReconstructionStatus?.NrdActive != true; attempt++)
         {
             pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
             await Task.Delay(10);
@@ -419,15 +420,16 @@ internal static class SceneProbe
         while (!loading.IsCompleted) { pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default); await Task.Delay(1); }
         await loading;
         int previousScene = pass.SceneIndex;
-        Require(previousScene > RayTracePass.RainyCornerSceneIndex && pass.Scenes[RayTracePass.RainyCornerSceneIndex].FileName == "RainyCorner.glb",
+        Require(previousScene >= RayTracePass.PackagedSceneCount &&
+            pass.Scenes[RayTracePass.RtxptKitchenSceneIndex].FileName == RtxptAssets.KitchenPath,
             "Import replaced the packaged demo catalog entry");
-        pass.SceneIndex = 0;
-        pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
         pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+        pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
+        pass.SceneIndex = RayTracePass.RtxptKitchenSceneIndex;
         pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
         Require(pass.DiagnosticText.Contains(packagedLightCount), "Cannot return to packaged demo after an import");
         pass.SceneIndex = previousScene;
-        Console.WriteLine("PASS: packaged GLB startup, default selection, persistent demo list and scene switching after import.");
+        Console.WriteLine("PASS: packaged Kitchen startup, production default selection, persistent demo list and scene switching after import.");
         bool failed = false;
         try { await pass.ImportAsync(Path.GetFullPath("output/scenes/required.gltf")); } catch (Exception) { failed = true; }
         Require(failed && pass.SceneIndex == previousScene, "Failed import replaced current scene");
@@ -454,69 +456,10 @@ internal static class SceneProbe
             Require(pass.ReconstructionStatus!.Active == reconstruction && pass.ReconstructionStatus.NrdActive, "PBR NRD+SR fell back");
         }
         Console.WriteLine("PASS: transactional import, free camera, reset, available NRD+SR combinations.");
-        await BuiltinShadowTest(device);
         VerifyDebug(debugQueue);
     }
 
-    internal static async Task BuiltinShadowTest(GraphicsDevice device)
-    {
-        const int width=480,height=270;
-        var mesh=await MeshData.LoadAsync(0);
-        using var backend=new DxrMeshBackend();backend.Initialize(device);
-        using var raw=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var normal=device.AllocateReadWriteTexture2D<Rgba32,Float4>(width,height);
-        using var surface=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var guide=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var direct=device.AllocateReadWriteTexture2D<Float4>(width,height);
-        using var target=device.AllocateReadWriteTexture2D<Rgba64,Float4>(width,height);
-        using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true);
-        var sun=new SunLightSettings(true,315,45,5.5f,0);
-        double maxError=0;int shadowPixels=0;
-        foreach(float yaw in new[]{0f,.35f})
-        {
-            var camera=CameraFrame.FromOrbit(yaw,.165f,2.7f);
-            for(int frame=0;frame<12;frame++)
-            {
-                backend.Trace(mesh,width,height,2,1,frame,default,2.7f,raw,normal,surface,default,guide,camera,sun,direct,0);
-                device.ForEach(target,new MeshEncodeShader(raw,false,200,1000));
-                var reference=target.ToArray();
-                if(frame==11 && yaw==0) Save(target,"output/scenes/bunny-shadow-reference.png");
-                Require(sr.Execute(raw,normal,surface,target,default,2.7f,default,RayTraceDenoiserMode.NrdRelax,
-                    HdrRenderParameters.Default,1.0/60,guide,camera,directLight:direct),sr.Status.Message);
-                var actual=target.ToArray();
-                for(int y=0;y<height;y++)for(int x=0;x<width;x++)
-                    maxError=Math.Max(maxError,Math.Abs(actual[y,x].R-reference[y,x].R)/65535.0);
-                if(frame==11 && yaw==0)
-                {
-                    Save(target,"output/scenes/bunny-shadow-nrd.png");
-                    var p=surface.ToArray();var r=raw.ToArray();
-                    for(int y=0;y<height;y++)for(int x=0;x<width;x++)
-                        if(p[y,x].W>0 && Math.Abs(p[y,x].Y)<.001 && r[y,x].X<1e-6)shadowPixels++;
-                }
-            }
-        }
-        Require(shadowPixels>100 && maxError<.0005,$"Bunny shadow edges changed: pixels={shadowPixels}, max={maxError}");
-        Console.WriteLine($"PASS: built-in Bunny NRD direct shadows, {shadowPixels} shadow pixels; still/moving max error={maxError:E2}.");
-        // The optional finite disk must work in both legacy backends and enter NRD's noisy input.
-        var softSun=sun with { AngularDiameter=2 };
-        var softCamera=CameraFrame.FromOrbit(0,.165f,2.7f);
-        backend.Trace(mesh,width,height,16,1,0,default,2.7f,raw,normal,surface,default,guide,softCamera,softSun,direct,0);
-        var hardware=raw.ToArray();var positions=surface.ToArray();
-        Require(Energy(direct.ToArray())<1e-7,"Legacy solar disk bypasses denoising");
-        int penumbra=0;double unoccluded=softSun.Radiance.X*softSun.Direction.Y*.7/Math.PI;
-        for(int y=0;y<height;y++)for(int x=0;x<width;x++)
-            if(positions[y,x].W>0 && Math.Abs(positions[y,x].Y)<.001 && hardware[y,x].X>unoccluded*.1 && hardware[y,x].X<unoccluded*.9)penumbra++;
-        Require(penumbra>8,"Legacy mesh solar disk has no partial shadow pixels");
-        using var software=new SoftwareMeshBackend();software.Initialize(device);
-        software.Trace(mesh,width,height,16,1,0,default,2.7f,raw,normal,surface,default,guide,softCamera,softSun,direct,0);
-        var softwarePixels=raw.ToArray();double error=0;
-        for(int y=0;y<height;y++)for(int x=0;x<width;x++)error+=Math.Pow(hardware[y,x].X-softwarePixels[y,x].X,2);
-        double rmse=Math.Sqrt(error/(width*height));
-        Require(rmse<.005,"Software/hardware solar disk sampling diverges");
-        Console.WriteLine($"PASS: built-in finite sun, {penumbra} partial shadow pixels; software/hardware RMSE={rmse:E2}.");
-    }
-    private static unsafe ID3D12Device5 NativeDevice(GraphicsDevice device)
-    { Guid iid=typeof(ID3D12Device5).GUID; nint pointer; InteropServices.GetID3D12Device(device,&iid,(void**)&pointer); return new(pointer); }
+    private static ID3D12Device5 NativeDevice(DxrDevice device) => device.Device.QueryInterface<ID3D12Device5>();
     private static void VerifyDebug(ID3D12InfoQueue queue)
     {
         for(ulong i=0;i<queue.NumStoredMessagesAllowedByRetrievalFilter;i++)
@@ -579,7 +522,7 @@ internal static class SceneProbe
         output.Write(jsonSize);output.Write(0x4e4f534au);output.Write(utf8);for(int i=utf8.Length;i<jsonSize;i++)output.Write((byte)32);
         output.Write(binary.Length);output.Write(0x004e4942u);output.Write(binary); return file;
     }
-    internal static void Save(ReadWriteTexture2D<Rgba64,Float4> target,string file)
+    internal static void Save(GpuTexture<Rgba64> target,string file)
     {
         var pixels=target.ToArray();var values=MemoryMarshal.Cast<Rgba64,ushort>(MemoryMarshal.CreateReadOnlySpan(ref pixels[0,0],pixels.Length));
         byte[] rgba=new byte[values.Length];for(int i=0;i<rgba.Length;i++)rgba[i]=(byte)(values[i]>>8);

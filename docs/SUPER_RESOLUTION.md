@@ -28,8 +28,7 @@ generation is included. The optional vendor SDK bridge currently targets x64.
    stationary Temporal retains an uncapped per-pixel mean; it reads the identical
    history pixel when camera and raster footprint are unchanged. Moving native
    history is depth-rejected, clipped and bounded to 32 frames. A rejected pixel
-   restarts at one sample. The legacy encoded-space path likewise has no fixed
-   64-frame cap.
+   restarts at one sample.
    With temporal SR, Temporal and OptiX instead reproject **lighting divided by
    current reflectance**, not the already textured color. With a stationary PBR
    camera it averages lighting at the identical pixel across jitter, with no
@@ -91,13 +90,13 @@ reprojection. Explicit camera reset, model/settings discontinuities, size/mode
 changes and long frame gaps reset history. HDR encoding happens after SR and
 does not contaminate its linear history.
 
-SR uses the same D3D12 device as ComputeSharp and the ray tracer. Queue completion
+SR and the DXR ray tracer use the same D3D12 device. Queue completion
 is required before SDK contexts, mapped constants or descriptor tables are
 reused, and before the next queue reads shared output. SDK dispatch changes root
 bindings, so encoding explicitly binds its own state again. A failed unsubmitted
 command list is discarded before native fallback; a changed configuration can
 retry initialization. Static descriptor tables are cleared when inputs are rebound,
-so transitions between PBR, legacy models and denoisers cannot retain released
+so transitions between scenes and denoisers cannot retain released
 resources in unused slots. OptiX composition has its own table to avoid overwriting
 encoding descriptors before their command list executes. Resources and descriptors
 are reused in steady state.
@@ -162,15 +161,15 @@ was below 0.000173 input pixels; maximum moving-image error was 0.01582.
 The original FSR thin-glass RMS was 0.144968 with Temporal and 0.026782 with
 OptiX; both become 0.000034 in that same controlled fixture. Contrast above 100%
 can result from SR ringing and does not mean added source detail.
-Both traversal backends' 36 GPU contracts, native OptiX isolation/convergence,
-native temporal means, clean/noisy SR detail and production mip-footprint checks
-also passed. The actual application Bistro path rendered 64 frames each with
+The 36 GPU contracts for inline and `--legacy-trace` DXR traversal, native OptiX
+isolation/convergence, native temporal means, clean/noisy SR detail and production
+mip-footprint checks also passed. The actual application Bistro path rendered 64 frames each with
 DLSS + OptiX and DLSS + Temporal at 67%, 1 SPP / 8 bounces, 1280×720 output;
 both captures were inspected. Pure Temporal still shows substantial indirect
 path noise there; the glass fixture's stability is not a whole-scene noise claim.
 
-With SR and NRD both off, the previous encoded-space filters and stochastic
-primary sampling remain. Temporal surfaces are allocated when SR or NRD is active.
+With SR and NRD both off, stochastic primary sampling remains. Temporal surfaces
+are allocated when SR or NRD is active.
 One loading frame is presented before cold shader/SDK initialization.
 
 ## Validation on Intel Arc 140T
@@ -200,8 +199,6 @@ performed for this feature.
   alone cannot detect. Separate cases cover depth edges, disocclusions and
   image borders. These are numeric checks, not a claim that stochastic path
   tracing noise disappears or a substitute for visual motion-quality testing.
-- All 24 hardware/software parity cases (including NRD), resize and GPU HUD pass
-  with SR disabled. Maximum normalized RGBA RMSE is approximately 0.001193.
 - FSR/XeSS SDR snapshots were inspected. Motion quality, sustained performance,
   settings-window interaction and physical HDR output remain user/device checks.
   DLSS execution/quality tests are intentionally skipped on this Intel device.
@@ -209,7 +206,7 @@ performed for this feature.
 Reproduce from `diagnostics/integration`:
 
 ```powershell
-dotnet build IntegrationProbe.csproj -c Release --configfile ../performance/NuGet.Config
+dotnet build IntegrationProbe.csproj -c Release --configfile ../NuGet.Config
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
 ./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
 ```
@@ -239,9 +236,9 @@ mode changes release the feature only after queue completion.
 RR uses unified denoising and reconstruction. It receives no temporal, custom or
 NRD prefilter and is not followed by a DLSS SR dispatch. The selected regular
 denoiser is retained for switching back. Display exposure and encoding follow RR.
-The NGX availability query gates the settings option. Unsupported devices, the
-legacy Stanford mesh tracer, feature-creation failures and evaluation failures
-report an explicit fallback to conventional denoising plus DLSS SR when available,
+The NGX availability query gates the settings option. Unsupported devices,
+feature-creation failures and evaluation failures report an explicit fallback
+to conventional denoising plus DLSS SR when available,
 otherwise native resolution. NGX errors are included in the status text.
 
 **At the user's request, no DLSSD feature has been created or evaluated for

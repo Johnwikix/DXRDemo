@@ -1,4 +1,3 @@
-using DXRDemo.DXR;
 using DXRDemo.Shaders.RayTrace;
 
 namespace DXRDemo.Shaders;
@@ -8,7 +7,7 @@ public static class ShaderCatalog
     public static IReadOnlyList<ShaderAuthoringInfo> All { get; } =
     [new("ray-trace", "DXR Path Trace · RTXPT", "C# DXR path tracer with RTXPT sampling, PBR transport and HDR10",
         new("RT Demo", null, "See model attribution"), ShaderCapabilities.UsesMouse | ShaderCapabilities.UsesResolution,
-        null, static () => new RayTracePass(new DxrMeshBackend())
+        null, static () => new RayTracePass()
         {
             SceneIndex = RayTracePass.RtxptKitchenSceneIndex,
             ExternalLightingEnabled = true,

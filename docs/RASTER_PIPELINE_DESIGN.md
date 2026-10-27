@@ -38,7 +38,7 @@
 | [HdrSwapChainRenderer.cs](../DXRDemo/Hdr/HdrSwapChainRenderer.cs) | 持有呈现队列、双缓冲、宿主帧纹理与呈现 fence | 保持宿主所有权，向新管线提供借用的 RenderFrameContext |
 | [ShaderCatalog.cs](../DXRDemo/Shaders/ShaderCatalog.cs)、[ShaderFactory.cs](../DXRDemo/Shaders/ShaderFactory.cs) | 现有可选渲染器入口及实例缓存 | 注册 ray-trace / raster-pbr 两个轻量入口，引用同一个 SceneRenderer |
 
-现有 `.mesh.gz` Stanford 模型并不是 SceneAsset，增加一个 MeshData → SceneAsset 适配器，让两条管线读取同一场景目录。保留原始球体与软件 BVH 诊断入口，不把它们扩展成第二套应用场景管理。
+场景目录只保留打包和导入的 SceneAsset，不增加第二套场景管理或历史兼容适配器；后续光栅与路径追踪都以同一 SceneAsset 为输入。
 
 ## 3. 共享组件架构
 
@@ -326,9 +326,9 @@ Surface atlas 建议从总计 256 MiB 的材质/双版本光照预算开始，�
 
 IShaderPass/IHdrShaderRunner 保留兼容入口；新增原生命令录制接口供 SceneRenderPass 使用。HdrSwapChainRenderer 在渲染线程识别并调用该接口，统一提交与 signal。迁移中的旧追踪后端可暂时保留原同步提交，作为适配器接入标准帧；之后逐步把 Trace/Resolve 改为录制接口。
 
-必须处理一个现有细节：`GpuDiagnostics.Draw()` 通过 ComputeSharp 自己的执行路径绘制 HUD，不能在尚未提交的原生命令列表之间直接调用。首期原生分支把诊断数据显示到 WinUI 文本，GPU 图像 HUD 等有同队列录制实现后再接入；保留现有路径的 HUD 行为。
+`GpuDiagnostics.Draw()` 与加载画面已迁移到原生 `GpuFrameEffects` compute pass。新管线把命令录制到宿主列表时，应复用同一 HLSL 与原生绑定并改为同队列录制，不能在尚未提交的宿主命令列表之间插入另一次同步提交；现有 GPU HUD 行为保持不变。
 
-ComputeSharp 的独立执行路径还包括加载画面、旧网格编码和 Naive Temporal，现有 Temporal 也与 Prepare、历史及编码编排耦合；OptiX/CUDA 与玻璃合成同样依赖既有跨队列完成点。因此 M0 不能只特判 HUD 就假定其余通道均可直接录制。旧同步适配器必须保留到各路径分别完成迁移和探针回归；独立 NativeTAA 是 M0/M1 的实际交付，不是把现有路径累计直接改名。
+当前原生 Temporal 仍与 Prepare、历史及编码编排耦合，独立 NativeTAA 是 M0/M1 的实际交付，不是把现有路径累计直接改名。OptiX/CUDA 与玻璃合成继续依赖明确的跨队列完成点；M0 只保留这些仍被现行算法需要的同步交接，不增加旧框架兼容层或 encoded-only 适配路径。
 
 每帧槽独占 CPU 写入的常量切片、动态描述符、查询/readback 区。只在槽 fence 完成后重用。GPU 顺序访问的临时图像可在同队列上复用，历史显式 ping-pong；场景/尺寸资源退役等待最后引用它们的 fence。SDK 调用后重新绑定所需 root signature、PSO 和 descriptor heaps，不假设外部代码保留绑定。
 
@@ -361,7 +361,7 @@ DXRDemo/
       HybridRasterPipeline.cs
   Scene/
     SceneSession.cs               # 从 RayTracePass 抽出
-    SceneCatalog.cs               # 打包场景、Stanford、导入场景
+    SceneCatalog.cs               # 打包与导入的 SceneAsset 场景目录
     SceneAsset.cs                 # 继续共用
   Geometry/
     VirtualGeometryAsset.cs       # cluster/group DAG 派生数据
@@ -399,7 +399,7 @@ DXRDemo/
 
 | 阶段 | 交付内容 | 验收重点 |
 | --- | --- | --- |
-| M0：共享层抽取 | SceneSession/目录/相机控制；共享灯光、GpuScene/AS 租约；稳定 LogicalMeshId/GeometryInstanceId；重建与输出拆分；路径追踪适配新接口并保留旧同步适配器 | 现有场景、玻璃、太阳、NRD、OptiX、SR、累计探针回归；UI 不再依赖 RayTracePass 承担公共控制；同场景资源不重复上传；ComputeSharp/OptiX 旧路径不因单队列迁移失效 |
+| M0：共享层抽取 | SceneSession/目录/相机控制；共享灯光、GpuScene/AS 租约；稳定 LogicalMeshId/GeometryInstanceId；重建与输出拆分；路径追踪适配新接口，保留现行 OptiX/CUDA 同步交接 | 现有场景、玻璃、太阳、NRD、OptiX、SR、累计探针回归；UI 不再依赖 RayTracePass 承担公共控制；同场景资源不重复上传；原生 GpuTexture、GPU HUD 与必要跨队列交接不因单队列迁移失效 |
 | M1：完整光栅基线 | GBuffer、分簇直接光、传统阴影基线、环境降级照明、透明、独立 OpaqueColor 折射快照、统一 motion/depth、公共 TAA/SR/HDR | glTF 材质、负缩放、MASK、双面、切换/导入/尺寸和 HDR；折射不存在同纹理读写；无 DXR 的可用设备可启动基础光栅；此阶段不宣称完成硬件 GI |
 | M1.5：混合 GI 垂直切片 | 固定主视图 LOD0 与 CSM；最小屏幕/HWRT 一跳 GI；RT Hit Lighting 反射；共享 LinearFrame 与 SR；不引入 Surface/World Cache | 先排除动态 LOD/VSM 变量，验证共享 GpuScene/AS、单队列契约和实际 ray/shading；镜中金属、屏幕外反射、薄墙/接触/掠射与 GI 能量对照通过后再扩大范围 |
 | M2：动态无裂缝 LOD | 后台 cluster/group 层级构建、逻辑实例身份、误差与边界校验、CPU 参考 Cut、GPU 遍历/裁剪与 ExecuteIndirect，先全量驻留 | 跨材质替换组在同一 GeometryInstanceId 下原子选择；合法 Cut 覆盖、边界无裂缝、近裁剪/镜像/非均匀缩放、预算 overflow；量化前后均验收；测量切换平稳性 |
@@ -412,7 +412,7 @@ M1.5 是刻意提前的风险隔离切片，避免在完成虚拟几何和 VSM �
 
 重点验收场景与度量：
 
-1. **共享与回归**：相同 SceneAsset/相机在两条管线间反复切换，导入不重跑、公共 GPU 资源不翻倍；取消/失败仍显示旧场景，镜头不跳变；跨材质逻辑实例身份稳定，旧 ComputeSharp/OptiX 适配路径继续通过既有探针。
+1. **共享与回归**：相同 SceneAsset/相机在两条管线间反复切换，导入不重跑、公共 GPU 资源不翻倍；取消/失败仍显示旧场景，镜头不跳变；跨材质逻辑实例身份稳定，原生 GpuTexture/GPU HUD 与 OptiX 同步交接继续通过现行探针。
 2. **GI 正确性**：用封闭房间、彩色墙、窗口、单个发光面生成可复现样例；遮挡天空后室内变暗，出现颜色反弹，小灯不因转出屏幕失去照明。关闭 Screen Traces 单独验证缓存/RT 路径，并先固定 LOD0 排除表示差异。
 3. **混合几何表示**：LOD0 基线与自适应主表面分别测试薄墙、近接触、掠射和 LOD 往返切换，分别统计错误自遮挡与漏光；不能只检查光栅无裂缝，也不能通过无限增大 ray bias 让测试变绿。
 4. **缓存与反射**：记录无覆盖像素与 fallback 比例；相机转身、atlas eviction、灯光开关后无旧物体残影；设定最大未更新时间并测量响应。镜中金属、光滑介质和屏幕外物体与 Hit Lighting/路径参考对照，漫反射缓存回退必须显示近似或降级状态。
@@ -430,7 +430,7 @@ M1.5 是刻意提前的风险隔离切片，避免在完成虚拟几何和 VSM �
 2. 漫反射 Surface Cache 不再承担默认 RT 反射命中着色；M4 使用 Hit Lighting，缓存近似限定适用域并报告降级。
 3. 帧图明确反射的当前帧无间接镜面输入、透明接收面预通道和独立 OpaqueColor 折射快照，同时把新增快照计入显存与 GPU 预算。
 4. 共享场景必须提供稳定逻辑网格/实例身份；VSM 使用绝对 light-space 页身份和精确 ProjectionEpoch 规则，详见联合设计。
-5. M0 保留 ComputeSharp/OptiX 等旧同步适配器，M1.5 提前隔离验证混合 GI，避免把 LOD、VSM、缓存和迁移风险一次性叠加。
+5. M0 不恢复旧软件对照分支，只保留现行 OptiX/CUDA 所需的同步交接；M1.5 提前隔离验证混合 GI，避免把 LOD、VSM、缓存和迁移风险一次性叠加。
 
 剩余开放项是混合几何表示的具体光线起点/命中策略、缓存多次反弹的能量与稳定性实测，以及目标硬件上的冷启动和最坏帧性能。上述开放项未关闭前，只能宣称架构可实施，不能宣称已经达到完整 Nanite/Lumen 的规模、画质或 60 Hz 目标。
 

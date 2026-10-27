@@ -1,12 +1,12 @@
 using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using ComputeSharp;
-using ComputeSharp.Interop;
 using DXRDemo.Camera;
 using DXRDemo.Scene;
 using Vortice.Direct3D12;
 using Vortice.DXGI;
+using Float2 = System.Numerics.Vector2;
+using Float4 = System.Numerics.Vector4;
 
 namespace DXRDemo.DXR;
 
@@ -86,12 +86,10 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         public void Dispose() { for (int i = Owned.Count - 1; i >= 0; i--) Owned[i].Dispose(); Owned.Clear(); }
     }
 
-    internal void Initialize(GraphicsDevice device)
+    internal void Initialize(DxrDevice device)
     {
         if (_initialized) return;
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        _gpu.Initialize(new ID3D12Device5(pointer));
+        _gpu.Initialize(device.Device);
         var parameters = new List<RootParameter1>
         { new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All) };
         for (uint i = 0; i < 7; i++) parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(i, 0), ShaderVisibility.All));
@@ -300,14 +298,9 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         _gpu.Device.CreateShaderResourceView(texture, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + (index + OutputCount) * _stride);
     }
 
-    private static ID3D12Resource Resource<T>(ReadWriteTexture2D<T> texture) where T : unmanaged
-    { Guid iid = typeof(ID3D12Resource).GUID; nint pointer; InteropServices.GetID3D12Resource(texture, &iid, (void**)&pointer); return new(pointer); }
-    private static ID3D12Resource Resource(ReadWriteTexture2D<Rgba32, Float4> texture)
-    { Guid iid = typeof(ID3D12Resource).GUID; nint pointer; InteropServices.GetID3D12Resource(texture, &iid, (void**)&pointer); return new(pointer); }
-
     internal void Trace(in CameraFrame camera, int frame, int samples, int bounces, Float2 jitter, float environment,
-        ReadWriteTexture2D<Float4> raw, ReadWriteTexture2D<Rgba32, Float4> normal, ReadWriteTexture2D<Float4> surface,
-        ReadWriteTexture2D<Float4> guide, PbrSignals signals,
+        GpuTexture<Float4> raw, GpuTexture<Rgba32> normal, GpuTexture<Float4> surface,
+        GpuTexture<Float4> guide, PbrSignals signals,
         SunLightSettings sun = default, bool rayReconstruction = false, bool resetHistory = false, bool opaqueForNrd = false,
         bool optixGuides = false, float textureLodBias = 0, bool stabilizeGlass = false)
     {
@@ -329,15 +322,14 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
         }
         if (!ReferenceEquals(raw, _boundOutput))
         {
-            foreach (var old in _outputs) old?.Dispose();
-            _outputs[0] = Resource(raw); _outputs[1] = Resource(normal); _outputs[2] = Resource(surface); _outputs[3] = Resource(guide);
-            _outputs[4] = Resource(signals.Diffuse); _outputs[5] = Resource(signals.Specular); _outputs[6] = Resource(signals.Albedo); _outputs[7] = Resource(signals.Unfiltered);
-            _outputs[8] = Resource(signals.SpecularGuide);
-            _outputs[9] = Resource(signals.DiffuseSh); _outputs[10] = Resource(signals.SpecularSh); _outputs[11] = Resource(signals.GlassSurface);
-            _outputs[12] = Resource(signals.DiffuseFactor); _outputs[13] = Resource(signals.SpecularFactor);
-            _outputs[14] = Resource(signals.GlassFallback); _outputs[15] = Resource(signals.GlassNormal);
-            _outputs[16] = Resource(signals.StableReflection); _outputs[17] = Resource(signals.StableReflectionSurface); _outputs[18] = Resource(signals.StableReflectionNormal);
-            _outputs[19] = Resource(signals.StableTransmission); _outputs[20] = Resource(signals.StableTransmissionSurface); _outputs[21] = Resource(signals.StableTransmissionNormal);
+            _outputs[0] = raw.Resource; _outputs[1] = normal.Resource; _outputs[2] = surface.Resource; _outputs[3] = guide.Resource;
+            _outputs[4] = signals.Diffuse.Resource; _outputs[5] = signals.Specular.Resource; _outputs[6] = signals.Albedo.Resource; _outputs[7] = signals.Unfiltered.Resource;
+            _outputs[8] = signals.SpecularGuide.Resource;
+            _outputs[9] = signals.DiffuseSh.Resource; _outputs[10] = signals.SpecularSh.Resource; _outputs[11] = signals.GlassSurface.Resource;
+            _outputs[12] = signals.DiffuseFactor.Resource; _outputs[13] = signals.SpecularFactor.Resource;
+            _outputs[14] = signals.GlassFallback.Resource; _outputs[15] = signals.GlassNormal.Resource;
+            _outputs[16] = signals.StableReflection.Resource; _outputs[17] = signals.StableReflectionSurface.Resource; _outputs[18] = signals.StableReflectionNormal.Resource;
+            _outputs[19] = signals.StableTransmission.Resource; _outputs[20] = signals.StableTransmissionSurface.Resource; _outputs[21] = signals.StableTransmissionNormal.Resource;
             for (int i = 0; i < OutputCount; i++) _gpu.Device.CreateUnorderedAccessView(_outputs[i], null, null, scene.Heap.GetCPUDescriptorHandleForHeapStart() + i * _stride);
             _boundOutput = raw;
         }
@@ -443,7 +435,7 @@ internal sealed unsafe class DxrSceneBackend : IDisposable
     public void Dispose()
     {
         if (_initialized) _gpu.SignalAndWait();
-        foreach (var output in _outputs) output?.Dispose(); _scene?.Dispose(); _table.Dispose();
+        _scene?.Dispose(); _table.Dispose();
         foreach (var reservoir in _reservoirs) reservoir?.Dispose();
         for (int i = _owned.Count - 1; i >= 0; i--) _owned[i].Dispose(); _gpu.Dispose();
     }

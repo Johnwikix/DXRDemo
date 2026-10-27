@@ -1,6 +1,5 @@
 using System.Numerics;
 using System.Text.Json;
-using ComputeSharp;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
@@ -8,6 +7,7 @@ using DXRDemo.Shaders.RayTrace;
 using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.Direct3D12.Debug;
+using Float4 = System.Numerics.Vector4;
 
 /// <summary>Exercises the real NRD adapter with a noise-free world-anchored signal and a deterministic camera path.</summary>
 internal static unsafe class NrdMotionProbe
@@ -26,19 +26,17 @@ internal static unsafe class NrdMotionProbe
         int frameCount = Option("--frames", 32, 64);
         if (frameCount < 25) throw new ArgumentException("--frames must be at least 25 to cover stationary, translation and FOV reprojection.");
         using var layer = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); layer.EnableDebugLayer();
-        using var device = GraphicsDevice.GetDefault();
-        Guid iid = typeof(ID3D12Device5).GUID; nint pointer;
-        ComputeSharp.Interop.InteropServices.GetID3D12Device(device, &iid, (void**)&pointer);
-        using var native = new ID3D12Device5(pointer);
+        using var device = DxrDevice.CreateDefault();
+        using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
         using var sr = new SuperResolutionRenderer(device);
         sr.Configure(ReconstructionMode.Off, 100, width, height, true);
         Require(sr.Status.NrdActive, sr.Status.Message);
-        using var raw = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var normals = device.AllocateReadWriteTexture2D<Rgba32, Float4>(width, height);
-        using var surfaces = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var guide = device.AllocateReadWriteTexture2D<Float4>(width, height);
-        using var target = device.AllocateReadWriteTexture2D<Rgba64, Float4>(width, height);
+        using var raw = device.CreateTexture2D<Float4>(width, height);
+        using var normals = device.CreateTexture2D<Rgba32>(width, height);
+        using var surfaces = device.CreateTexture2D<Float4>(width, height);
+        using var guide = device.CreateTexture2D<Float4>(width, height);
+        using var target = device.CreateTexture2D<Rgba64>(width, height);
         var radiance = new Float4[height, width];
         var positions = new Float4[height, width];
         var normalGuide = new Float4[height, width];

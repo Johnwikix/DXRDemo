@@ -1,4 +1,4 @@
-using ComputeSharp;
+using DXRDemo.DXR;
 
 namespace DXRDemo.Hdr;
 
@@ -39,5 +39,5 @@ public interface IHdrShaderRunner
     /// <param name="timespan">Elapsed time since rendering started.</param>
     /// <param name="parameter">A <see cref="HdrRenderParameters"/> value controlling the output encoding.</param>
     /// <returns>Whether a frame was produced and should be presented.</returns>
-    bool TryExecute(ReadWriteTexture2D<Rgba64, Float4> texture, int width, int height, TimeSpan timespan, object? parameter);
+    bool TryExecute(GpuTexture<Rgba64> texture, int width, int height, TimeSpan timespan, object? parameter);
 }
