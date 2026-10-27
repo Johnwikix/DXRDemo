@@ -1,6 +1,6 @@
 # 现代光栅化、虚拟几何与硬件光追 GI 管线设计
 
-状态：设计提案，尚未实现。日期：2026-10-26。代码基线：`af55fab`。
+状态：设计提案，尚未实现。初稿：2026-10-26；审查修订：2026-10-27。代码基线：`af55fab`。
 
 目标是在现有路径追踪之外增加一个实时混合渲染器：主表面由光栅化确定，间接光和反射参考 UE5 Hardware Lumen 的缓存架构。场景、相机、GPU 场景资源、灯光定义、超分和显示输出抽成共享组件，两条管线只保留各自的可见性与光传输算法。
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 主渲染架构 | 不透明物体采用紧凑 GBuffer + Clustered Deferred；透明和玻璃采用 Forward |
 | 实时间接光 | 屏幕探针 + DXR 三角形追踪 + Surface Cache + 世界空间 Radiance Cache |
-| 反射 | 屏幕追踪优先，屏幕外使用硬件光追；默认读取缓存，质量档允许 Hit Lighting |
+| 反射 | 屏幕追踪优先，屏幕外使用硬件光追；M4 默认 Hit Lighting，漫反射缓存只作带近似标记的回退，高粗糙度可使用探针与预过滤环境 |
 | 直接光与阴影 | 分簇处理方向光、点光和聚光；目标采用 VSM clipmap/局部虚拟映射与页缓存；传统阴影作为基线与降级后端；任意屏幕外查询可用 RT 可见性 |
 | 共用组件 | 一个 SceneSession、一个 CameraController、一份 GpuScene、一个 ReconstructionService、一个 DisplayOutput |
 | 路径追踪 | 保留独立光传输求解器，使用同一份几何、材质、灯光与输出服务，作为参考路径 |
@@ -87,6 +87,8 @@ ShaderFactory 中的两个入口只负责目录身份和选择 PipelineKind。�
 
 公共 GPU 顶点继续使用现有 80 字节 SceneVertex，索引保持 uint，SceneMaterial/TextureBinding 保持一个 CPU/HLSL 契约。原始几何与光追共用原始 VB/IB；自适应光栅、VSM 和 Card 捕获引用同一源顶点，增加派生层级索引与 metadata。首期不在每次选择 LOD 时重建 BLAS。缓冲状态允许各自所需的只读用途，纹理读取明确声明 Pixel/NonPixelShaderResource，不能沿用当前只有 NonPixelShaderResource 的假设。
 
+虚拟几何的统一选择单位是逻辑网格和逻辑几何实例，不是 glTF primitive 拆分后的渲染实例。共享 SceneAsset 需补充稳定 `LogicalMeshId`、`GeometryInstanceId` 和 primitive material ranges，使同一逻辑节点的多材质 primitive 能参与同一 DAG Cut；原始 RT BLAS/TLAS 保持现有身份映射。缺少这些身份的旧资产只能按单 primitive 保守回退，不得按名称或相同变换启发式合并。
+
 BLAS/TLAS 也共用，但它们是 GpuScene 的可选扩展。不能为了纯光栅启动而提前构建。当前静态场景只在几何/实例变化时构建，不照搬动态引擎逐帧重建 TLAS 的成本。不同光线用途使用统一定义的实例掩码，已有玻璃阴影掩码迁移时保留其语义。
 
 ### 3.2 场景事务与线程规则
@@ -136,7 +138,7 @@ Epic 的公开说明将屏幕追踪、Surface Cache 与硬件三角形追踪组�
 | 表面缓存 | 命中表面是什么材质，向外发出多少漫反射光？ | Cards 参数化、材质 atlas、漫反射辐射亮度 atlas |
 | 屏幕探针 | 当前可见表面从哪些方向收到光？ | 低分辨率、几何自适应的方向辐射探针 |
 | 世界辐射缓存 | 屏幕外/远处方向的光如何稳定复用？ | 相机附近的稀疏多级空间探针，保存方向光照与可见性信息 |
-| 反射 | 当前观察方向看见什么？ | 屏幕追踪、RT、缓存命中着色及有限 Hit Lighting |
+| 反射 | 当前观察方向看见什么？ | 屏幕追踪、RT、默认 Hit Lighting 及受限的漫反射缓存回退 |
 
 Surface Cache 存在物体表面，Radiance Cache 存在空间中；不能把二者合并成一张无几何约束的“GI 贴图”。硬件光追只是求交方式，也不能替代这两类缓存。
 
@@ -152,7 +154,10 @@ flowchart TD
     CULL --> DEPTH[Opaque / Mask 深度预通道]
     DEPTH --> GB[GBuffer 与运动矢量]
     GB --> HIZ[Hi-Z 与三维光源分簇]
+    CULL --> TPRE[透明低精度接收面预通道]
+    GB --> TPRE
     HIZ --> VSM[VSM 接收请求 / 失效 / 页几何选择与绘制]
+    TPRE --> VSM
     FRAME --> CARDS[预算内 Card 材质捕获]
     CARDS --> VSM
     VSM --> DIRECT[分簇直接光 / VSM 阴影查询]
@@ -162,18 +167,26 @@ flowchart TD
     HIZ --> PROBE[屏幕探针布置 / 屏幕追踪]
     DIRECT --> PROBE
     WORLD --> PROBE
-    PROBE --> RT[屏幕未命中光线: DXR + 缓存命中着色]
+    PROBE --> RT[屏幕未命中光线: DXR + Surface Cache / Hit Lighting]
     RT --> GATHER[探针滤波 / Final Gather / GI]
-    HIZ --> REFL[反射追踪 / RT / 有限 Hit Lighting]
+    HIZ --> REFL[反射追踪 / RT / 默认 Hit Lighting]
+    DIRECT --> REFL
+    GATHER --> REFL
+    GB --> REFL
     CACHE --> REFL
-    GATHER --> COMPOSE[直接光 + 漫反射 GI + 镜面反射 + 自发光]
+    GATHER --> COMPOSE[不透明合成到 SceneColor]
     REFL --> COMPOSE
     DIRECT --> COMPOSE
-    COMPOSE --> TRANSPARENT[前向透明 / 玻璃 / Reactive]
+    COMPOSE --> SNAPSHOT[复制独立 OpaqueColor 快照]
+    SNAPSHOT --> TRANSPARENT[前向透明 / 玻璃读快照写 SceneColor / Reactive]
+    TPRE --> TRANSPARENT
+    VSM --> TRANSPARENT
     TRANSPARENT --> POST[共享 TAA 或 SR / 曝光 / 显示编码 / Present]
 ```
 
-图中的依赖在首期按单队列顺序录制。漫反射 GI 的屏幕追踪读取独立的 ScreenDiffuseRadiance：当前 emission + 漫反射直接光 + 上一帧经验证的漫反射间接光，不混入视角相关镜面项。反射屏幕追踪读取经验证的不透明出射颜色；两者均禁止采样尚未生成的当前最终合成图形成反馈环。
+图中的依赖在首期按单队列顺序录制。漫反射 GI 的屏幕追踪读取独立的 ScreenDiffuseRadiance：当前 emission + 漫反射直接光 + 上一帧经验证的漫反射间接光，不混入视角相关镜面项。反射屏幕追踪读取当前帧的逻辑 `OpaqueBase = Emissive + AnalyticDirectLighting + DiffuseBRDF × GatheredIndirectIrradiance`，由 DIRECT、GATHER 和 GBuffer 在采样时组合，不含正在计算的间接镜面，也不依赖上一帧最终颜色；图中的三条输入边不要求再物化一张全分辨率 OpaqueBase。两者均禁止采样尚未生成的当前最终合成图形成反馈环。
+
+透明低精度接收面预通道只生成位置/深度和阴影请求所需语义，不提前执行正式透明光照合成；正式透明阶段复用其结果。COMPOSE 先写入 SceneColor，随后复制独立 OpaqueColor 快照；玻璃折射只读快照，透明混合继续写 SceneColor，禁止把同一纹理同时作为折射 SRV 和透明 RTV/UAV。
 
 ### 5.1 光栅主表面与直接光
 
@@ -218,6 +231,8 @@ L_surface = L_emissive + diffuseReflectance / pi * (E_direct + E_indirect)
 
 HWRT 路径为“求交 → 读取 Surface Lighting，缺失时 Hit Lighting → miss 时采样环境”。首期复用现有 DXR 1.0 / lib_6_5 的 DispatchRays；RayQuery 作为 DXR 1.1 / SM 6.5+ 的后续优化，按设备查询和测量决定，不强制 SM 6.9 或 SER。
 
+**几何表示门槛。** M1.5 和 M4 的正确性基线使用主视图 LOD0；M2 仍可独立验收光栅/VSM 的动态 LOD，但硬件 GI 启用时不得自动继承该实验表示。自适应主表面与 LOD0 BLAS 不共面，光线起点偏移不能普遍区分错误自遮挡、真实遮挡和薄墙漏光。混合表示必须作为独立质量档，明确起点重定位、命中拒绝或匹配 RT proxy 中的一种可验证方案，并通过薄墙、近接触、掠射和 LOD 往返切换测试后才允许默认开启；不能无限增大 bias 掩盖差异。
+
 世界缓存采用围绕相机的稀疏多级探针网格；空间探针保存方向 radiance、距离/可见性统计、年龄、场景与光照版本。移动相机时以整格滚动，失效进入的新区域，不整体重置。插值同时考虑可见性、接收点与法线关系，拒绝跨墙混合，并提供 probe relocation/invalid 标记，避免室内漏光。
 
 世界缓存更新只能读取已完成的上一版本 Surface Lighting/世界缓存，再发布当前版本；Surface 间接光更新可消费已完成的世界缓存版本。缓存缺失回退也只读已完成且有效的版本，禁止 Surface → World → Surface 在同一轮递归读写。冷启动没有有效结果时标记低置信度，优先安排实际追踪；不能用未初始化历史补齐。
@@ -228,11 +243,11 @@ HWRT 路径为“求交 → 读取 Surface Lighting，缺失时 Hit Lighting →
 
 ### 5.4 反射与透明
 
-反射按 roughness 分配采样预算：低粗糙度需要方向准确的 RT 反射，中等粗糙度重投影/空间重建，高粗糙度可使用探针与预过滤环境的近似。屏幕追踪先找可验证命中，失败后追踪共享三角形场景；屏幕外物体必须可见于反射。
+反射按 roughness 分配采样预算：低粗糙度需要方向准确的 RT 反射，中等粗糙度重投影/空间重建，高粗糙度可使用探针与预过滤环境的近似。屏幕追踪先找可验证命中，读取上述不含间接镜面的当前帧 OpaqueBase；失败后追踪共享三角形场景，屏幕外物体必须可见于反射。该屏幕颜色只表示有限次数的出射光近似，不形成递归镜面反馈。
 
-默认反射命中读取缓存的漫反射出射光。高质量 Hit Lighting 在命中点重新求材质和直接光的可见性，并补充缓存间接光；该路径保留预算和最大深度，第一版不尝试镜面中的递归镜面。缓存近似与 Hit Lighting 各有调试对照，不能把缓存模式描述成物理准确镜面。
+M4 的 RT 命中默认使用 Hit Lighting：在命中点重新求材质、直接光及其可见性，并补充有效的缓存间接光。漫反射 Surface Cache 不含命中表面的直接镜面出射项，金属的漫反射又趋近零，因此不能把“低粗糙度 RT + 默认读取漫反射缓存”当作完整反射路径。后续只有高粗糙度、漫反射占主导的命中才允许使用带置信度和调试标记的缓存近似；镜中金属与光滑介质必须走 Hit Lighting 或明确报告降级。Hit Lighting 保留预算和最大深度，第一版不尝试镜面中的递归镜面；缓存近似与 Hit Lighting 各有调试对照。
 
-BLEND 首期按实例/primitive 后到前排序，使用预乘 alpha、只读不透明深度；相交透明几何的排序误差记录为限制。Transmission 与 alpha blend 是独立语义：玻璃首期采用 Fresnel、IOR、厚度吸收和屏幕背景折射，屏幕外反射可使用 RT。玻璃的最近有效表面提供运动/响应信息，不覆盖用于 SR 的不透明背景深度约定。
+BLEND 首期按实例/primitive 后到前排序，使用预乘 alpha、只读不透明深度；相交透明几何的排序误差记录为限制。Transmission 与 alpha blend 是独立语义：玻璃首期采用 Fresnel、IOR、厚度吸收和屏幕背景折射，屏幕外反射可使用 RT。不透明合成完成后复制 `OpaqueColor` 快照，折射只读该快照，透明混合写入原 SceneColor；快照复制和状态转换计入 Transparent/Output 的时间与显存预算，后续只有在测量证明有价值时才改为其他透明积累结构。玻璃的最近有效表面提供运动/响应信息，不覆盖用于 SR 的不透明背景深度约定。
 
 透明物体的低频间接光来自世界探针。多层实体折射、嵌套介质与焦散仍由现有路径追踪提供；不把这部分误列为首期混合光栅已具备的能力。glTF 的 alpha 与 transmission 语义依据 [glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) 和 [KHR_materials_transmission](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_transmission)。
 
@@ -291,15 +306,17 @@ DisplayOutput 共用现有项目的色调映射与编码行为，避免接入时
 | GeometricNormal | RG16_SNORM；几何法线，用于探针起点偏移与几何拒绝 |
 | EmissiveFlags | RGBA16_FLOAT；RGB HDR 自发光，A 为少量材质/有效表面标记 |
 | Velocity | RG16_FLOAT，输入像素单位 |
-| SceneColor | RGBA16_FLOAT，合成后的线性 HDR |
+| SceneColor | RGBA16_FLOAT，不透明合成及透明混合后的线性 HDR |
+| OpaqueColor | RGBA16_FLOAT，透明前的独立不透明快照，仅供屏幕折射等只读采样 |
 | Reactive | R8_UNORM |
+| TransparentReceivers | 低分辨率透明接收位置/深度与请求语义；分辨率、层数和格式另计 |
 | VSM | 常规 light-space Z 的物理深度页池，虚拟页表与几何依赖另计 |
 | Surface Cache | page 化材质 atlas + 双版本光照 atlas，容量可配置 |
 | Probe 数据 | 方向 radiance、距离、置信度/年龄，独立于最终图像的时间历史 |
 
-不存全分辨率世界坐标，使用深度和逆抖动矩阵重建。基础资源格式累计约 41 bytes/输入像素；这不含光照中间结果、Hi-Z、探针、缓存、SR SDK 和模型。
+不存全分辨率世界坐标，使用深度和逆抖动矩阵重建。计入新增的 OpaqueColor 快照后，基础资源格式累计约 49 bytes/输入像素；这不含 Direct/Gather 等光照中间结果、TransparentReceivers、Hi-Z、探针、缓存、SR SDK 和模型。反射的 OpaqueBase 默认按需组合 DIRECT、GATHER 与 GBuffer，不再额外物化一张全分辨率纹理。
 
-作为显存规划示例，当前基础输入在 1080p 约 81 MiB，在 4K 约 324 MiB；两份 HDR+深度时间历史分别约 47/190 MiB；现有两张 4K RGBA16 编码输出约 127 MiB。VSM 的起始物理池按 2048 个带 guard 的 128² 页估计约 136 MiB，详见联合设计；M1 的 4×2048² D32 CSM 基线约 64 MiB，两种后端按选择计费。几何派生数据、缓存和 SDK 还有独立预算，4K 原生不能沿用 1080p 的显存假设。
+作为显存规划示例，当前基础输入在 1080p 约 97 MiB，在 4K 约 388 MiB；两份 HDR+深度时间历史分别约 47/190 MiB；现有两张 4K RGBA16 编码输出约 127 MiB。VSM 的起始物理池按 2048 个带 guard 的 128² 页估计约 136 MiB，详见联合设计；M1 的 4×2048² D32 CSM 基线约 64 MiB，两种后端按选择计费。几何派生数据、缓存和 SDK 还有独立预算，4K 原生不能沿用 1080p 的显存假设。
 
 Surface atlas 建议从总计 256 MiB 的材质/双版本光照预算开始，世界缓存从 64 MiB 开始做压力验证。这些是设计起点，尚无设备测量。预算不足优先降低 page 分辨率、探针更新数量或输入比例，并报告降级；不能只降低 ray count 而让 atlas 无限增长。
 
@@ -311,13 +328,15 @@ IShaderPass/IHdrShaderRunner 保留兼容入口；新增原生命令录制接口
 
 必须处理一个现有细节：`GpuDiagnostics.Draw()` 通过 ComputeSharp 自己的执行路径绘制 HUD，不能在尚未提交的原生命令列表之间直接调用。首期原生分支把诊断数据显示到 WinUI 文本，GPU 图像 HUD 等有同队列录制实现后再接入；保留现有路径的 HUD 行为。
 
+ComputeSharp 的独立执行路径还包括加载画面、旧网格编码和 Naive Temporal，现有 Temporal 也与 Prepare、历史及编码编排耦合；OptiX/CUDA 与玻璃合成同样依赖既有跨队列完成点。因此 M0 不能只特判 HUD 就假定其余通道均可直接录制。旧同步适配器必须保留到各路径分别完成迁移和探针回归；独立 NativeTAA 是 M0/M1 的实际交付，不是把现有路径累计直接改名。
+
 每帧槽独占 CPU 写入的常量切片、动态描述符、查询/readback 区。只在槽 fence 完成后重用。GPU 顺序访问的临时图像可在同队列上复用，历史显式 ping-pong；场景/尺寸资源退役等待最后引用它们的 fence。SDK 调用后重新绑定所需 root signature、PSO 和 descriptor heaps，不假设外部代码保留绑定。
 
 资源状态与 UAV 顺序由轻量 PassScheduler 根据每个 pass 的输入/输出声明处理：深度写入/只读、RTV→SRV、UAV 生产→消费、间接参数→INDIRECT_ARGUMENT 均显式表达。开始采用现有 resource barrier API；首期只做状态/依赖与生命周期追踪，不引入复杂内存 alias 或多队列调度。[D3D12 队列同步说明](https://learn.microsoft.com/en-us/windows/win32/direct3d12/user-mode-heap-synchronization)
 
 ### 7.3 测量方式
 
-各自记录 GeometrySelect、Raster/GBuffer、VsmPageRequest/Depth/Projection、Direct、CardCapture、SurfaceLighting、WorldCache、ProbeTrace/Gather、Reflections、Transparency、SR/Output 的 GPU 时间；记录所选几何量、CPU 提交、几何/VSM overflow、缓存命中率、无覆盖比例、page age、光线数、AS 构建次数、显存和实际呈现帧率。
+各自记录 GeometrySelect、Raster/GBuffer、VsmPageRequest/Depth/Projection、Direct、CardCapture、SurfaceLighting、WorldCache、ProbeTrace/Gather、Reflections、TransparentReceiver/Transparency、OpaqueSnapshot、SR/Output 的 GPU 时间；记录所选几何量、CPU 提交、几何/VSM overflow、缓存命中率、无覆盖比例、page age、光线数、AS 构建次数、显存和实际呈现帧率。
 
 建议先以 1080p 输入 → 4K 输出建立 60 Hz/16.67 ms 的整帧优化目标；这是目标，不是承诺。首轮拆分预算可用：主表面+直接光 4 ms，GI+反射 6 ms，透明+SR+输出 3 ms，余量约 3.7 ms。缓存捕获和 AS 更新也计入总帧，单帧超预算必须可见。测试同时覆盖静止、持续移动、突然转身、光照改变和首次导入。
 
@@ -380,24 +399,39 @@ DXRDemo/
 
 | 阶段 | 交付内容 | 验收重点 |
 | --- | --- | --- |
-| M0：共享层抽取 | SceneSession/目录/相机控制；共享灯光、GpuScene/AS 租约；重建与输出拆分；路径追踪适配新接口 | 现有场景、玻璃、太阳、NRD、OptiX、SR、累计探针回归；UI 不再依赖 RayTracePass 承担公共控制；同场景资源不重复上传 |
-| M1：完整光栅基线 | GBuffer、分簇直接光、传统阴影基线、环境降级照明、透明、统一 motion/depth、公共 TAA/SR/HDR | glTF 材质、负缩放、MASK、双面、切换/导入/尺寸和 HDR；无 DXR 的可用设备可启动基础光栅；此阶段不宣称完成硬件 GI |
-| M2：动态无裂缝 LOD | 后台 cluster/group 层级构建、误差与边界校验、CPU 参考 Cut、GPU 遍历/裁剪与 ExecuteIndirect，先全量驻留 | 合法 Cut 覆盖、边界无裂缝、近裁剪/镜像/非均匀缩放、预算 overflow；量化前后均验收；测量切换平稳性 |
-| M3：VSM | 方向光 clipmap、局部光 mip/六面页表、物理页池、几何页分桶、缓存失效、粗覆盖/fallback，再加入 SMRT | 页边界/clipmap/cube face、屏幕外 caster、透明/Card 请求、太阳转向与几何移除；深度页/投影分别计时 |
-| M4：硬件 GI 验证路径 | 屏幕探针、HWRT 一跳 GI、屏幕外反射、Hit Lighting；复用现有发光面采样分布 | Kitchen 自发光可照亮邻面、关闭屏幕追踪后 GI 仍存在、屏幕外物体可见于反射；测量实际 ray/shading 成本 |
-| M5：Lumen 式缓存架构 | Cards/覆盖诊断、Surface Lighting、世界缓存、多次反弹迭代、反馈与更新预算 | 缓存命中率/覆盖/age 可观测；薄墙漏光、灯光响应、转身、新场景与 atlas 淘汰正确；与路径参考对照质量及整帧时间 |
+| M0：共享层抽取 | SceneSession/目录/相机控制；共享灯光、GpuScene/AS 租约；稳定 LogicalMeshId/GeometryInstanceId；重建与输出拆分；路径追踪适配新接口并保留旧同步适配器 | 现有场景、玻璃、太阳、NRD、OptiX、SR、累计探针回归；UI 不再依赖 RayTracePass 承担公共控制；同场景资源不重复上传；ComputeSharp/OptiX 旧路径不因单队列迁移失效 |
+| M1：完整光栅基线 | GBuffer、分簇直接光、传统阴影基线、环境降级照明、透明、独立 OpaqueColor 折射快照、统一 motion/depth、公共 TAA/SR/HDR | glTF 材质、负缩放、MASK、双面、切换/导入/尺寸和 HDR；折射不存在同纹理读写；无 DXR 的可用设备可启动基础光栅；此阶段不宣称完成硬件 GI |
+| M1.5：混合 GI 垂直切片 | 固定主视图 LOD0 与 CSM；最小屏幕/HWRT 一跳 GI；RT Hit Lighting 反射；共享 LinearFrame 与 SR；不引入 Surface/World Cache | 先排除动态 LOD/VSM 变量，验证共享 GpuScene/AS、单队列契约和实际 ray/shading；镜中金属、屏幕外反射、薄墙/接触/掠射与 GI 能量对照通过后再扩大范围 |
+| M2：动态无裂缝 LOD | 后台 cluster/group 层级构建、逻辑实例身份、误差与边界校验、CPU 参考 Cut、GPU 遍历/裁剪与 ExecuteIndirect，先全量驻留 | 跨材质替换组在同一 GeometryInstanceId 下原子选择；合法 Cut 覆盖、边界无裂缝、近裁剪/镜像/非均匀缩放、预算 overflow；量化前后均验收；测量切换平稳性 |
+| M3：VSM | 方向光 clipmap、局部光 mip/六面页表、物理页池、几何页分桶、缓存失效、粗覆盖/fallback，再加入 SMRT | 页边界/clipmap/cube face、平移吸附后的页复用、屏幕外 caster、当前帧透明接收面预通道/Card 请求、太阳转向与几何移除；深度页/投影分别计时 |
+| M4：完整硬件 GI 验证路径 | 屏幕探针、HWRT 一跳 GI、屏幕外反射、默认 Hit Lighting；复用现有发光面采样分布；混合几何表示作为独立质量档 | 先在 LOD0 基线验证 Kitchen 自发光邻面照明、关闭屏幕追踪后的 GI 和屏幕外反射；混合表示通过薄墙、近接触、掠射与 LOD 往返测试后才默认开启；测量实际 ray/shading 成本 |
+| M5：Lumen 式缓存架构 | Cards/覆盖诊断、Surface Lighting、世界缓存、多次反弹迭代、反馈与更新预算；受限的漫反射缓存反射回退 | 缓存命中率/覆盖/age 可观测；薄墙漏光、灯光响应、转身、新场景与 atlas 淘汰正确；镜中金属/光滑介质仍由 Hit Lighting 保持正确；与路径参考对照质量及整帧时间 |
 | M6：连续过渡与规模扩展 | Geomorph 映射/连续过渡独立验收；几何 streaming、驻留预算与 Mesh Shader 按需求分项推进；按测量优化 RayQuery | Geomorph 的边界/运动矢量/拓扑替换验证通过才宣称严格连续；streaming 缺页保留完整粗 Cut；与固定驻留路径对照性能 |
 
-M4 的 Hit Lighting 是 M5 的缓存缺失回退和高质量反射路径。M2 的虚拟几何先解决无裂缝与动态选择，M3 提供目标直接光阴影，M5 满足 Hardware Lumen 式光照目标；严格连续过渡作为 M6 的独立交付。间接绘制采用 PSO/材质桶，GPU 生成绘制参数并由 ExecuteIndirect 消费，避免假设一条命令能切换任意 PSO。[D3D12 间接绘制说明](https://learn.microsoft.com/en-us/windows/win32/direct3d12/indirect-drawing)
+M1.5 是刻意提前的风险隔离切片，避免在完成虚拟几何和 VSM 后才暴露共享帧契约或混合光传输问题。M4 的 Hit Lighting 是 M5 的缓存缺失回退和默认反射命中路径。M2 的虚拟几何先解决无裂缝与动态选择，M3 提供目标直接光阴影，M5 满足 Hardware Lumen 式光照目标；严格连续过渡作为 M6 的独立交付。间接绘制采用 PSO/材质桶，GPU 生成绘制参数并由 ExecuteIndirect 消费，避免假设一条命令能切换任意 PSO。[D3D12 间接绘制说明](https://learn.microsoft.com/en-us/windows/win32/direct3d12/indirect-drawing)
 
 重点验收场景与度量：
 
-1. **共享与回归**：相同 SceneAsset/相机在两条管线间反复切换，导入不重跑、公共 GPU 资源不翻倍；取消/失败仍显示旧场景，镜头不跳变。
-2. **GI 正确性**：用封闭房间、彩色墙、窗口、单个发光面生成可复现样例；遮挡天空后室内变暗，出现颜色反弹，小灯不因转出屏幕失去照明。关闭 Screen Traces 单独验证缓存/RT 路径。
-3. **缓存稳定性**：记录无覆盖像素与 fallback 比例；相机转身、atlas eviction、灯光开关后无旧物体残影；设定可配置的最大未更新时间，并测量实际光照响应时间。
-4. **能量和近似质量**：固定相机、材质、灯光与曝光，以现有路径追踪的高采样线性 HDR 为参考，分开比较 direct/diffuse GI/specular；报告误差与收敛曲线，不要求有偏缓存逐像素等于路径积分。
-5. **重建契约**：静止抖动 motion≈0，平移方向/单位正确；透明响应、disocclusion、原生与 50% 比例、SDR/HDR 和厂商失败回退均可复现。
-6. **运行正确性**：D3D12 Error/Corruption 为零；快速 resize、切换管线、场景失败、设备丢失与关闭期间无已释放资源访问。
-7. **性能**：Kitchen、Bistro、Rainy Corner 分别测量暖机后静止/运动的 p50/p95 CPU/GPU 帧时与成功 Present 频率，首次载入和缓存冷启动单独报告。
+1. **共享与回归**：相同 SceneAsset/相机在两条管线间反复切换，导入不重跑、公共 GPU 资源不翻倍；取消/失败仍显示旧场景，镜头不跳变；跨材质逻辑实例身份稳定，旧 ComputeSharp/OptiX 适配路径继续通过既有探针。
+2. **GI 正确性**：用封闭房间、彩色墙、窗口、单个发光面生成可复现样例；遮挡天空后室内变暗，出现颜色反弹，小灯不因转出屏幕失去照明。关闭 Screen Traces 单独验证缓存/RT 路径，并先固定 LOD0 排除表示差异。
+3. **混合几何表示**：LOD0 基线与自适应主表面分别测试薄墙、近接触、掠射和 LOD 往返切换，分别统计错误自遮挡与漏光；不能只检查光栅无裂缝，也不能通过无限增大 ray bias 让测试变绿。
+4. **缓存与反射**：记录无覆盖像素与 fallback 比例；相机转身、atlas eviction、灯光开关后无旧物体残影；设定最大未更新时间并测量响应。镜中金属、光滑介质和屏幕外物体与 Hit Lighting/路径参考对照，漫反射缓存回退必须显示近似或降级状态。
+5. **帧图与透明**：反射屏幕输入不包含当前帧间接镜面，不使用未初始化的上一帧颜色；透明接收面预通道先于 VSM 请求；OpaqueColor 快照与 SceneColor 是不同资源，折射采样期间不存在同纹理 SRV/RTV/UAV 读写冲突。
+6. **能量和近似质量**：固定相机、材质、灯光与曝光，以现有路径追踪的高采样线性 HDR 为参考，分开比较 direct/diffuse GI/specular；报告误差与收敛曲线，不要求有偏缓存逐像素等于路径积分。
+7. **重建契约**：静止抖动 motion≈0，平移方向/单位正确；透明响应、disocclusion、原生与 50% 比例、SDR/HDR 和厂商失败回退均可复现。
+8. **运行正确性**：D3D12 Error/Corruption 为零；快速 resize、切换管线、场景失败、设备丢失与关闭期间无已释放资源访问。
+9. **性能**：Kitchen、Bistro、Rainy Corner 分别测量暖机后静止/运动的 p50/p95 CPU/GPU 帧时与成功 Present 频率，首次载入和缓存冷启动单独报告；OpaqueColor 复制、透明预通道和 Hit Lighting 均计入对应 GPU 范围。
 
-当前变更只记录设计；以上模块、阶段、预算与验收均是后续实施要求，没有进行新增渲染代码的构建或 GPU 性能验证。
+## 10. 2026-10-27 审查结论与修正决策
+
+审查结论是：共享场景、光栅主表面、虚拟几何、VSM 与 DXR GI/反射的组合没有根本性的 D3D12/DXR API 障碍，但不能把阶段目标或显存/时间起点当作已证明的画质和性能结论。为避免审查意见与正文脱节，以下修正已经落实到对应章节，而不是另设一套平行方案：
+
+1. 主视图 LOD0 是硬件 GI 的首个正确性基线；自适应光栅与 LOD0 BLAS 的混合表示在形成可验证方案前不得默认开启。
+2. 漫反射 Surface Cache 不再承担默认 RT 反射命中着色；M4 使用 Hit Lighting，缓存近似限定适用域并报告降级。
+3. 帧图明确反射的当前帧无间接镜面输入、透明接收面预通道和独立 OpaqueColor 折射快照，同时把新增快照计入显存与 GPU 预算。
+4. 共享场景必须提供稳定逻辑网格/实例身份；VSM 使用绝对 light-space 页身份和精确 ProjectionEpoch 规则，详见联合设计。
+5. M0 保留 ComputeSharp/OptiX 等旧同步适配器，M1.5 提前隔离验证混合 GI，避免把 LOD、VSM、缓存和迁移风险一次性叠加。
+
+剩余开放项是混合几何表示的具体光线起点/命中策略、缓存多次反弹的能量与稳定性实测，以及目标硬件上的冷启动和最坏帧性能。上述开放项未关闭前，只能宣称架构可实施，不能宣称已经达到完整 Nanite/Lumen 的规模、画质或 60 Hz 目标。
+
+当前变更只修订设计；以上模块、阶段、预算与验收均是后续实施要求，没有新增渲染代码，也没有进行构建、探针或 GPU 性能验证。

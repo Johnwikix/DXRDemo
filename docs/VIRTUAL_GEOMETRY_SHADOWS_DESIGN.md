@@ -1,6 +1,6 @@
 # 虚拟几何、动态无缝 LOD 与 VSM 联合设计
 
-状态：设计提案，尚未实现。日期：2026-10-26。
+状态：设计提案，尚未实现。初稿：2026-10-26；审查修订：2026-10-27。
 
 本文补充[主渲染管线设计](RASTER_PIPELINE_DESIGN.md)，对应新增的两个目标：类似 Nanite 的运行时几何细节选择，以及类似 UE5 Virtual Shadow Maps 的直接光阴影。二者使用同一个场景、几何层级、裁剪器和间接绘制基础设施。
 
@@ -42,6 +42,10 @@ flowchart TD
 ```
 
 `SceneAsset` 保留原始几何、材质与实例身份。`VirtualGeometryAsset` 是派生数据，记录源数据 hash、构建器版本与参数；不能成为第二套可独立编辑的场景。`GpuSceneCache` 统一持有原始资源和派生几何租约，实例继续共享一个 mesh 的层级。
+
+当前 [SceneAsset.cs](../DXRDemo/Scene/SceneAsset.cs) 中每个 `SceneMesh` 只有一个材质，[GltfImporter.cs](../DXRDemo/Assets/Importers/GltfImporter.cs) 又会把同一 glTF 逻辑网格的各 primitive 拆成独立 `SceneMesh/SceneInstance`。为落实跨材质 cluster 而不永久锁死拓扑，共享输入必须补充稳定 `LogicalMeshId`、`GeometryInstanceId` 和 primitive material ranges；派生几何以逻辑网格构建、以逻辑几何实例选择，原始 RT 的网格/实例映射保持不变。
+
+同一 `GeometryInstanceId` 下的所有材质桶必须消费同一个合法 Cut 和同一组滞回状态，不能按拆分后的 primitive 各自选择层级。缺少显式身份的旧资产只能按单 primitive 保守构建并保留外边界，不得按名称、相同变换或空间接近程度启发式合并。
 
 `GeometryView` 描述投影、裁剪体积、误差目标和用途。主视图、阴影页、Surface Card 捕获用相同的遍历与绘制接口，分别得到不可变的 `GeometryCut`。一个 frame 中的深度预通道与 GBuffer 必须使用同一个主视图 Cut。
 
@@ -86,7 +90,7 @@ e_pixels ≈ e_world × outputHeight
 
 GPU 遍历结合实例/层级视锥、可选法线锥和 Hi-Z 裁剪，生成绘制列表。双面、镜像、MASK 分别处理，法线锥裁剪不能错误用于双面几何。遮挡裁剪采用保守边界；相机 cut 时禁用不可靠的上一帧遮挡判断。
 
-替换决策在 DAG 的合法替换组上执行，不能让各 cluster 根据自己的距离独立选 LOD。选择结果必须覆盖输入表面一次，不同时输出同一区域的祖先与后代，也不能遗漏依赖邻区。先做组级误差/驻留决策，再做不改变层级兼容性的可见性裁剪。
+替换决策在 DAG 的合法替换组上执行，不能让各 cluster 根据自己的距离独立选 LOD。选择结果必须覆盖输入表面一次，不同时输出同一区域的祖先与后代，也不能遗漏依赖邻区。遍历和滞回以 `GeometryInstanceId` 为实例键，跨材质替换组原子发布；先做组级误差/驻留决策，再做不改变层级兼容性的可见性裁剪。
 
 增加组级滞回，例如误差高于 1.1 px 时细化、低于 0.8 px 时允许粗化；这些是实验参数。CPU 参考选择器和 GPU 选择器使用相同的规则与 bounds，验证随机视点和极端缩放下的合法 Cut。
 
@@ -122,11 +126,11 @@ Geomorph 还需保存上一帧形变状态来生成运动矢量，处理 UV/法�
 | PhysicalPool | 普通 committed depth atlas + GPU 页表，软件管理映射；首期不用 D3D12 reserved resource 稀疏映射 |
 | Shadow depth | 显式采用常规 light-space Z、clear=1、LESS_EQUAL，独立于主视图反向 Z |
 
-方向光中心按 light-space 页/texel 网格对齐，使用稳定 world-page 身份复用相机平移后的重叠区域。光向和深度范围需保持稳定；发生投影变化时增加 ProjectionEpoch，不能让不同投影共享同一个 key。
+方向光中心按 light-space 页/texel 网格对齐，页 XY 使用稳定的绝对 light-space world-page 坐标，而不是相对当帧 clipmap 中心的坐标。相机平移、旋转、投影 jitter 和 clipmap 中心吸附只改变请求窗口，不增加 `ProjectionEpoch`，因此重叠区域可以复用。只有光方向/光空间基向量、深度范围、页 texel 尺度或投影语义变化才增加方向光的 epoch；局部光的位置、朝向、FOV/范围变化同样使对应投影失效。物理 slot 的复用仍由独立 generation 防护，不能与 ProjectionEpoch 合并。
 
 ### 5.2 请求、绘制与缺页处理
 
-1. 从当前深度、透明低分辨率接收表面和需要更新的 Surface Cards 生成 shadow requests，计算光源影响与接收表面的投影精度。
+1. 从当前深度、VSM 之前的 `TransparentReceiverPrepass` 和需要更新的 Surface Cards 生成 shadow requests，计算光源影响与接收表面的投影精度。预通道只产生接收位置/深度及请求所需语义，正式透明着色在其后复用结果；首期不隐式读取尚未执行的透明最终 pass，也不把上一帧透明数据当作无条件有效的当前帧输入。
 2. 请求覆盖滤波 footprint，并压缩去重。每个 light 保留预算内的低分辨率常驻覆盖；方向光优先主视图，局部光按贡献排序。
 3. 合并失效信息，分配或复用 PhysicalSlot，生成 dirty-page 列表；新页在清理、绘制完成前不对查询发布为有效。
 4. 阴影专用 GeometryView 按页/clipmap 裁剪候选 cluster，以 shadow-texel 误差选择合法 Cut，并生成页绘制桶。
@@ -152,9 +156,9 @@ Geomorph 还需保存上一帧形变状态来生成运动矢量，处理 UV/法�
 
 | 变化 | VSM 处理 |
 | --- | --- |
-| 相机平移、正常转动、投影 jitter | 请求新可见页，保留仍同投影的已缓存页；clipmap 滚动保留重叠 world-page |
+| 相机平移、正常转动、投影 jitter、clipmap 中心吸附 | 只更新请求窗口，不增加 ProjectionEpoch；请求新可见页并复用重叠的绝对 light-space world-page |
 | 光源颜色或强度改变 | 阴影深度保持；直接光与 GI 光照缓存按 LightingRevision 更新 |
-| 光源位置、方向、投影范围改变 | 该光源 ProjectionEpoch 改变，旧深度无效 |
+| 光源位置、方向/光空间基向量、深度范围、页 texel 尺度或投影语义改变 | 该光源 ProjectionEpoch 改变，旧深度无效 |
 | 光源 source radius / angular size 改变 | 更新滤波与请求 footprint；投影未变时可复用已有深度 |
 | caster 增删或实例变换 | 同时投影旧 bounds 与新 bounds，失效两者覆盖的页，避免旧阴影残留 |
 | alpha cutoff、双面/剔除、位移等遮挡语义改变 | 失效受影响 caster 页 |
@@ -180,6 +184,8 @@ SMRT 的近似、投影第一层深度、重叠遮挡和过大半影都需要单
 
 这意味着自适应光栅、阴影与 RT 可以选取不同精度，但它们来自同一资产版本。通过表面偏差上限、屏幕几何匹配与必要的 ray-origin offset 控制差异；不能无限增大 bias 掩盖错误自遮挡。未来若引入 RT proxy，需要独立的误差预算、BLAS 版本与薄墙/反射测试，不默认使用最粗根层级。
 
+**执行门槛。** M1.5/M4 的硬件 GI 与反射正确性基线固定主视图 LOD0。简化光栅表面与 LOD0 BLAS 不共面时，光线起点可能落在 RT 表面两侧，bias 无法同时普遍避免接触处错误自遮挡和薄墙漏光，representation-change mask 也只能处理历史，不能修复几何差异。混合表示因此是独立质量档：必须明确并验证起点重定位、命中拒绝或匹配 RT proxy 的方案，分别测量错误自遮挡与漏光，并覆盖薄墙、近接触、掠射和 LOD 往返切换；门槛未通过时，启用硬件 GI 的主视图保持 LOD0，M2 的动态 LOD 仍可在纯光栅/VSM 路径独立验收。
+
 保留全精度 BLAS 时，原始 RT 几何仍占用常驻显存；后续 streaming 首先控制派生光栅几何的驻留，不能因此声称整套光追场景已经支持超显存规模。要进一步扩展总场景量，需要单独设计 RT 几何流送/代理与 AS 更新预算。
 
 Surface Cards 使用捕获分辨率选择几何 Cut，而不直接复用当帧主视图 Cut；稳定的材质捕获不应随着相机 LOD 阈值频繁失效。屏幕运动矢量区分真实物体运动和几何表示切换；representation-change mask 用于局部 GI/反射/TAA 历史拒绝。
@@ -188,7 +194,7 @@ VSM、Surface Cache、世界探针、几何驻留页池共享设备预算管理�
 
 ## 7. 帧调度、显存与性能
 
-主路径顺序为：发布已完成上传 → 确定主视图 Cut → Depth/GBuffer 与预算内 Card 材质捕获 → 合并阴影接收请求与失效 → VSM 分配/脏页几何选择 → 页清理/绘制 → 直接光与 Surface Lighting 更新 → GI/反射/透明 → 共享重建/输出。
+主路径顺序为：发布已完成上传 → 确定主视图 Cut → Depth/GBuffer、预算内 Card 材质捕获与 TransparentReceiverPrepass → 合并阴影接收请求与失效 → VSM 分配/脏页几何选择 → 页清理/绘制 → 直接光与 Surface Lighting 更新 → GI/反射/透明正式着色 → 共享重建/输出。
 
 Surface Lighting 更新在 VSM 页可查询后执行；临时未覆盖的屏幕外采样可用 HWRT。所有页表/间接参数的 UAV 生产消费、depth pool 的写入读取、以及不同用途的 descriptor 绑定都由 PassScheduler 声明和排序。物理页映射更换要保护仍被已提交帧使用的资源，GPU generation 检查不能代替 fence 生命周期。
 
@@ -225,20 +231,22 @@ DXRDemo/Shaders/Geometry/            # 层级遍历、裁剪、间接绘制
 DXRDemo/Shaders/Shadows/             # feedback、page、projection、SMRT
 ```
 
-结合主设计，先抽共享层、完成原始几何光栅基线，再交付几何层级与 GPU LOD，随后实现 VSM；硬件 GI 和 Surface/World 缓存沿同一共享接口继续推进。CSM/传统局部阴影作为基线与设备/预算降级的一个 ShadowBackend，不为各调用者维护独立阴影控制或重复光照实现。
+结合主设计，先抽共享层并完成原始几何光栅基线，再用 LOD0 + CSM 做最小 HWRT GI/Hit Lighting 垂直切片，随后交付几何层级、GPU LOD 与 VSM；完整硬件 GI 和 Surface/World 缓存沿同一共享接口继续推进。CSM/传统局部阴影作为基线与设备/预算降级的一个 ShadowBackend，不为各调用者维护独立阴影控制或重复光照实现。
 
 几何 out-of-core streaming、严格连续 Geomorph、Mesh Shader、微三角形软件光栅分别作为后续阶段；动态无裂缝 LOD 的首个版本不依赖它们，也不据此宣称具备完整 Nanite 的规模能力。
 
 ## 9. 必须通过的验证
 
-1. **拓扑**：构建器校验相邻替换边界的有向线段/顶点身份、material seam 和 terminal 覆盖；随机合法 Cut 不新增开边，不同时绘制祖先/后代。
+1. **拓扑与身份**：构建器校验相邻替换边界的有向线段/顶点身份、material seam 和 terminal 覆盖；随机合法 Cut 不新增开边，不同时绘制祖先/后代。`LogicalMeshId/GeometryInstanceId` 在导入、实例共享和管线切换后保持稳定，同一逻辑实例的跨材质桶原子消费同一切换决策；缺身份资产只能退化为单 primitive。
 2. **视点**：缓慢跨阈值、快速推拉、近裁剪穿越、极端非均匀/镜像变换、相机 cut 下无洞；固定误差阈值并报告轮廓偏差、三角形数量与切换频率。
 3. **精度**：LOD0 与原始资产一致，所有层级的边界坐标一致；启用量化后再次验证，不能只检查量化前数据。
 4. **驻留/预算**：模拟缺页、上传延迟、显存紧张和遍历 overflow，持续保留完整粗 Cut，不出现洞或非法索引。
-5. **分页阴影**：tile 边缘、cube face 接缝、clipmap 边界和 PCF/SMRT 跨页无串页；已知几何与同分辨率完整 shadow map 对照，区分页错误和几何 LOD 误差。
+5. **分页阴影**：tile 边缘、cube face 接缝、clipmap 边界和 PCF/SMRT 跨页无串页；已知几何与同分辨率完整 shadow map 对照，区分页错误和几何 LOD 误差。相机平移与中心吸附不得增加 ProjectionEpoch，重叠 world-page 应命中缓存；光方向/光空间基向量、深度范围或 texel 尺度改变必须使旧页失效。
 6. **失效**：静止时脏页下降；相机 jitter、灯光强度/颜色变化不重绘深度；太阳转向、caster 移除/移动、alpha 改变及时消除旧阴影。
-7. **离屏遮挡**：屏幕外 caster 向画面内正确投影；透明和 Surface Cards 在主 opaque depth 未覆盖的位置仍得到有效阴影或明确 fallback。
-8. **三种几何用途一致性**：主视图、VSM 与原始 RT 几何同时显示细节、薄墙和反射，检查表示差异导致的自遮挡/漏光；切换主视图 LOD 不全量清空 VSM/GI。
-9. **规模收益**：Kitchen/Bistro/Rainy Corner 同相机路径对照全精度与自适应模式；同时报告 GPU 时间、CPU 提交、几何量、页更新和显存，不能仅用减少的三角形数量宣称加速。
+7. **离屏与透明遮挡**：屏幕外 caster 向画面内正确投影；TransparentReceiverPrepass 在当前帧 VSM 请求前完成，正式透明着色复用结果且不存在对后续 pass 的隐式依赖；透明和 Surface Cards 在主 opaque depth 未覆盖的位置仍得到有效阴影或明确 fallback。
+8. **三种几何用途一致性**：先以主视图 LOD0 建立 GI/反射基线，再独立测试自适应主表面、VSM 与原始 RT 几何的组合。薄墙、近接触、掠射和 LOD 往返切换分别统计错误自遮挡与漏光，不能只靠 bias 或历史 mask 通过；切换主视图 LOD 不全量清空 VSM/GI，混合表示门槛未过时硬件 GI 回退主视图 LOD0。
+9. **规模收益**：Kitchen/Bistro/Rainy Corner 同相机路径对照全精度与自适应模式；同时报告 GPU 时间、CPU 提交、几何量、页更新、透明预通道和显存，不能仅用减少的三角形数量宣称加速。
 
-目前仅新增设计，没有实现或验证上述运行时系统。
+上述主视图 LOD0 与缺身份时的单 primitive 回退是审查后增加的正确性门槛，不是可选优化；它们用于把虚拟几何/VSM 的独立验收与尚未解决的混合表示风险隔离开。
+
+目前仅完成 2026-10-27 的设计审查修订，没有实现或验证上述运行时系统。
