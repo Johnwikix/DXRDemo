@@ -1,3 +1,6 @@
+using DXRDemo.Scene;
+using DXRDemo.Rendering;
+
 namespace DXRDemo.Shaders;
 
 /// <summary>
@@ -9,6 +12,9 @@ public sealed class ShaderFactory : IDisposable
 {
     private readonly Dictionary<string, IShaderPass> _instances = new();
     private bool _disposed;
+    public SceneSession Session { get; } = new() { Exposure = 1.3f };
+    private readonly GpuSceneCache _scenes = new();
+    private readonly SceneRenderer _renderer = new();
 
     public ShaderFactory()
     {
@@ -36,7 +42,7 @@ public sealed class ShaderFactory : IDisposable
                 $"Unknown shader id '{id}'. Registered: {string.Join(", ", ShaderCatalog.All.Select(x => x.Id))}.",
                 nameof(id));
 
-        var created = info.Factory();
+        var created = info.Factory(Session, _scenes, _renderer);
         _instances[id] = created;
         return created;
     }
@@ -47,12 +53,17 @@ public sealed class ShaderFactory : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        foreach (var instance in _instances.Values)
+        try { Session.Dispose(); }
+        finally
         {
-            try { instance.Dispose(); }
-            catch { /* swallow — Dispose must be idempotent */ }
+            foreach (var instance in _instances.Values)
+            {
+                try { instance.Dispose(); }
+                catch { /* 继续释放其余 GPU 资源。 */ }
+            }
+            _instances.Clear();
+            try { _renderer.Dispose(); } finally { _scenes.Dispose(); }
         }
-        _instances.Clear();
     }
 
     public void Dispose() => DisposeAll();

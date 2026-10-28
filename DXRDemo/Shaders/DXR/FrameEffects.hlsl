@@ -5,11 +5,13 @@ cbuffer HudConstants : register(b0)
 };
 cbuffer FontBuffer : register(b1)
 {
-    int Font[896];
+    // cbuffer 标量数组的元素步长是 16 字节；CPU 上传的是连续 32-bit 元素。
+    // 显式打包为四元向量，与 896 * sizeof(int) 的 CPU 布局一致。
+    uint4 Font[224];
 };
 cbuffer TextBuffer : register(b2)
 {
-    int Text[532];
+    uint4 Text[133];
 };
 
 [numthreads(8, 8, 1)]
@@ -41,8 +43,10 @@ void Hud(uint3 id : SV_DispatchThreadID)
         int gy = y / scale % 9;
         if (col < 76 && row < 7 && gx < 5 && gy < 7)
         {
-            int c = Text[row * 76 + col];
-            ink = ((uint)Font[c * 7 + gy] & (1u << (4 - gx))) != 0;
+            uint textIndex = uint(row * 76 + col);
+            uint c = min(Text[textIndex >> 2][textIndex & 3], 127u);
+            uint fontIndex = c * 7 + uint(gy);
+            ink = (Font[fontIndex >> 2][fontIndex & 3] & (1u << (4 - gx))) != 0;
         }
     }
 

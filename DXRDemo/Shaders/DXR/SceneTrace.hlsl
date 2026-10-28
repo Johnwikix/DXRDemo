@@ -1,12 +1,4 @@
-// Explicit scene ABI. C# layouts live in SceneAsset.cs and DxrSceneBackend.cs.
-static const float PI = 3.14159265359;
-struct Vertex { float4 position, normal, tangent, uv, color; };
-struct Binding { float4 info, transform, extra; };
-struct Material { float4 baseColor, emissive, factors, flags; Binding baseMap, mrMap, normalMap, aoMap, emissiveMap;
-    float4 transmission, attenuation; Binding transmissionMap, thicknessMap; };
-struct Instance { uint4 mesh; row_major float4x4 world, normal; float4 emissionSampling; };
-struct Light { float4 positionType, directionRange, colorIntensity, spot; };
-struct Emitter { float4 p0, e1, e2, meta; };
+#include "SceneTypes.hlsli"
 #if DXR_SHADER_MODEL_69
 // SM 6.9 payload access qualifiers keep any-hit state small while allowing
 // the SM 6.5 fallback and the optional SM 6.9 HitObject reordering variant.
@@ -65,11 +57,6 @@ float Random(inout uint state) {
     return min(((word >> 22) ^ word) * (1.0 / 4294967296.0), 0.99999994);
 }
 float3 SafeNormalize(float3 v, float3 fallback) { return dot(v,v) > 1e-20 ? normalize(v) : fallback; }
-float2 UV(Binding b, float4 uv) {
-    float2 value = (b.info.y == 0 ? uv.xy : uv.zw) * b.transform.zw;
-    float s, c; sincos(b.extra.x, s, c);
-    return float2(c * value.x - s * value.y, s * value.x + c * value.y) + b.transform.xy;
-}
 float4 Sample(Binding b, float4 uv, float cone) {
     if (b.info.x < 0) return 1;
     uint index = NonUniformResourceIndex((uint)b.info.x);

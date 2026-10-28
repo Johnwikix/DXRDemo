@@ -45,10 +45,22 @@ public struct SceneMaterial
 }
 
 /// <summary>Stores a reusable primitive; instances share these indexed vertices.</summary>
-public sealed record SceneMesh(string Name, SceneVertex[] Vertices, uint[] Indices, int Material);
+public sealed record SceneMesh(string Name, SceneVertex[] Vertices, uint[] Indices, int Material)
+{
+    /// <summary>文档内稳定的逻辑网格/primitive 身份；未声明身份的资产保持单 primitive 回退。</summary>
+    public int LogicalMeshId { get; init; } = -1;
+    public int PrimitiveIndex { get; init; } = -1;
+}
+
+public sealed record ScenePrimitiveRange(int Mesh, int FirstIndex, int IndexCount, int Material);
+public sealed record LogicalSceneMesh(int Id, ScenePrimitiveRange[] Primitives);
 
 /// <summary>Stores a node instance and its complete local-to-world transform.</summary>
-public sealed record SceneInstance(string Name, int Mesh, Matrix4x4 Transform);
+public sealed record SceneInstance(string Name, int Mesh, Matrix4x4 Transform)
+{
+    /// <summary>同一逻辑节点的各材质 primitive 共用此身份，不能按名称或变换猜测合并。</summary>
+    public int GeometryInstanceId { get; init; } = -1;
+}
 
 /// <summary>Stores a punctual light in world space and glTF photometric units.</summary>
 [StructLayout(LayoutKind.Sequential)]
@@ -74,6 +86,8 @@ public sealed record SceneAsset(string Name, SceneMesh[] Meshes, SceneInstance[]
     public DXRDemo.Camera.CameraFrame? DefaultCamera { get; init; }
     /// <summary>Optional HDR environment; null selects the procedural sky.</summary>
     public SceneEnvironment? EnvironmentMap { get; init; }
+    /// <summary>虚拟几何的逻辑分组；不改变原始 RT mesh/instance 数组的索引。</summary>
+    public LogicalSceneMesh[] LogicalMeshes { get; init; } = [];
     /// <summary>Gets the visible triangle count, including instances.</summary>
     public int TriangleCount => Instances.Sum(instance => Meshes[instance.Mesh].Indices.Length / 3);
 }

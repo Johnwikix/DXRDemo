@@ -34,7 +34,7 @@ internal static class LightingProbe
         var camera=new CameraController(); camera.FrameBounds(asset.Minimum,asset.Maximum,width/(float)height);
         camera.Rotate(0,.18f); camera.Zoom(3); var view=camera.Advance(0,out _,out _);
         bool nrd=mode.StartsWith("nrd"),rr=mode.StartsWith("dlssd");
-        using var reconstruction=nrd||rr?new SuperResolutionRenderer(device):null;
+        using var reconstruction=nrd||rr?new PathTracingResolve(device):null;
         using var target=nrd||rr?device.CreateTexture2D<Rgba64>(width,height):null;
         var reconstructionMode=rr?ReconstructionMode.DlssRayReconstruction:ReconstructionMode.Off;
         reconstruction?.Configure(reconstructionMode,100,width,height,nrd,true);

@@ -115,7 +115,7 @@ internal static class OfflineProbe
         using var surfaces = device.CreateTexture2D<Float4>(width, height);
         using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
-        using var reconstruction = (nrd || rr) && !contracts ? new SuperResolutionRenderer(device) : null;
+        using var reconstruction = (nrd || rr) && !contracts ? new PathTracingResolve(device) : null;
         using var target = reconstruction != null ? device.CreateTexture2D<Rgba64>(dlss ? 3840 : width, dlss ? 2160 : height) : null;
         float exposureStops = RtxptAssets.InitialExposure(bistro ? RtxptScene.Bistro : convergence ? RtxptScene.Convergence : RtxptScene.Kitchen);
         if (reconstruction != null)

@@ -33,7 +33,7 @@ internal static class GlassReconstructionProbe
         backend.Trace(view, 0, 1, 8, default, 0, referenceRaw, referenceNormal, referenceSurface, referenceGuide, referenceSignals);
         Float4[,] reference = referenceRaw.ToArray();
         backend.SetScene(asset);
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         using var target = device.CreateTexture2D<Rgba64>(width, height);
         Directory.CreateDirectory("output/glass-sr");
 

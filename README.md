@@ -95,7 +95,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 ## 环境要求 Requirements
 
 - Windows 10 1809+（最低平台版本 10.0.17763.0）
-- 支持 DXR 的 GPU（NVIDIA RTX / GTX 16 系及以上、AMD RX 6000+ 等）。启动时检查 `D3D12_FEATURE_DATA_D3D12_OPTIONS5.RaytracingTier` 和 `D3D12_FEATURE_SHADER_MODEL`；SM 6.9 运行时不可用时自动回退 `lib_6_5`
+- 基础光栅需要 D3D12、Shader Model 6.0、Resource Binding Tier 2；路径追踪额外需要 DXR Tier 1.0。启动时分别查询能力；无 DXR 时选择光栅入口，路径 SM 6.9 不可用时回退 `lib_6_5`
 - HDR10（可选）：需要 Windows HDR 开启的显示器
 - 构建：Visual Studio 2022 + .NET 10 SDK；x64 还需 PowerShell 7 与 C++ v145 工具集
 
@@ -201,7 +201,8 @@ DXRDemo/                                  解决方案根
 │   │   └── RayTrace/
 │   │       └── RayTracePass.cs           # SceneAsset-only 主 pass
 │   ├── SuperResolution/                  # 降噪 + 厂商 SR 路径
-│   │   ├── SuperResolutionRenderer.cs    # NRD + FSR / XeSS / DLSS / DLSSD 接线
+│   │   ├── PathTracingResolve.cs        # 路径专属 NRD / OptiX / 玻璃 resolve
+│   │   ├── ReconstructionService.cs     # 公共 NativeTAA / FSR / XeSS / DLSS / RR
 │   │   ├── NativeNrd.cs / NativeReconstruction.cs   # C# → 原生 DLL 绑定
 │   │   ├── ReconstructionMode.cs         # Off / Fsr / XeSS / Dlss / DlssRayReconstruction
 │   │   └── ReconstructionAssets.targets  # MSBuild：复制 NRD / FSR / XeSS / DLSS DLL 与校验
@@ -260,7 +261,7 @@ DXRDemo/                                  解决方案根
 
 ## 光栅化与硬件 GI 管线设计
 
-新增管线的设计提案见 [现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md)：共享场景、相机、GPU 场景与超分组件；不透明物体采用分簇延迟着色，间接光和反射参考 Hardware Lumen 的表面缓存与探针架构。[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 进一步定义类似 Nanite 的动态无裂缝 LOD、分页阴影与缓存联动。目前处于设计阶段，尚未实现。
+新增管线的设计与执行进度见 [现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md)：共享场景、相机、GPU 场景与超分组件；不透明物体采用分簇延迟着色，间接光和反射参考 Hardware Lumen 的表面缓存与探针架构。[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 进一步定义类似 Nanite 的动态无裂缝 LOD、分页阴影与缓存联动。2026-10-28 已接入统一 LinearFrame、共享 NativeTAA/SR/RR 与显示编码，并提供可选择的真实 LOD0 分簇延迟光栅入口（CSM/局部阴影、前向透明、独立折射快照）；基础场景/相机/GPU 资源继续共用。动态 LOD、VSM 和硬件 GI 仍为后续阶段，实施范围及验证限制见设计第 14 节。
 
 ---
 

@@ -19,7 +19,7 @@ internal static unsafe class OptixProbe
         using var device = DxrDevice.CreateDefault();
         using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         Require(sr.Status.OptixAvailable, "OptiX must actually be available on this test GPU: " + Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()));
         Verify(device, native, sr, 128, 96);
         Verify(device, native, sr, 80, 64); // Recreate all external-memory/denoiser state at another size.
@@ -32,7 +32,7 @@ internal static unsafe class OptixProbe
         try
         {
             Environment.SetEnvironmentVariable("DXR_DISABLE_OPTIX", "1");
-            using var fallback = new SuperResolutionRenderer(device);
+            using var fallback = new PathTracingResolve(device);
             Verify(device, native, fallback, 64, 64, unavailable: true);
         }
         finally { Environment.SetEnvironmentVariable("DXR_DISABLE_OPTIX", previous); }
@@ -58,7 +58,7 @@ internal static unsafe class OptixProbe
         using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
         using var target = device.CreateTexture2D<Rgba64>(width, height);
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         var view = CameraFrame.Look(new(.3f, 0, 3), Vector3.Normalize(new(-.12f, 0, -1)), .7f, .01f, 100);
         backend.SetScene(glass with { Instances = fixture.Instances[..^2] });
         backend.Trace(view, 0, 1, 8, default, 0, raw, normal, surface, guide, signals);
@@ -90,7 +90,7 @@ internal static unsafe class OptixProbe
         Directory.CreateDirectory("output/optix"); SceneProbe.Save(target, "output/optix/thin-glass.png");
     }
 
-    private static void Verify(DxrDevice device, ID3D12Device5 native, SuperResolutionRenderer sr, int width, int height, bool unavailable = false)
+    private static void Verify(DxrDevice device, ID3D12Device5 native, PathTracingResolve sr, int width, int height, bool unavailable = false)
     {
         sr.Configure(ReconstructionMode.Off, 100, width, height, false, true, true);
         Require(sr.Status.OptixActive != unavailable && !sr.Status.NrdActive, sr.Status.Message);

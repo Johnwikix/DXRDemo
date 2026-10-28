@@ -36,7 +36,7 @@ internal static unsafe class TemporalConvergenceProbe
 
     private static void VerifyLinear(DxrDevice device, ID3D12Device5 native, ID3D12InfoQueue debug)
     {
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         sr.Configure(ReconstructionMode.Off, 100, Width, Height, false, true);
         Require(sr.LinearPipelineActive && !sr.Status.NrdActive, "The native linear Temporal path was not active: " + sr.Status.Message);
         using var raw = device.CreateTexture2D<Float4>(Width, Height);
@@ -121,7 +121,7 @@ internal static unsafe class TemporalConvergenceProbe
 
     private static void VerifyStationaryIsolation(DxrDevice device, ID3D12Device5 native)
     {
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         sr.Configure(ReconstructionMode.Off, 100, Width, Height, false, true);
         using var raw = device.CreateTexture2D<Float4>(Width, Height);
         using var normals = device.CreateTexture2D<Rgba32>(Width, Height);

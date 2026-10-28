@@ -8,21 +8,33 @@ using Vortice.Direct3D12;
 using Vortice.DXGI;
 using DXRDemo.Camera;
 using DXRDemo.Scene;
+using DXRDemo.Rendering;
 using Float2 = System.Numerics.Vector2;
 using Float4 = System.Numerics.Vector4;
 
 namespace DXRDemo.SuperResolution;
 
-/// <summary>Owns linear denoising, vendor reconstruction and encoding on a synchronized render-thread queue.</summary>
-internal sealed unsafe class SuperResolutionRenderer : IDisposable
+/// <summary>路径专属降噪、stable planes 和玻璃 resolve；线性帧交给共享重建/显示服务。</summary>
+internal sealed unsafe class PathTracingResolve : IDisposable
 {
     private const int SrvCount = 27, UavCount = 13, SetCount = 7, DescriptorsPerSet = SrvCount + UavCount;
     private readonly DxrDevice _gpu = new();
     private readonly GpuInterval _gpuInterval;
-    internal double GpuMilliseconds { get; private set; }
+    internal double GpuMilliseconds
+    {
+        get; private set;
+    }
     private readonly List<IDisposable> _pipelineResources = [];
     private readonly List<IDisposable> _sizeResources = [];
-    private readonly uint _capabilities;
+    private readonly ReconstructionService _reconstruction;
+    private readonly DisplayOutput _display;
+    private readonly bool _ownsCommon;
+    private int _commonVersion = -1;
+    private uint _capabilities => _reconstruction.Status.Capabilities;
+    internal LinearFrame LastFrame
+    {
+        get; private set;
+    }
     private readonly bool _nrdAvailable;
     private readonly bool _optixAvailable;
     private string _optixMessage = "";
@@ -30,18 +42,17 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private ID3D12Resource _optixOutput = null!;
     private bool _optixUsed, _optixComposed;
     private string _nrdMessage = "";
-    private readonly string _availabilityMessage = "";
     private ID3D12RootSignature _root = null!;
-    private ID3D12PipelineState _prepare = null!, _resolveGlass = null!, _encode = null!;
+    private ID3D12PipelineState _prepare = null!, _resolveGlass = null!;
     private ID3D12PipelineState _prepareNrd = null!, _composeNrd = null!;
     private ID3D12PipelineState _prepareRr = null!, _composeOptix = null!, _restoreOptixFallback = null!;
     private ID3D12DescriptorHeap _heap = null!;
     private ID3D12Resource _constants = null!;
-    private nint _constantPointer, _context;
+    private nint _constantPointer;
     private nint _nrdContext;
     private StablePlaneDenoiser? _stablePlanes;
     private int _descriptorStride;
-    private ID3D12Resource _color = null!, _depth = null!, _motion = null!, _reactive = null!, _output = null!;
+    private ID3D12Resource _color = null!, _depth = null!, _motion = null!, _reactive = null!;
     private ID3D12Resource _historySampleCountFallback = null!;
     private ID3D12Resource _viewZ = null!, _nrdOutput = null!;
     private ID3D12Resource _nrdSpecInput = null!, _nrdSpecOutput = null!;
@@ -66,34 +77,59 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     private CameraFrame _previousCamera;
     private ReconstructionStatus _status;
 
-    internal SuperResolutionRenderer(DxrDevice device)
+    internal PathTracingResolve(DxrDevice device) : this(device, CreateCommon(device)) { }
+    private PathTracingResolve(DxrDevice device, (ReconstructionService Reconstruction, DisplayOutput Display) common)
+        : this(device, common.Reconstruction, common.Display, true) { }
+    private static (ReconstructionService, DisplayOutput) CreateCommon(DxrDevice device)
     {
-        _gpu.Initialize(device.Device);
-        _gpuInterval = new GpuInterval(_gpu);
+        var reconstruction = new ReconstructionService(device);
         try
         {
-            _capabilities = NativeReconstruction.Capabilities(_gpu.Device.NativePointer);
-            if ((_capabilities & (1u << (int)ReconstructionMode.Fsr)) == 0)
-                _availabilityMessage = Marshal.PtrToStringUTF8(NativeReconstruction.FsrDiagnostic()) ?? "";
+            return (reconstruction, new DisplayOutput(device));
         }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        catch { reconstruction.Dispose(); throw; }
+    }
+    internal PathTracingResolve(DxrDevice device, ReconstructionService reconstruction, DisplayOutput display, bool ownsCommon = false)
+    {
+        _reconstruction = reconstruction;
+        _display = display;
+        _ownsCommon = ownsCommon;
+        try
         {
-            _availabilityMessage = "超分 SDK 未安装或架构不匹配。";
+            _gpu.Initialize(device.Device, requireRayTracing: false);
+            _gpuInterval = new GpuInterval(_gpu);
+        }
+        catch
+        {
+            var cleanup = new ResourceCleanup();
+            cleanup.Release(_gpu);
+            if (_ownsCommon)
+            {
+                cleanup.Release(_reconstruction);
+                cleanup.Release(_display);
+            }
+            throw;
         }
         try
         {
             _nrdAvailable = NativeNrd.Available() != 0;
-            if (!_nrdAvailable) _nrdMessage = Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "NRD 不可用";
+            if (!_nrdAvailable)
+                _nrdMessage = Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "NRD 不可用";
         }
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
-        { _nrdMessage = "NRD SDK 未安装或架构不匹配"; }
+        {
+            _nrdMessage = "NRD SDK 未安装或架构不匹配";
+        }
         try
         {
             _optixAvailable = NativeOptix.Available(_gpu.Device.NativePointer) != 0;
-            if (!_optixAvailable) _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 不可用";
+            if (!_optixAvailable)
+                _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 不可用";
         }
         catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
-        { _optixMessage = "OptiX 原生桥不可用"; }
+        {
+            _optixMessage = "OptiX 原生桥不可用";
+        }
         _status = new(_capabilities, ReconstructionMode.Off, ReconstructionMode.Off, 0, 0, 0, 0, "原生分辨率", _nrdAvailable,
             OptixAvailable: _optixAvailable);
     }
@@ -111,7 +147,7 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     // Exposed internally for the offscreen resource-contract probe, never used by the UI.
     internal ID3D12Resource Depth => _depth;
     internal ID3D12Resource Motion => _motion;
-    internal ID3D12Resource LinearOutput => _output;
+    internal ID3D12Resource LinearOutput => _reconstruction.Output;
     internal ID3D12Resource DenoisedColor => _optixUsed && !_optixComposed ? _optixOutput : _glassComposed ? _glassColor : _color;
     internal float TextureLodBias => Active == ReconstructionMode.Off ? 0 :
         MathF.Log2(MathF.Min(InputWidth / (float)Status.OutputWidth, InputHeight / (float)Status.OutputHeight));
@@ -124,8 +160,16 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal ID3D12Resource DenoiserHistory => _history[(int)((_frame - 1) % 2)];
     internal ID3D12Resource TemporalHistorySampleCounts => _temporalSampleCounts[(int)((_frame - 1) % 2)];
 
-    private T Keep<T>(T value) where T : IDisposable { _pipelineResources.Add(value); return value; }
-    private T Sized<T>(T value) where T : IDisposable { _sizeResources.Add(value); return value; }
+    private T Keep<T>(T value) where T : IDisposable
+    {
+        _pipelineResources.Add(value);
+        return value;
+    }
+    private T Sized<T>(T value) where T : IDisposable
+    {
+        _sizeResources.Add(value);
+        return value;
+    }
 
     // Create pipelines before tracing the first frame, so shader compilation
     // cannot insert a CPU stall between path tracing and reconstruction.
@@ -138,46 +182,26 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
     internal void Configure(ReconstructionMode mode, int scale, int outputWidth, int outputHeight, bool nrd = false, bool pbr = false, bool optix = false)
     {
         var configuration = (mode, scale, outputWidth, outputHeight, nrd, pbr, optix);
-        if (_configured && _configuration == configuration) return;
+        _reconstruction.Configure(mode, scale, outputWidth, outputHeight, allowRr: pbr);
+        if (_configured && _configuration == configuration && _commonVersion == _reconstruction.ConfigurationVersion)
+            return;
+        _commonVersion = _reconstruction.ConfigurationVersion;
         _configured = true;
         _configuration = configuration;
         ReleaseSizeResources();
         Reset();
-        bool useNrd = nrd && _nrdAvailable && !optix;
-        string message = "原生分辨率";
-        if (mode == ReconstructionMode.DlssRayReconstruction && (!pbr || (_capabilities & (1u << (int)mode)) == 0))
-        {
-            mode = (_capabilities & (1u << (int)ReconstructionMode.Dlss)) != 0 ? ReconstructionMode.Dlss : ReconstructionMode.Off;
-            message = pbr ? "DLSSD 在当前设备不可用；" : "DLSSD 需要 glTF/GLB PBR 场景；";
-            message += mode == ReconstructionMode.Off ? "使用原生分辨率与常规降噪。" : "回退到 DLSS 超分与常规降噪。";
-        }
-        if (mode != ReconstructionMode.Off && (_capabilities & (1u << (int)mode)) == 0)
-        {
-            message = $"{mode} 在当前设备不可用，使用原生分辨率。" + (mode == ReconstructionMode.Fsr ? _availabilityMessage : "");
-            mode = ReconstructionMode.Off;
-        }
-        if (mode == ReconstructionMode.DlssRayReconstruction) useNrd = false;
+        mode = _reconstruction.Status.Active;
+        bool useNrd = nrd && _nrdAvailable && !optix && mode != ReconstructionMode.DlssRayReconstruction;
+        string message = _reconstruction.Status.Message;
+        int width = _reconstruction.Status.InputWidth, height = _reconstruction.Status.InputHeight;
         if (mode == ReconstructionMode.Off && !useNrd && !pbr && !optix)
         {
-            Publish(ReconstructionMode.Off, outputWidth, outputHeight, message);
+            Publish(mode, width, height, message);
             return;
         }
-
-        int width = mode == ReconstructionMode.Off ? outputWidth : Math.Max(1, outputWidth * scale / 100);
-        int height = mode == ReconstructionMode.Off ? outputHeight : Math.Max(1, outputHeight * scale / 100);
         try
         {
             EnsurePipelines();
-            if (mode != ReconstructionMode.Off)
-            {
-                Begin();
-                int result = NativeReconstruction.Create(_gpu.Device.NativePointer, _gpu.CommandList.NativePointer,
-                    (int)mode, 11, (uint)outputWidth, (uint)outputHeight, (uint)width, (uint)height, out _context);
-                if (result != 0) throw new InvalidOperationException($"{mode} 初始化失败 ({result}) " +
-                    (mode == ReconstructionMode.DlssRayReconstruction ? Marshal.PtrToStringUTF8(NativeReconstruction.NgxDiagnostic()) : ""));
-                End(); // NGX creation can record initialization commands.
-                message = (_configuration.Mode != mode ? message + " " : "") + $"{mode}: {width} × {height} → {outputWidth} × {outputHeight}";
-            }
             if (mode == ReconstructionMode.DlssRayReconstruction)
             {
                 _rrNormals = Texture(width, height, Format.R16G16B16A16_Float);
@@ -190,7 +214,11 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 if (result != 0)
                 {
                     _nrdMessage = Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? $"NRD 初始化失败 ({result})";
-                    if (mode == ReconstructionMode.Off && !pbr) { Publish(mode, width, height, message); return; }
+                    if (mode == ReconstructionMode.Off && !pbr)
+                    {
+                        Publish(mode, width, height, message);
+                        return;
+                    }
                 }
                 else
                 {
@@ -198,9 +226,12 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     _nrdOutput = Texture(width, height, Format.R16G16B16A16_Float);
                     if (pbr)
                     {
-                        _nrdSpecInput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecOutput = Texture(width, height, Format.R16G16B16A16_Float);
-                        _nrdDiffShInput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecShInput = Texture(width, height, Format.R16G16B16A16_Float);
-                        _nrdDiffShOutput = Texture(width, height, Format.R16G16B16A16_Float); _nrdSpecShOutput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdSpecInput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdSpecOutput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdDiffShInput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdSpecShInput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdDiffShOutput = Texture(width, height, Format.R16G16B16A16_Float);
+                        _nrdSpecShOutput = Texture(width, height, Format.R16G16B16A16_Float);
                         _glassColor = Texture(width, height, Format.R16G16B16A16_Float);
                         _glassRaw = Texture(width, height, Format.R16G16B16A16_Float);
                         for (int i = 0; i < 2; i++)
@@ -217,16 +248,17 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             {
                 if (NativeOptix.Create(_gpu.Device.NativePointer, (uint)width, (uint)height, out _optixContext) == 0)
                     _optixOutput = Texture(width, height, Format.R16G16B16A16_Float);
-                else _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 初始化失败";
+                else
+                    _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 初始化失败";
             }
             _depth = Texture(width, height, Format.R32_Float);
             _motion = Texture(width, height, Format.R16G16_Float);
             _reactive = Texture(width, height, Format.R8_UNorm);
-            _output = Texture(outputWidth, outputHeight, Format.R16G16B16A16_Float, ResourceStates.UnorderedAccess);
             for (int i = 0; i < 2; i++)
             {
                 _history[i] = Texture(width, height, Format.R32G32B32A32_Float);
-                if (_nrdContext == 0) _temporalSampleCounts[i] = Texture(width, height, Format.R32G32_UInt);
+                if (_nrdContext == 0)
+                    _temporalSampleCounts[i] = Texture(width, height, Format.R32G32_UInt);
             }
             _linearReady = true;
             Publish(mode, width, height, message);
@@ -266,7 +298,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 
     private void EnsurePipelines()
     {
-        if (_pipelinesReady) return;
+        if (_pipelinesReady)
+            return;
         ReleasePipelines();
         _root = Keep(_gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None,
             [new RootParameter1(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All),
@@ -276,7 +309,6 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         string file = Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "Reconstruction.hlsl");
         _prepare = Compile(file, "Prepare");
         _resolveGlass = Compile(file, "ResolveGlass");
-        _encode = Compile(file, "Encode");
         _prepareNrd = Compile(file, "PrepareNrd");
         _composeNrd = Compile(file, "ComposeNrd");
         _prepareRr = Compile(file, "PrepareRr");
@@ -301,19 +333,23 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         // Static descriptor tables must be fully initialized even when an entry point only uses a subset.
         var nullSrv = new ShaderResourceViewDescription
         {
-            Format = Format.R32G32B32A32_Float, ViewDimension = ShaderResourceViewDimension.Texture2D,
+            Format = Format.R32G32B32A32_Float,
+            ViewDimension = ShaderResourceViewDimension.Texture2D,
             Shader4ComponentMapping = ShaderComponentMapping.Default,
             Texture2D = new Texture2DShaderResourceView { MipLevels = 1 }
         };
         var nullUav = new UnorderedAccessViewDescription
         {
-            Format = Format.R32G32B32A32_Float, ViewDimension = UnorderedAccessViewDimension.Texture2D
+            Format = Format.R32G32B32A32_Float,
+            ViewDimension = UnorderedAccessViewDimension.Texture2D
         };
         for (int set = 0; set < SetCount; set++)
         {
             var start = _heap.GetCPUDescriptorHandleForHeapStart() + set * DescriptorsPerSet * _descriptorStride;
-            for (int i = 0; i < SrvCount; i++) _gpu.Device.CreateShaderResourceView(null, nullSrv, start + i * _descriptorStride);
-            for (int i = 0; i < UavCount; i++) _gpu.Device.CreateUnorderedAccessView(null, null, nullUav, start + (SrvCount + i) * _descriptorStride);
+            for (int i = 0; i < SrvCount; i++)
+                _gpu.Device.CreateShaderResourceView(null, nullSrv, start + i * _descriptorStride);
+            for (int i = 0; i < UavCount; i++)
+                _gpu.Device.CreateUnorderedAccessView(null, null, nullUav, start + (SrvCount + i) * _descriptorStride);
         }
     }
 
@@ -323,45 +359,51 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         compiler.CompileCompute(file, entry);
         return Keep(_gpu.Device.CreateComputePipelineState(new ComputePipelineStateDescription
         {
-            RootSignature = _root, ComputeShader = compiler.DxilBytes
+            RootSignature = _root,
+            ComputeShader = compiler.DxilBytes
         }));
     }
 
-    internal void Reset() { _reset = true; _frame = 0; _previousJitter = default; }
-
-    internal Float2 Jitter()
+    internal void Reset()
     {
-        if (Active == ReconstructionMode.Off) return default;
-        uint phases = (uint)Math.Max(8, Math.Ceiling(8.0 * Status.OutputWidth * Status.OutputWidth / ((double)InputWidth * InputWidth)));
-        uint sample = _frame % phases + 1;
-        return new(Halton(sample, 2) - 0.5f, Halton(sample, 3) - 0.5f);
+        _reset = true;
+        _frame = 0;
+        _previousJitter = default;
+        _reconstruction.Reset();
     }
 
-    private static float Halton(uint index, uint radix)
-    {
-        float sum = 0, fraction = 1;
-        while (index != 0) { fraction /= radix; sum += fraction * (index % radix); index /= radix; }
-        return sum;
-    }
+    internal Float2 Jitter() => _reconstruction.Jitter();
 
     private void BindInputs(GpuTexture<Float4> raw, GpuTexture<Rgba32> normals,
         GpuTexture<Float4> surfaces, GpuTexture<Float4>? nrdNormals, PbrSignals? pbr, GpuTexture<Float4>? directLight)
     {
-        if (ReferenceEquals(raw, _boundRaw)) return;
+        if (ReferenceEquals(raw, _boundRaw))
+            return;
         // Static ranges include unused entries. A different scene/configuration may
         // release the old PBR/OptiX resources, so remove every stale descriptor.
         ClearDescriptorTables();
-        _raw = raw.Resource; _normals = normals.Resource; _surfaces = surfaces.Resource;
+        _raw = raw.Resource;
+        _normals = normals.Resource;
+        _surfaces = surfaces.Resource;
         _nrdNormals = nrdNormals?.Resource;
         Array.Clear(_pbrInputs);
         if (pbr != null)
         {
-            _pbrInputs[0] = pbr.Diffuse.Resource; _pbrInputs[1] = pbr.Specular.Resource; _pbrInputs[2] = pbr.Albedo.Resource; _pbrInputs[3] = pbr.Unfiltered.Resource; _pbrInputs[4] = pbr.SpecularGuide.Resource;
-            _pbrInputs[5] = pbr.DiffuseSh.Resource; _pbrInputs[6] = pbr.SpecularSh.Resource; _pbrInputs[7] = pbr.GlassSurface.Resource;
-            _pbrInputs[8] = pbr.DiffuseFactor.Resource; _pbrInputs[9] = pbr.SpecularFactor.Resource;
-            _pbrInputs[10] = pbr.GlassFallback.Resource; _pbrInputs[11] = pbr.GlassNormal.Resource;
+            _pbrInputs[0] = pbr.Diffuse.Resource;
+            _pbrInputs[1] = pbr.Specular.Resource;
+            _pbrInputs[2] = pbr.Albedo.Resource;
+            _pbrInputs[3] = pbr.Unfiltered.Resource;
+            _pbrInputs[4] = pbr.SpecularGuide.Resource;
+            _pbrInputs[5] = pbr.DiffuseSh.Resource;
+            _pbrInputs[6] = pbr.SpecularSh.Resource;
+            _pbrInputs[7] = pbr.GlassSurface.Resource;
+            _pbrInputs[8] = pbr.DiffuseFactor.Resource;
+            _pbrInputs[9] = pbr.SpecularFactor.Resource;
+            _pbrInputs[10] = pbr.GlassFallback.Resource;
+            _pbrInputs[11] = pbr.GlassNormal.Resource;
         }
-        else if (directLight != null) _pbrInputs[3] = directLight.Resource;
+        else if (directLight != null)
+            _pbrInputs[3] = directLight.Resource;
         _boundRaw = raw;
     }
 
@@ -388,30 +430,41 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         GpuTexture<Float4> surfaces, GpuTexture<Rgba64> target,
         Float2 orbit, float distance, Float2 jitter, RayTraceDenoiserMode denoiser, in HdrRenderParameters hdr, double seconds,
         GpuTexture<Float4>? nrdNormals = null, CameraFrame? cameraFrame = null, PbrSignals? pbr = null, float exposure = 0,
-        GpuTexture<Float4>? directLight = null, DxrSceneBackend? transparentBackend = null)
+        GpuTexture<Float4>? directLight = null, DxrSceneBackend? transparentBackend = null, FrameRevisions revisions = default)
     {
         GpuMilliseconds = 0;
-        if (seconds > 0.25 || seconds <= 0) Reset();
+        if (seconds > 0.25 || seconds <= 0)
+            Reset();
         _glassComposed = false;
         _optixUsed = false;
         _optixComposed = false;
         bool rayReconstruction = Active == ReconstructionMode.DlssRayReconstruction;
-        if (rayReconstruction) denoiser = RayTraceDenoiserMode.None;
+        if (rayReconstruction)
+            denoiser = RayTraceDenoiserMode.None;
         bool useOptix = denoiser == RayTraceDenoiserMode.Optix && _optixContext != 0;
-        if (denoiser == RayTraceDenoiserMode.Optix) denoiser = RayTraceDenoiserMode.TemporalOnly;
+        if (denoiser == RayTraceDenoiserMode.Optix)
+            denoiser = RayTraceDenoiserMode.TemporalOnly;
         BindInputs(raw, normals, surfaces, nrdNormals, pbr, directLight);
-        ID3D12Resource encoded = target.Resource;
         CameraFrame camera = cameraFrame ?? CameraFrame.FromOrbit(orbit.X, orbit.Y, distance);
         // .NET 10: 值类型相机比较无分配；SR 采样抖动不属于镜头变化。
         bool cameraChanged = !_reset && camera != _previousCamera;
         bool resetOptix = _reset || cameraChanged || jitter.X != _previousJitter.X || jitter.Y != _previousJitter.Y;
         bool resetGlass = _reset || cameraChanged;
-        if (_reset) { _previousCamera = camera; _previousJitter = jitter; }
+        if (_reset)
+        {
+            _previousCamera = camera;
+            _previousJitter = jitter;
+        }
         Constants data = new()
         {
-            Origin = new(camera.Origin, 0), Forward = new(camera.Forward, 0), Right = new(camera.Right, 0), Up = new(camera.Up, 0),
-            PreviousOrigin = new(_previousCamera.Origin, 0), PreviousForward = new(_previousCamera.Forward, 0),
-            PreviousRight = new(_previousCamera.Right, 0), PreviousUp = new(_previousCamera.Up, 0),
+            Origin = new(camera.Origin, 0),
+            Forward = new(camera.Forward, 0),
+            Right = new(camera.Right, 0),
+            Up = new(camera.Up, 0),
+            PreviousOrigin = new(_previousCamera.Origin, 0),
+            PreviousForward = new(_previousCamera.Forward, 0),
+            PreviousRight = new(_previousCamera.Right, 0),
+            PreviousUp = new(_previousCamera.Up, 0),
             Size = new(InputWidth, InputHeight, target.Width, target.Height),
             Jitter = new(jitter.X, jitter.Y, _previousJitter.X, _previousJitter.Y),
             // Reset the progressive image without suppressing the SR motion vectors.
@@ -429,28 +482,42 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         bool temporalHistory = denoiser == RayTraceDenoiserMode.TemporalOnly;
         ID3D12Resource historySampleCounts = _temporalSampleCounts[historySlot] ?? _historySampleCountFallback;
         ID3D12Resource previousHistorySampleCounts = _temporalSampleCounts[1 - historySlot] ?? _historySampleCountFallback;
-        Srv(0, 0, _raw!); Srv(0, 1, _normals!); Srv(0, 2, _surfaces!); Srv(0, 3, _history[1 - historySlot]);
+        Srv(0, 0, _raw!);
+        Srv(0, 1, _normals!);
+        Srv(0, 2, _surfaces!);
+        Srv(0, 3, _history[1 - historySlot]);
         Srv(0, 26, previousHistorySampleCounts);
         if (pbr != null)
-            for (int set = 0; set < SetCount; set++) for (int i = 0; i < _pbrInputs.Length; i++) Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
-        else if (directLight != null) for (int set = 0; set < SetCount; set++) Srv(set, 9, _pbrInputs[3]!);
-        Uav(0, 0, _color); Uav(0, 1, _depth); Uav(0, 2, _motion); Uav(0, 3, _reactive); Uav(0, 4, _history[historySlot]);
+            for (int set = 0; set < SetCount; set++)
+                for (int i = 0; i < _pbrInputs.Length; i++)
+                    Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
+        else if (directLight != null)
+            for (int set = 0; set < SetCount; set++)
+                Srv(set, 9, _pbrInputs[3]!);
+        Uav(0, 0, _color);
+        Uav(0, 1, _depth);
+        Uav(0, 2, _motion);
+        Uav(0, 3, _reactive);
+        Uav(0, 4, _history[historySlot]);
         Uav(0, 12, historySampleCounts);
-        Uav(4, 5, encoded);
         try
         {
             Begin();
             Transition(_raw!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_normals!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_surfaces!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-            if (pbr != null) foreach (var inputResource in _pbrInputs) Transition(inputResource!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-            else if (directLight != null) Transition(_pbrInputs[3]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            if (pbr != null)
+                foreach (var inputResource in _pbrInputs)
+                    Transition(inputResource!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            else if (directLight != null)
+                Transition(_pbrInputs[3]!, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_depth, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_reactive, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_history[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-            if (temporalHistory) Transition(historySampleCounts, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            if (temporalHistory)
+                Transition(historySampleCounts, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Bind(0, _prepare, 0);
             _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
             Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
@@ -458,12 +525,14 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
             Transition(_motion, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_reactive, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             Transition(_history[historySlot], ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-            if (temporalHistory) Transition(historySampleCounts, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+            if (temporalHistory)
+                Transition(historySampleCounts, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
             ID3D12Resource input = _color;
             if (useOptix)
             {
                 ID3D12Resource normalInput = _nrdNormals ?? _normals!;
-                if (_nrdNormals != null) Transition(normalInput, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                if (_nrdNormals != null)
+                    Transition(normalInput, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
                 End(); // Finish raw accumulation before transferring GPU ownership to CUDA.
                 float* basis = stackalloc float[12] { camera.Right.X, camera.Right.Y, camera.Right.Z, 0,
                     camera.Up.X, camera.Up.Y, camera.Up.Z, 0, camera.Forward.X, camera.Forward.Y, camera.Forward.Z, 0 };
@@ -472,35 +541,47 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     pbr != null ? _pbrInputs[2]!.NativePointer : 0, pbr != null ? _pbrInputs[4]!.NativePointer : 0,
                     _optixOutput.NativePointer, basis, pbr != null ? 1u : 0u, optixSr || resetOptix ? 1u : 0u);
                 Begin();
-                if (_nrdNormals != null) Transition(normalInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                if (_nrdNormals != null)
+                    Transition(normalInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                 if (result == 0)
                 {
-                    input = _optixOutput; _optixUsed = true; GpuMilliseconds += NativeOptix.TotalGpuMilliseconds(_optixContext);
+                    input = _optixOutput;
+                    _optixUsed = true;
+                    GpuMilliseconds += NativeOptix.TotalGpuMilliseconds(_optixContext);
                 }
                 else
                 {
                     _optixMessage = Marshal.PtrToStringUTF8(NativeOptix.Diagnostic()) ?? "OptiX 执行失败";
-                    NativeOptix.Destroy(_optixContext); _optixContext = 0;
+                    NativeOptix.Destroy(_optixContext);
+                    _optixContext = 0;
                     Publish(Active, InputWidth, InputHeight, "OptiX 执行失败；已回退到时间累积。");
                 }
                 if (optixSr)
                 {
-                    Srv(6, 5, _optixOutput); Uav(6, 0, _color);
+                    Srv(6, 5, _optixOutput);
+                    Uav(6, 0, _color);
                     Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Bind(6, result == 0 ? _composeOptix : _restoreOptixFallback, 0);
                     _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
                     Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    input = _color; _optixComposed = result == 0;
+                    input = _color;
+                    _optixComposed = result == 0;
                 }
             }
             if (_nrdContext != 0)
             {
-                if (_nrdNormals == null) throw new InvalidOperationException("NRD normal/roughness guide missing");
-                Srv(1, 0, _raw!); Srv(1, 1, _normals!); Srv(1, 2, _surfaces!);
-                Uav(1, 0, _color); Uav(1, 1, _viewZ);
+                if (_nrdNormals == null)
+                    throw new InvalidOperationException("NRD normal/roughness guide missing");
+                Srv(1, 0, _raw!);
+                Srv(1, 1, _normals!);
+                Srv(1, 2, _surfaces!);
+                Uav(1, 0, _color);
+                Uav(1, 1, _viewZ);
                 if (pbr != null)
                 {
-                    Uav(1, 6, _nrdSpecInput); Uav(1, 8, _nrdDiffShInput); Uav(1, 9, _nrdSpecShInput);
+                    Uav(1, 6, _nrdSpecInput);
+                    Uav(1, 8, _nrdDiffShInput);
+                    Uav(1, 9, _nrdSpecShInput);
                     Transition(_nrdSpecInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_nrdDiffShInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_nrdSpecShInput, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
@@ -521,27 +602,43 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 // .NET 10: 值类型矩阵直接写入栈上的 ABI 帧，复用 NRD 资源，不在渲染循环分配数组。
                 NativeNrd.Frame nrdFrame = new()
                 {
-                    Color = _color.NativePointer, NormalRoughness = _nrdNormals.NativePointer,
-                    ViewZ = _viewZ.NativePointer, Motion = _motion.NativePointer, Output = _nrdOutput.NativePointer,
+                    Color = _color.NativePointer,
+                    NormalRoughness = _nrdNormals.NativePointer,
+                    ViewZ = _viewZ.NativePointer,
+                    Motion = _motion.NativePointer,
+                    Output = _nrdOutput.NativePointer,
                     WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
                     WorldToViewPrevious = Matrix4x4.CreateLookAt(_previousCamera.Origin, _previousCamera.Origin + _previousCamera.Forward, _previousCamera.Up),
                     ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, InputWidth / (float)InputHeight, camera.Near, camera.Far),
                     ViewToClipPrevious = Matrix4x4.CreatePerspectiveFieldOfView(_previousCamera.VerticalFov, InputWidth / (float)InputHeight, _previousCamera.Near, _previousCamera.Far),
                     // NRD asks for ray sample offsets; SR SDKs below ask for projection offsets.
-                    Jitter = new(jitter.X, jitter.Y), PreviousJitter = new(_previousJitter.X, _previousJitter.Y),
-                    Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250), FrameIndex = _frame, Reset = _reset ? 1u : 0u,
-                    Specular = pbr != null ? _nrdSpecInput.NativePointer : 0, SpecularOutput = pbr != null ? _nrdSpecOutput.NativePointer : 0,
+                    Jitter = new(jitter.X, jitter.Y),
+                    PreviousJitter = new(_previousJitter.X, _previousJitter.Y),
+                    Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
+                    FrameIndex = _frame,
+                    Reset = _reset ? 1u : 0u,
+                    Specular = pbr != null ? _nrdSpecInput.NativePointer : 0,
+                    SpecularOutput = pbr != null ? _nrdSpecOutput.NativePointer : 0,
                     DenoisingRange = camera.Far,
                     MaxAccumulatedFrames = cameraChanged ? NativeNrd.MotionMaxAccumulatedFrames : NativeNrd.DefaultMaxAccumulatedFrames,
-                    DiffuseSh = pbr != null ? _nrdDiffShInput.NativePointer : 0, SpecularSh = pbr != null ? _nrdSpecShInput.NativePointer : 0,
-                    DiffuseShOutput = pbr != null ? _nrdDiffShOutput.NativePointer : 0, SpecularShOutput = pbr != null ? _nrdSpecShOutput.NativePointer : 0
+                    DiffuseSh = pbr != null ? _nrdDiffShInput.NativePointer : 0,
+                    SpecularSh = pbr != null ? _nrdSpecShInput.NativePointer : 0,
+                    DiffuseShOutput = pbr != null ? _nrdDiffShOutput.NativePointer : 0,
+                    SpecularShOutput = pbr != null ? _nrdSpecShOutput.NativePointer : 0
                 };
                 if (NativeNrd.Execute(_nrdContext, _gpu.CommandList.NativePointer, &nrdFrame) != 0)
                     throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "NRD 执行失败");
-                Srv(2, 0, _raw!); Srv(2, 1, _normals!); Srv(2, 2, _surfaces!); Srv(2, 5, _nrdOutput);
+                Srv(2, 0, _raw!);
+                Srv(2, 1, _normals!);
+                Srv(2, 2, _surfaces!);
+                Srv(2, 5, _nrdOutput);
                 if (pbr != null)
                 {
-                    Srv(2, 10, _nrdSpecOutput); Srv(2, 12, _nrdNormals); Srv(2, 18, _nrdDiffShOutput); Srv(2, 19, _nrdSpecShOutput); Srv(2, 3, _viewZ);
+                    Srv(2, 10, _nrdSpecOutput);
+                    Srv(2, 12, _nrdNormals);
+                    Srv(2, 18, _nrdDiffShOutput);
+                    Srv(2, 19, _nrdSpecShOutput);
+                    Srv(2, 3, _viewZ);
                 }
                 Uav(2, 0, _color);
                 Transition(_color, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
@@ -554,7 +651,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     _stablePlanes ??= new StablePlaneDenoiser(_gpu, InputWidth, InputHeight);
                     _stablePlanes.Execute(pbr, _color, _glassColor, camera, jitter, seconds, _reset);
                     Transition(_glassColor, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    input = _glassColor; _glassComposed = true;
+                    input = _glassColor;
+                    _glassComposed = true;
                 }
                 else if (pbr != null && transparentBackend != null)
                 {
@@ -575,11 +673,17 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                     Transition(_glassCompensation[historySlot], ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     input = _glassColor;
                     _glassComposed = true;
-                    Srv(5, 2, _surfaces!); Uav(5, 2, _motion); Uav(5, 3, _reactive);
-                    Srv(5, 22, _glassHistory[1 - historySlot]); Srv(5, 23, _glassSampleCounts[1 - historySlot]);
-                    Srv(5, 24, _glassCompensation[1 - historySlot]); Srv(5, 25, _glassRaw);
-                    Uav(5, 0, _glassColor); Uav(5, 4, _glassHistory[historySlot]);
-                    Uav(5, 10, _glassSampleCounts[historySlot]); Uav(5, 11, _glassCompensation[historySlot]);
+                    Srv(5, 2, _surfaces!);
+                    Uav(5, 2, _motion);
+                    Uav(5, 3, _reactive);
+                    Srv(5, 22, _glassHistory[1 - historySlot]);
+                    Srv(5, 23, _glassSampleCounts[1 - historySlot]);
+                    Srv(5, 24, _glassCompensation[1 - historySlot]);
+                    Srv(5, 25, _glassRaw);
+                    Uav(5, 0, _glassColor);
+                    Uav(5, 4, _glassHistory[historySlot]);
+                    Uav(5, 10, _glassSampleCounts[historySlot]);
+                    Uav(5, 11, _glassCompensation[historySlot]);
                     Transition(_motion, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Transition(_reactive, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
                     Bind(5, _resolveGlass, 1);
@@ -593,59 +697,51 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 }
                 Transition(_nrdNormals, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             }
-            if (_context != 0)
+            NativeReconstruction.RayReconstructionFrame? rr = null;
+            if (rayReconstruction)
             {
-                NativeReconstruction.Frame frame = new()
+                if (pbr == null || _nrdNormals == null)
+                    throw new InvalidOperationException("DLSSD PBR guides missing");
+                Srv(3, 12, _nrdNormals);
+                Uav(3, 6, _rrNormals);
+                Uav(3, 7, _rrHitDistance);
+                Transition(_nrdNormals, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                Transition(_rrNormals, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                Transition(_rrHitDistance, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                Bind(3, _prepareRr, 0);
+                _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
+                Transition(_rrNormals, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                Transition(_rrHitDistance, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+                Transition(_nrdNormals, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+                rr = new NativeReconstruction.RayReconstructionFrame
                 {
-                    Color = input.NativePointer, Depth = _depth.NativePointer, Motion = _motion.NativePointer,
-                    Reactive = _reactive.NativePointer, Output = _output.NativePointer,
-                    Width = (uint)InputWidth, Height = (uint)InputHeight,
-                    // SDKs receive projection offsets; path-traced primary rays use inverse projection.
-                    JitterX = -jitter.X, JitterY = -jitter.Y, Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
-                    Reset = _reset ? 1u : 0u, NearPlane = camera.Near, FarPlane = camera.Far, VerticalFieldOfView = camera.VerticalFov
+                    Common = new() { Color = _raw!.NativePointer },
+                    DiffuseAlbedo = _pbrInputs[2]!.NativePointer,
+                    SpecularAlbedo = _pbrInputs[4]!.NativePointer,
+                    NormalRoughness = _rrNormals.NativePointer,
+                    SpecularHitDistance = _rrHitDistance.NativePointer,
+                    WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
+                    ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, InputWidth / (float)InputHeight, camera.Near, camera.Far)
                 };
-                int result;
-                if (rayReconstruction)
-                {
-                    if (pbr == null || _nrdNormals == null) throw new InvalidOperationException("DLSSD PBR guides missing");
-                    Srv(3, 12, _nrdNormals); Uav(3, 6, _rrNormals); Uav(3, 7, _rrHitDistance);
-                    Transition(_nrdNormals, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_rrNormals, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Transition(_rrHitDistance, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    Bind(3, _prepareRr, 0);
-                    _gpu.CommandList.Dispatch((uint)(InputWidth + 7) / 8, (uint)(InputHeight + 7) / 8, 1);
-                    Transition(_rrNormals, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_rrHitDistance, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                    Transition(_nrdNormals, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-                    // DLSSD consumes the raw noisy signal, with no temporal/custom/NRD prefilter.
-                    frame.Color = _raw!.NativePointer;
-                    NativeReconstruction.RayReconstructionFrame rrFrame = new()
-                    {
-                        Common = frame, DiffuseAlbedo = _pbrInputs[2]!.NativePointer, SpecularAlbedo = _pbrInputs[4]!.NativePointer,
-                        NormalRoughness = _rrNormals.NativePointer, SpecularHitDistance = _rrHitDistance.NativePointer,
-                        WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
-                        ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, InputWidth / (float)InputHeight, camera.Near, camera.Far)
-                    };
-                    result = NativeReconstruction.ExecuteDlssd(_context, _gpu.CommandList.NativePointer, &rrFrame);
-                }
-                else result = NativeReconstruction.Execute(_context, _gpu.CommandList.NativePointer, &frame);
-                if (result != 0) throw new InvalidOperationException($"{Active} 执行失败 ({result}) " +
-                    (rayReconstruction ? Marshal.PtrToStringUTF8(NativeReconstruction.NgxDiagnostic()) : ""));
-                Transition(_output, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-                input = _output;
             }
-            Srv(4, 5, input);
-            Bind(4, _encode, 0); // Vendor dispatch changes root bindings and descriptor heaps.
-            _gpu.CommandList.Dispatch((uint)(target.Width + 7) / 8, (uint)(target.Height + 7) / 8, 1);
-            _gpu.CommandList.ResourceBarrierUnorderedAccessView(encoded);
-            if (_context != 0) Transition(_output, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            LastFrame = new(input, _depth, _motion, _reactive, InputWidth, InputHeight,
+                camera, jitter, _previousJitter, seconds, _reset, Revisions: revisions);
+            input = _reconstruction.Record(_gpu.CommandList, LastFrame, rr);
+            _display.Record(_gpu.CommandList, input, target, hdr, exposure, toneMap: pbr != null);
+            _reconstruction.Complete(_gpu.CommandList);
             Transition(_raw!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_normals!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             Transition(_surfaces!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-            if (pbr != null) foreach (var inputResource in _pbrInputs) Transition(inputResource!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
-            else if (directLight != null) Transition(_pbrInputs[3]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            if (pbr != null)
+                foreach (var inputResource in _pbrInputs)
+                    Transition(inputResource!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
+            else if (directLight != null)
+                Transition(_pbrInputs[3]!, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
             End(); // Complete before the HUD or presentation consumes the shared target.
-            _previousCamera = camera; _previousJitter = jitter; _frame++; _reset = false;
+            _previousCamera = camera;
+            _previousJitter = jitter;
+            _frame++;
+            _reset = false;
             return true;
         }
         catch (Exception e)
@@ -661,7 +757,8 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
                 Publish(Active, InputWidth, InputHeight, e.Message + "；光线重建已回退到常规管线。");
                 return false;
             }
-            if (_configuration.Nrd) _nrdMessage = e.Message;
+            if (_configuration.Nrd)
+                _nrdMessage = e.Message;
             if (failed.Pbr && (failed.Mode != ReconstructionMode.Off || failed.Nrd))
             {
                 Configure(ReconstructionMode.Off, 100, target.Width, target.Height, false, true);
@@ -693,17 +790,25 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
 
     private void Discard()
     {
-        if (!_recording) return;
+        if (!_recording)
+            return;
         _gpu.CommandList.Close();
         _recording = false;
     }
 
     private void ReleasePipelines()
     {
-        if (_constantPointer != 0) { _constants.Unmap(0); _constantPointer = 0; }
-        for (int i = _pipelineResources.Count - 1; i >= 0; i--) _pipelineResources[i].Dispose();
+        if (_constantPointer != 0)
+        {
+            _constants.Unmap(0);
+            _constantPointer = 0;
+        }
+        var cleanup = new ResourceCleanup();
+        for (int i = _pipelineResources.Count - 1; i >= 0; i--)
+            cleanup.Release(_pipelineResources[i]);
         _pipelineResources.Clear();
         _pipelinesReady = false;
+        cleanup.Finish();
     }
 
     private void ReleaseSizeResources()
@@ -711,28 +816,51 @@ internal sealed unsafe class SuperResolutionRenderer : IDisposable
         _linearReady = false;
         _glassComposed = false;
         _optixUsed = false;
-        _gpu.SignalAndWait();
-        if (_context != 0) { NativeReconstruction.Destroy(_context); _context = 0; }
-        if (_nrdContext != 0) { NativeNrd.Destroy(_nrdContext); _nrdContext = 0; }
-        if (_optixContext != 0) { NativeOptix.Destroy(_optixContext); _optixContext = 0; }
-        _stablePlanes?.Dispose(); _stablePlanes = null;
+        var cleanup = new ResourceCleanup();
+        cleanup.Run(() => _gpu.SignalAndWait());
+        if (_nrdContext != 0)
+        {
+            nint context = _nrdContext;
+            _nrdContext = 0;
+            cleanup.Run(() => NativeNrd.Destroy(context));
+        }
+        if (_optixContext != 0)
+        {
+            nint context = _optixContext;
+            _optixContext = 0;
+            cleanup.Run(() => NativeOptix.Destroy(context));
+        }
+        cleanup.Release(_stablePlanes);
+        _stablePlanes = null;
         _nrdNormals = null;
-        _raw = _normals = _surfaces = null; _boundRaw = null;
+        _raw = _normals = _surfaces = null;
+        _boundRaw = null;
         Array.Clear(_pbrInputs);
-        for (int i = _sizeResources.Count - 1; i >= 0; i--) _sizeResources[i].Dispose();
+        for (int i = _sizeResources.Count - 1; i >= 0; i--)
+            cleanup.Release(_sizeResources[i]);
         _sizeResources.Clear();
-        for (int i = 0; i < 2; i++) _temporalSampleCounts[i] = null!;
+        for (int i = 0; i < 2; i++)
+            _temporalSampleCounts[i] = null!;
+        cleanup.Finish();
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (_disposed) return;
+        if (_disposed)
+            return;
         _disposed = true;
-        ReleaseSizeResources();
-        ReleasePipelines();
-        _gpuInterval.Dispose();
-        _gpu.Dispose();
+        var cleanup = new ResourceCleanup();
+        cleanup.Run(ReleaseSizeResources);
+        cleanup.Run(ReleasePipelines);
+        cleanup.Release(_gpuInterval);
+        cleanup.Release(_gpu);
+        if (_ownsCommon)
+        {
+            cleanup.Release(_reconstruction);
+            cleanup.Release(_display);
+        }
+        cleanup.Finish();
     }
 
     [StructLayout(LayoutKind.Sequential)]

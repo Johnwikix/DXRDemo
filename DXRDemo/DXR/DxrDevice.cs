@@ -19,6 +19,7 @@ public sealed partial class DxrDevice : IDisposable
     public ShaderModel HighestShaderModel { get; private set; } = ShaderModel.Model6_5;
     /// <summary>True when DXR 1.2 / SM 6.9 shader features are available.</summary>
     public bool SupportsShaderModel69 => (int)HighestShaderModel >= (int)ShaderModel.Model6_9;
+    public bool SupportsRayTracing { get; private set; }
 
     /// <summary>Selects the app-local Agility runtime before any D3D12 device exists.</summary>
     public static bool TryActivateAgilityRuntime()
@@ -41,12 +42,12 @@ public sealed partial class DxrDevice : IDisposable
     private bool _disposed;
     private readonly AutoResetEvent _fenceEvent = new(false);
 
-    public static DxrDevice CreateDefault()
+    public static DxrDevice CreateDefault(bool requireRayTracing = true)
     {
         var device = new DxrDevice();
         try
         {
-            device.Initialize();
+            device.Initialize(requireRayTracing: requireRayTracing);
             return device;
         }
         catch
@@ -56,7 +57,7 @@ public sealed partial class DxrDevice : IDisposable
         }
     }
 
-    public void Initialize(ID3D12Device5? sharedDevice = null)
+    public void Initialize(ID3D12Device5? sharedDevice = null, bool requireRayTracing = true)
     {
 #if DEBUG
         // Debug layer validates every command list - significant CPU cost per frame.
@@ -101,7 +102,8 @@ public sealed partial class DxrDevice : IDisposable
 
         // Check DXR support via FeatureDataD3D12Options5.RaytracingTier
         var options = Device.CheckFeatureSupport<FeatureDataD3D12Options5>(Vortice.Direct3D12.Feature.Options5);
-        if (options.RaytracingTier < RaytracingTier.Tier1_0)
+        SupportsRayTracing = options.RaytracingTier >= RaytracingTier.Tier1_0;
+        if (requireRayTracing && !SupportsRayTracing)
             throw new NotSupportedException(
                 $"GPU does not support DXR. Reported tier: {options.RaytracingTier}");
 

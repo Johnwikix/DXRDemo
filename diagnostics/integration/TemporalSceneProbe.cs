@@ -65,7 +65,7 @@ internal static class TemporalSceneProbe
         using var surfaces = device.CreateTexture2D<Float4>(width, height);
         using var guide = device.CreateTexture2D<Float4>(width, height);
         using var signals = new PbrSignals(device, width, height);
-        using var reconstruction = new SuperResolutionRenderer(device);
+        using var reconstruction = new PathTracingResolve(device);
         using var target = device.CreateTexture2D<Rgba64>(width, height);
         reconstruction.Configure(ReconstructionMode.Off, 100, width, height, useNrd, true, useOptix);
         Require(reconstruction.LinearPipelineActive && reconstruction.Status.NrdActive == useNrd, reconstruction.Status.Message);

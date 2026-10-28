@@ -126,38 +126,54 @@ public static class GltfImporter
 
         var meshes = new List<SceneMesh>();
         var primitiveMap = new Dictionary<MeshPrimitive, int>();
-        foreach (var mesh in model.LogicalMeshes) foreach (var primitive in mesh.Primitives)
+        foreach (var mesh in model.LogicalMeshes)
         {
-            cancellation.ThrowIfCancellationRequested();
-            if (primitive.MorphTargetsCount != 0) throw new NotSupportedException("请先将 Morph Target 烘焙为静态模型。");
-            if (primitive.DrawPrimitiveType is not (PrimitiveType.TRIANGLES or PrimitiveType.TRIANGLE_STRIP or PrimitiveType.TRIANGLE_FAN))
-                throw new NotSupportedException("DXR 场景支持三角形网格；文件中包含点或线图元。");
-            var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array() ?? throw new InvalidDataException("网格缺少 POSITION。");
-            var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();
-            var tangents = primitive.GetVertexAccessor("TANGENT")?.AsVector4Array();
-            var uv0 = primitive.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array();
-            var uv1 = primitive.GetVertexAccessor("TEXCOORD_1")?.AsVector2Array();
-            var colors = primitive.GetVertexAccessor("COLOR_0")?.AsColorArray();
-            var vertices = new SceneVertex[positions.Count];
-            for (int v = 0; v < vertices.Length; v++)
+            int primitiveIndex = 0;
+            foreach (var primitive in mesh.Primitives)
             {
-                Vector3 p = positions[v];
-                if (!float.IsFinite(p.X + p.Y + p.Z)) throw new InvalidDataException("模型包含非有限顶点。");
-                Vector2 a = uv0?[v] ?? default, b = uv1?[v] ?? default;
-                vertices[v] = new() { Position = new(p, 1), Normal = new(normals?[v] ?? Vector3.Zero, 0),
-                    Tangent = tangents?[v] ?? Vector4.Zero, TexCoord = new(a.X, a.Y, b.X, b.Y), Color = colors?[v] ?? Vector4.One };
+                cancellation.ThrowIfCancellationRequested();
+                if (primitive.MorphTargetsCount != 0) throw new NotSupportedException("请先将 Morph Target 烘焙为静态模型。");
+                if (primitive.DrawPrimitiveType is not (PrimitiveType.TRIANGLES or PrimitiveType.TRIANGLE_STRIP or PrimitiveType.TRIANGLE_FAN))
+                    throw new NotSupportedException("DXR 场景支持三角形网格；文件中包含点或线图元。");
+                var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array() ?? throw new InvalidDataException("网格缺少 POSITION。");
+                var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();
+                var tangents = primitive.GetVertexAccessor("TANGENT")?.AsVector4Array();
+                var uv0 = primitive.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array();
+                var uv1 = primitive.GetVertexAccessor("TEXCOORD_1")?.AsVector2Array();
+                var colors = primitive.GetVertexAccessor("COLOR_0")?.AsColorArray();
+                var vertices = new SceneVertex[positions.Count];
+                for (int v = 0; v < vertices.Length; v++)
+                {
+                    Vector3 p = positions[v];
+                    if (!float.IsFinite(p.X + p.Y + p.Z)) throw new InvalidDataException("模型包含非有限顶点。");
+                    Vector2 a = uv0?[v] ?? default, b = uv1?[v] ?? default;
+                    vertices[v] = new() { Position = new(p, 1), Normal = new(normals?[v] ?? Vector3.Zero, 0),
+                        Tangent = tangents?[v] ?? Vector4.Zero, TexCoord = new(a.X, a.Y, b.X, b.Y), Color = colors?[v] ?? Vector4.One };
+                }
+                var indices = new List<uint>();
+                foreach (var (a, b, c) in primitive.GetTriangleIndices())
+                {
+                    if ((uint)a >= vertices.Length || (uint)b >= vertices.Length || (uint)c >= vertices.Length) throw new InvalidDataException("三角形索引越界。");
+                    indices.Add((uint)a); indices.Add((uint)b); indices.Add((uint)c);
+                }
+                if (indices.Count == 0) throw new InvalidDataException("网格没有可渲染三角形。");
+                primitiveMap.Add(primitive, meshes.Count);
+                meshes.Add(new(mesh.Name ?? $"Mesh {mesh.LogicalIndex}", vertices, indices.ToArray(), primitive.Material?.LogicalIndex ?? materials.Length - 1)
+                    { LogicalMeshId = mesh.LogicalIndex, PrimitiveIndex = primitiveIndex++ });
             }
-            var indices = new List<uint>();
-            foreach (var (a, b, c) in primitive.GetTriangleIndices())
-            {
-                if ((uint)a >= vertices.Length || (uint)b >= vertices.Length || (uint)c >= vertices.Length) throw new InvalidDataException("三角形索引越界。");
-                indices.Add((uint)a); indices.Add((uint)b); indices.Add((uint)c);
-            }
-            if (indices.Count == 0) throw new InvalidDataException("网格没有可渲染三角形。");
-            primitiveMap.Add(primitive, meshes.Count);
-            meshes.Add(new(mesh.Name ?? $"Mesh {mesh.LogicalIndex}", vertices, indices.ToArray(), primitive.Material?.LogicalIndex ?? materials.Length - 1));
         }
         var sharedMeshes = meshes.ToArray(); var sharedTextures = textures.ToArray();
+        var logicalMeshes = new LogicalSceneMesh[model.LogicalMeshes.Count];
+        foreach (var mesh in model.LogicalMeshes)
+        {
+            var ranges = new ScenePrimitiveRange[mesh.Primitives.Count];
+            for (int primitive = 0; primitive < ranges.Length; primitive++)
+            {
+                int index = primitiveMap[mesh.Primitives[primitive]];
+                ranges[primitive] = new(index, 0, sharedMeshes[index].Indices.Length, sharedMeshes[index].Material);
+            }
+            logicalMeshes[mesh.LogicalIndex] = new(mesh.LogicalIndex, ranges);
+        }
         SceneEnvironment? environmentMap = null;
         if (model.Extras is System.Text.Json.Nodes.JsonObject sceneExtras && sceneExtras["environmentMap"] is { } environmentPath)
         {
@@ -180,7 +196,7 @@ public static class GltfImporter
                 if (node.Mesh is { } mesh) foreach (var primitive in mesh.Primitives)
                 {
                     int meshIndex = primitiveMap[primitive];
-                    instances.Add(new(node.Name ?? mesh.Name ?? "Node", meshIndex, world));
+                    instances.Add(new(node.Name ?? mesh.Name ?? "Node", meshIndex, world) { GeometryInstanceId = node.LogicalIndex });
                     foreach (ref readonly var vertex in sharedMeshes[meshIndex].Vertices.AsSpan())
                     {
                         Vector3 p = Vector3.Transform(new(vertex.Position.X, vertex.Position.Y, vertex.Position.Z), world);
@@ -200,7 +216,8 @@ public static class GltfImporter
             foreach (Node root in model.LogicalScenes[i].VisualChildren) Visit(root);
             if (instances.Count == 0) { minimum = new(-1); maximum = new(1); }
             scenes[i] = new(model.LogicalScenes[i].Name ?? $"Scene {i + 1}", sharedMeshes, instances.ToArray(), materials,
-                sharedTextures, lights.ToArray(), minimum, maximum, warnings.ToArray()) { EnvironmentMap = environmentMap };
+                sharedTextures, lights.ToArray(), minimum, maximum, warnings.ToArray())
+                { EnvironmentMap = environmentMap, LogicalMeshes = logicalMeshes };
         }
         return new(System.IO.Path.GetFullPath(path), scenes, model.DefaultScene?.LogicalIndex ?? 0);
     }

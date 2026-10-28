@@ -20,7 +20,7 @@ internal static unsafe class DenoiserSrProbe
         using var device = DxrDevice.CreateDefault();
         using var native = NativeDevice(device);
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         if(args.Contains("--sr-mips")) { VerifyMipFootprint(device,sr); VerifyDebug(messages); return; }
         if(args.Contains("--sr-bistro")) { VerifyBistro(device,sr,args); VerifyDebug(messages); return; }
         const int width = 512, height = 288, frames = 48;
@@ -146,7 +146,7 @@ internal static unsafe class DenoiserSrProbe
         Require(results.Count>=3,"No actual SR/denoiser combinations were exercised");
         Console.WriteLine("PASS jittered texture detail through actual temporal SR/denoiser combinations.");
     }
-    private static void VerifyMipFootprint(DxrDevice device,SuperResolutionRenderer sr)
+    private static void VerifyMipFootprint(DxrDevice device,PathTracingResolve sr)
     {
         const int width=512,height=288,edge=1024;
         var levels=new List<byte[]>();var mip=new byte[edge*edge*4];
@@ -200,12 +200,12 @@ internal static unsafe class DenoiserSrProbe
         Require(before>.01 && after<1e-4,"SR texture LOD did not preserve the output-resolution footprint");
         Console.WriteLine("PASS production SR mip footprint matches the native-resolution texture reference.");
     }
-    private static void VerifyBistro(DxrDevice device,SuperResolutionRenderer capabilities,string[] args)
+    private static void VerifyBistro(DxrDevice device,PathTracingResolve capabilities,string[] args)
     {
         var mode=new[] { ReconstructionMode.Dlss,ReconstructionMode.XeSS,ReconstructionMode.Fsr }.First(capabilities.Status.Supports);
         var denoiser=args.Contains("--temporal")?RayTraceDenoiserMode.TemporalOnly:RayTraceDenoiserMode.Optix;
         using var pass=new RayTracePass();pass.Initialize(device,default);
-        pass.SceneIndex=RayTracePass.RtxptBistroSceneIndex;
+        pass.SceneIndex=SceneCatalog.Bistro;
         pass.ReconstructionMode=mode;pass.RenderScalePercent=67;pass.DenoiserMode=denoiser;pass.Samples=1;pass.MaxBounces=8;
         using var target=device.CreateTexture2D<Rgba64>(1280,720);
         var watch=System.Diagnostics.Stopwatch.StartNew();int rendered=0;

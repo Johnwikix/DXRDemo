@@ -1,3 +1,4 @@
+using DXRDemo.Scene;
 using DXRDemo.DXR;
 using DXRDemo.Hdr;
 using DXRDemo.Shaders.RayTrace;
@@ -8,6 +9,15 @@ using System.Text.Json;
 if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DXR_DXC_PATH")))
     Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
+DxrDevice.TryActivateAgilityRuntime();
+if (args.Contains("--hud")) { HudProbe.Run(); return; }
+if (args.Contains("--scene-session")) { await SceneSessionProbe.Run(); return; }
+if (args.Contains("--scene-session-gpu")) { await SceneSessionProbe.RunGpu(); return; }
+if (args.Contains("--gpu-scene-cache")) { GpuSceneCacheProbe.Run(); return; }
+if (args.Contains("--scene-core")) { DxrDevice.TryActivateAgilityRuntime(); await SceneProbe.Run(materialOnly: true); return; }
+if (args.Contains("--raster")) { RasterProbe.Run(); return; }
+if (args.Contains("--common-frame")) { CommonFrameProbe.Run(); return; }
+if (args.Contains("--raster-scenes")) { await RasterSceneProbe.Run(); return; }
 if (args.Contains("--nrd-motion")) { DxrDevice.TryActivateAgilityRuntime(); NrdMotionProbe.Run(args); return; }
 if (args.Contains("--temporal-convergence")) { TemporalConvergenceProbe.Run(); return; }
 if (args.Contains("--environment-sampling")) { DxrDevice.TryActivateAgilityRuntime(); EnvironmentSamplingProbe.Run(); return; }
@@ -30,7 +40,7 @@ if (args.Contains("--nrd-missing")) { ReconstructionProbe.Run(true); return; }
 using var device = DxrDevice.CreateDefault();
 using var pass = new RayTracePass();
 pass.Initialize(device, default);
-pass.SceneIndex = RayTracePass.RtxptKitchenSceneIndex;
+pass.SceneIndex = SceneCatalog.Kitchen;
 pass.ReconstructionMode = ReconstructionMode.Off;
 pass.DenoiserMode = RayTraceDenoiserMode.TemporalOnly;
 pass.Samples = 1;

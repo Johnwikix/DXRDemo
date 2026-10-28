@@ -13,6 +13,7 @@ using WinUIEx;
 using DispatcherTimer = Microsoft.UI.Xaml.DispatcherTimer;
 using Microsoft.UI;
 using DXRDemo.Camera;
+using DXRDemo.Scene;
 using DXRDemo.DXR;
 using Windows.System;
 using Windows.Storage;
@@ -31,6 +32,7 @@ public sealed partial class MainWindow : WindowEx
     private AppSettings? _savedSettings;
     private int _pendingRenderScale = 67;
     private ReconstructionStatus? _lastReconstructionStatus;
+    private int _lastSceneRevision = -1;
     private ComboBox ShaderSelector => _settings.ShaderSelector;
     private ComboBox ModelSelector => _settings.ModelSelector;
     private ComboBox DenoiserSelector => _settings.DenoiserSelector;
@@ -45,6 +47,7 @@ public sealed partial class MainWindow : WindowEx
     private HdrDisplayInfoTracker? _hdrTracker;
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private IShaderPass? _activePass;
+    private SceneSession? ActiveSession => (_activePass as ISceneShaderPass)?.Session;
     private bool _hdrAutoEnabled;
     private bool _hdrDetectionInitialized;
     private bool _layoutInitialized;
@@ -75,21 +78,21 @@ public sealed partial class MainWindow : WindowEx
         _renderScaleTimer.Tick += (_, _) =>
         {
             _renderScaleTimer.Stop();
-            if (_activePass is RayTracePass pass) pass.RenderScalePercent = _pendingRenderScale;
+            if (ActiveSession is { } pass) pass.RenderScalePercent = _pendingRenderScale;
         };
         HdrToggle.Toggled += OnHdrToggled;
         ModelSelector.SelectionChanged += (_, _) =>
         {
-            if (!_syncingRayTraceParams && ModelSelector.SelectedIndex >= 0 && _activePass is RayTracePass pass)
+            if (!_syncingRayTraceParams && ModelSelector.SelectedIndex >= 0 && ActiveSession is { } pass)
             {
                 pass.SceneIndex = ModelSelector.SelectedIndex;
                 _settings.ExposureBox.Value = pass.Exposure;
             }
         };
         _settings.ResetCameraButton.Click += OnResetCamera;
-        _settings.CameraSpeedBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.Camera.Speed = (float)e.NewValue; };
-        _settings.EnvironmentBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.EnvironmentIntensity = (float)e.NewValue; };
-        _settings.ExposureBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && _activePass is RayTracePass pass && double.IsFinite(e.NewValue)) pass.Exposure = (float)e.NewValue; };
+        _settings.CameraSpeedBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && ActiveSession is { } pass && double.IsFinite(e.NewValue)) pass.Camera.Speed = (float)e.NewValue; };
+        _settings.EnvironmentBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && ActiveSession is { } pass && double.IsFinite(e.NewValue)) pass.EnvironmentIntensity = (float)e.NewValue; };
+        _settings.ExposureBox.ValueChanged += (_, e) => { if (!_syncingRayTraceParams && ActiveSession is { } pass && double.IsFinite(e.NewValue)) pass.Exposure = (float)e.NewValue; };
         _settings.SunToggle.Toggled += (_, _) => ApplySunSettings();
         _settings.SunAzimuthBox.ValueChanged += (_, _) => ApplySunSettings();
         _settings.SunElevationBox.ValueChanged += (_, _) => ApplySunSettings();
@@ -97,7 +100,7 @@ public sealed partial class MainWindow : WindowEx
         _settings.SunAngularDiameterBox.ValueChanged += (_, _) => ApplySunSettings();
         _settings.ModelLightingOnlyToggle.Toggled += (_, _) =>
         {
-            if (!_syncingRayTraceParams && _activePass is RayTracePass pass)
+            if (!_syncingRayTraceParams && ActiveSession is { } pass)
                 pass.ExternalLightingEnabled = !_settings.ModelLightingOnlyToggle.IsOn;
         };
         _settings.DiagnosticsToggle.Toggled += (_, _) => { if (_shaderPanel != null) _shaderPanel.ShowDiagnostics = _settings.DiagnosticsToggle.IsOn; };
@@ -106,7 +109,7 @@ public sealed partial class MainWindow : WindowEx
         DxrDevice.TryActivateAgilityRuntime();
 
         // Create the GPU device and shader panel
-        _device.Initialize();
+        _device.Initialize(requireRayTracing: false);
         _factory = new ShaderFactory();
 
         _shaderPanel = new HdrShaderPanel(_device);
@@ -115,7 +118,7 @@ public sealed partial class MainWindow : WindowEx
         // Populate shader selector and restore the persisted shader
         ShaderSelector.ItemsSource = ShaderFactory.Catalog;
         _savedSettings = AppSettingsStore.Load();
-        ShaderSelector.SelectedIndex = FindShaderIndex(_savedSettings?.ShaderId);
+        ShaderSelector.SelectedIndex = _device.SupportsRayTracing ? FindShaderIndex(_savedSettings?.ShaderId) : FindShaderIndex("raster");
 
         // Mouse tracking
         _shaderPanel.PointerMoved += OnPointerMoved;
@@ -188,12 +191,23 @@ public sealed partial class MainWindow : WindowEx
     {
         if (e.AddedItems.FirstOrDefault() is ShaderAuthoringInfo info)
         {
-            SwitchShader(info);
+            try { SwitchShader(info); }
+            catch (Exception error)
+            {
+                if (_activePass != null) ShaderSelector.SelectedIndex = FindShaderIndex(_activePass.Id);
+                _settings.ErrorText.Text = "管线初始化失败：" + error.Message;
+            }
         }
     }
 
     private void SwitchShader(ShaderAuthoringInfo info)
     {
+        if (info.Id == "ray-trace" && !_device.SupportsRayTracing)
+        {
+            ShaderSelector.SelectedIndex = FindShaderIndex("raster");
+            _settings.ErrorText.Text = "当前设备不支持 DXR，请使用光栅化管线。";
+            return;
+        }
         // Cached passes stay alive until the renderer has stopped. Never dispose GPU resources on this UI thread.
 
         var pass = _factory.GetOrCreate(info.Id);
@@ -204,7 +218,18 @@ public sealed partial class MainWindow : WindowEx
             size = new RenderSize((int)_shaderPanel.ActualWidth, (int)_shaderPanel.ActualHeight);
         }
 
-        if (_initializedPasses.Add(pass)) pass.Initialize(_device, size);
+        if (!_initializedPasses.Contains(pass))
+        {
+            // 从光栅入口启动时也恢复路径专属设置，不能依赖禁用控件的事件写回。
+            if (pass is RayTracePass path && _savedSettings is { } saved)
+            {
+                if (AppSettingsStore.DenoiserSelection(saved) is int denoiser) path.DenoiserMode = (RayTraceDenoiserMode)denoiser;
+                if (saved.Samples is double samples && double.IsFinite(samples)) path.Samples = (int)Math.Clamp(samples, 1, 16);
+                if (saved.MaxBounces is double bounces && double.IsFinite(bounces)) path.MaxBounces = (int)Math.Clamp(bounces, 1, 32);
+            }
+            pass.Initialize(_device, size);
+            _initializedPasses.Add(pass);
+        }
         pass.OnResize(size);
 
         _shaderPanel.ShaderRunner = pass;
@@ -213,9 +238,9 @@ public sealed partial class MainWindow : WindowEx
 
         _settings.ErrorText.Text = string.Empty;
 
-        if (pass is RayTracePass rayTracePass)
+        if (pass is ISceneShaderPass)
         {
-            SyncRayTraceParams(rayTracePass);
+            SyncSceneParams();
         }
         else
         {
@@ -231,17 +256,25 @@ public sealed partial class MainWindow : WindowEx
     // Populates the ray-trace parameter bar from the pass state. The sync flag keeps the
     // control change handlers from writing back (and resetting the frame counter) while
     // the controls are being initialized.
-    private void SyncRayTraceParams(RayTracePass pass)
+    private void SyncSceneParams()
     {
+        if (ActiveSession is not { } pass) return;
         _syncingRayTraceParams = true;
         try
         {
             RayTraceParamBar.Visibility = Visibility.Visible;
             if (!ReferenceEquals(ModelSelector.ItemsSource, pass.Scenes)) ModelSelector.ItemsSource = pass.Scenes;
             ModelSelector.SelectedIndex = pass.SceneIndex;
-            DenoiserSelector.SelectedIndex = (int)pass.DenoiserMode;
-            MaxBouncesBox.Value = pass.MaxBounces;
-            SamplesBox.Value = pass.Samples;
+            if (_activePass is RayTracePass trace)
+            {
+                DenoiserSelector.SelectedIndex = (int)trace.DenoiserMode;
+                MaxBouncesBox.Value = trace.MaxBounces;
+                SamplesBox.Value = trace.Samples;
+            }
+            DenoiserSelector.IsEnabled = _activePass is RayTracePass;
+            MaxBouncesBox.IsEnabled = _activePass is RayTracePass;
+            SamplesBox.IsEnabled = _activePass is RayTracePass;
+            _settings.SunAngularDiameterBox.IsEnabled = _activePass is RayTracePass;
             _settings.ReconstructionSelector.SelectedIndex = pass.ReconstructionMode switch
             {
                 ReconstructionMode.Fsr => 1, ReconstructionMode.XeSS => 2, ReconstructionMode.Dlss => 3, ReconstructionMode.DlssRayReconstruction => 4, _ => 0
@@ -256,6 +289,7 @@ public sealed partial class MainWindow : WindowEx
             _settings.SunIntensityBox.Value = pass.Sun.Intensity;
             _settings.SunAngularDiameterBox.Value = pass.Sun.AngularDiameter;
             _settings.ModelLightingOnlyToggle.IsOn = !pass.ExternalLightingEnabled;
+            _lastSceneRevision = pass.Snapshot.SceneRevision;
         }
         finally
         {
@@ -265,7 +299,7 @@ public sealed partial class MainWindow : WindowEx
 
     private void OnReconstructionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
+        if (_syncingRayTraceParams || ActiveSession is not { } pass) return;
         pass.ReconstructionMode = _settings.ReconstructionSelector.SelectedIndex switch
         {
             1 => ReconstructionMode.Fsr, 2 => ReconstructionMode.XeSS, 3 => ReconstructionMode.Dlss, 4 => ReconstructionMode.DlssRayReconstruction, _ => ReconstructionMode.Off
@@ -276,7 +310,7 @@ public sealed partial class MainWindow : WindowEx
 
     private void ApplySunSettings()
     {
-        if (_syncingRayTraceParams || _activePass is not RayTracePass pass) return;
+        if (_syncingRayTraceParams || ActiveSession is not { } pass) return;
         double azimuth = _settings.SunAzimuthBox.Value, elevation = _settings.SunElevationBox.Value, intensity = _settings.SunIntensityBox.Value;
         double diameter = _settings.SunAngularDiameterBox.Value;
         if (!double.IsFinite(azimuth) || !double.IsFinite(elevation) || !double.IsFinite(intensity) || !double.IsFinite(diameter)) return;
@@ -293,19 +327,20 @@ public sealed partial class MainWindow : WindowEx
 
     private void RefreshReconstructionUi()
     {
-        if (_activePass is RayTracePass selected && ModelSelector.SelectedIndex != selected.SceneIndex)
-            SyncRayTraceParams(selected);
-        if (_activePass is not RayTracePass pass || pass.ReconstructionStatus is not ReconstructionStatus status ||
+        if (ActiveSession is { } selected && (ModelSelector.SelectedIndex != selected.SceneIndex ||
+            !ReferenceEquals(ModelSelector.ItemsSource, selected.Scenes) || _lastSceneRevision != selected.Snapshot.SceneRevision))
+            SyncSceneParams();
+        if (ActiveSession is not { } pass || pass.ReconstructionStatus is not ReconstructionStatus status ||
             ReferenceEquals(_lastReconstructionStatus, status)) return;
         _lastReconstructionStatus = status;
         _settings.ReconstructionSelector.IsEnabled = true;
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[1]).IsEnabled = status.Supports(ReconstructionMode.Fsr);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[2]).IsEnabled = status.Supports(ReconstructionMode.XeSS);
         ((ComboBoxItem)_settings.ReconstructionSelector.Items[3]).IsEnabled = status.Supports(ReconstructionMode.Dlss);
-        ((ComboBoxItem)_settings.ReconstructionSelector.Items[4]).IsEnabled = status.Supports(ReconstructionMode.DlssRayReconstruction);
-        DenoiserSelector.IsEnabled = status.Active != ReconstructionMode.DlssRayReconstruction;
+        ((ComboBoxItem)_settings.ReconstructionSelector.Items[4]).IsEnabled = _activePass is RayTracePass && status.Supports(ReconstructionMode.DlssRayReconstruction);
+        DenoiserSelector.IsEnabled = _activePass is RayTracePass && status.Active != ReconstructionMode.DlssRayReconstruction;
         ((ComboBoxItem)_settings.DenoiserSelector.Items[2]).IsEnabled = status.NrdAvailable;
-        ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.OptixAvailable && pass.SupportsOptix;
+        ((ComboBoxItem)_settings.DenoiserSelector.Items[3]).IsEnabled = status.OptixAvailable && _activePass is RayTracePass trace && trace.SupportsOptix;
         _settings.RenderScaleSlider.IsEnabled = pass.ReconstructionMode != ReconstructionMode.Off;
         _settings.ReconstructionStatusText.Text = status.Message;
     }
@@ -401,7 +436,7 @@ public sealed partial class MainWindow : WindowEx
     {
         int index = ModelSelector.SelectedIndex;
         // 未保存导入文件路径，不能把仅在当前会话有效的场景索引写入下次启动的设置。
-        return index >= 0 && index < RayTracePass.PackagedSceneCount ? index : null;
+        return index >= 0 && index < SceneCatalog.Packaged.Count ? index : null;
     }
 
     private void WireSettingsPersistence()
@@ -464,7 +499,7 @@ public sealed partial class MainWindow : WindowEx
 
     private void OnPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (_activePass is not RayTracePass pass || _dragPointer != e.Pointer.PointerId) return;
+        if (ActiveSession is not { } pass || _dragPointer != e.Pointer.PointerId) return;
         var point = e.GetCurrentPoint(_shaderPanel);
         float dx = (float)((point.Position.X - _previousPointer.X) / Math.Max(1, _shaderPanel.ActualWidth));
         float dy = (float)((point.Position.Y - _previousPointer.Y) / Math.Max(1, _shaderPanel.ActualHeight));
@@ -477,7 +512,7 @@ public sealed partial class MainWindow : WindowEx
 
     private void OnPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        if (_activePass is not RayTracePass pass) return;
+        if (ActiveSession is not { } pass) return;
         ViewportFocus.Focus(FocusState.Pointer);
         var point = e.GetCurrentPoint(_shaderPanel);
         bool rotate = pass.Camera.Mode == CameraMode.Orbit ? point.Properties.IsLeftButtonPressed : point.Properties.IsRightButtonPressed;
@@ -501,7 +536,7 @@ public sealed partial class MainWindow : WindowEx
     };
     private void OnCameraKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (_activePass is not RayTracePass pass) return;
+        if (ActiveSession is not { } pass) return;
         if (e.Key == VirtualKey.R) { pass.ResetCamera(); _movement = 0; e.Handled = true; return; }
         if (e.Key == VirtualKey.Escape) { ClearCameraInput(); e.Handled = true; return; }
         if (pass.Camera.Mode != CameraMode.Fly) return;
@@ -511,24 +546,24 @@ public sealed partial class MainWindow : WindowEx
     private void OnCameraKeyUp(object sender, KeyRoutedEventArgs e)
     {
         CameraMovement key = MovementKey(e.Key); if (key == 0) return;
-        _movement &= ~key; if (_activePass is RayTracePass pass) pass.Camera.SetMovement(_movement); e.Handled = true;
+        _movement &= ~key; if (ActiveSession is { } pass) pass.Camera.SetMovement(_movement); e.Handled = true;
     }
     private void OnViewportLostFocus(object sender, RoutedEventArgs e) => ClearCameraInput();
     private void ClearCameraInput()
     {
         _movement = 0; _dragPointer = null;
-        if (_activePass is RayTracePass pass) pass.Camera.SetMovement(0);
+        if (ActiveSession is { } pass) pass.Camera.SetMovement(0);
         _shaderPanel?.ReleasePointerCaptures();
     }
     private void OnCameraModeChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_activePass is not RayTracePass pass) return;
+        if (ActiveSession is not { } pass) return;
         ClearCameraInput(); pass.Camera.Mode = CameraModeSelector.SelectedIndex == 1 ? CameraMode.Fly : CameraMode.Orbit;
         NavigationHint.Text = pass.Camera.Mode == CameraMode.Fly ? "点击视口后 WASD 移动 · Q/E 升降 · 右键观察 · Shift 加速 · 滚轮调速 · R 重置" :
             "左键旋转 · 中键平移 · 滚轮缩放 · 拖入 glTF / GLB 打开";
         ViewportFocus.Focus(FocusState.Programmatic);
     }
-    private void OnResetCamera(object sender, RoutedEventArgs e) { ClearCameraInput(); if (_activePass is RayTracePass pass) pass.ResetCamera(); }
+    private void OnResetCamera(object sender, RoutedEventArgs e) { ClearCameraInput(); if (ActiveSession is { } pass) pass.ResetCamera(); }
     private async void OnOpenModel(object sender, RoutedEventArgs e) => await PickModelAsync();
     private async void OnOpenModelShortcut(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs e) { e.Handled = true; await PickModelAsync(); }
     private async Task PickModelAsync()
@@ -546,7 +581,7 @@ public sealed partial class MainWindow : WindowEx
     }
     private async Task LoadModelAsync(string path)
     {
-        if (_activePass is not RayTracePass pass) return;
+        if (ActiveSession is not { } pass) return;
         _loadCancellation?.Cancel();
         using var cancellation = new CancellationTokenSource(); _loadCancellation = cancellation;
         ClearCameraInput(); CancelLoadButton.Visibility = Visibility.Visible; SceneLoadStatus.Visibility = Visibility.Visible;
@@ -555,7 +590,7 @@ public sealed partial class MainWindow : WindowEx
         {
             var document = await pass.ImportAsync(path, cancellation.Token);
             if (_disposed || !ReferenceEquals(_loadCancellation, cancellation)) return;
-            SyncRayTraceParams(pass);
+            SyncSceneParams();
             var scene = document.Scenes[document.DefaultScene];
             SceneLoadStatus.Text = $"{System.IO.Path.GetFileName(path)} · {scene.Instances.Length} 实例 · {scene.Materials.Length - 1} 材质 · {scene.Textures.Length} 贴图 · {scene.Lights.Length} 灯光" +
                 (scene.Warnings.Length > 0 ? "\n" + string.Join("\n", scene.Warnings) : "");

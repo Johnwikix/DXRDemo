@@ -150,8 +150,8 @@ void Prepare(uint3 tid : SV_DispatchThreadID)
     float2 motion = previousPixel - currentPixel; // remove jitter by projecting both unjittered cameras
     if (Control.x != 0 || previousZ <= 0) motion = 0;
     Motion[p] = clamp(motion, -32700, 32700);
-    // Conventional finite perspective depth: near=0.01, far=1000, FOV=2*atan(0.5).
-    Depth[p] = sky ? 1 : saturate(Projection.z / (Projection.z-Projection.y) - Projection.z*Projection.y / ((Projection.z-Projection.y) * max(currentZ, Projection.y)));
+    // 公共帧统一 finite reverse-Z；厂商端点自行转换为桥接 ABI 所需的 forward-Z。
+    Depth[p] = sky ? 0 : saturate(Projection.y * (Projection.z / max(currentZ, Projection.y) - 1) / (Projection.z - Projection.y));
     Reactive[p] = Projection.w != 0 ? PbrAlbedo[p].a : 0;
 
     float3 value = max(Raw[p].rgb, 0);
@@ -349,26 +349,4 @@ void ComposeNrd(uint3 tid : SV_DispatchThreadID)
     }
     if (surface.w < 0 || viewZ >= Projection.z) color = Raw[p].rgb;
     Color[p] = float4(max(color, 0), 1);
-}
-
-[numthreads(8, 8, 1)]
-void Encode(uint3 tid : SV_DispatchThreadID)
-{
-    if (any(tid.xy >= uint2(Size.zw))) return;
-    float3 color = max(Reconstructed[tid.xy].rgb, 0) * exp2(OutputParameters.w);
-    if (OutputParameters.x != 0)
-    {
-        if (Projection.w != 0) color /= 1 + color / max(OutputParameters.z / OutputParameters.y, 1);
-        color = float3(dot(color, float3(0.627404, 0.329283, 0.043313)),
-                       dot(color, float3(0.069097, 0.919540, 0.011362)),
-                       dot(color, float3(0.016391, 0.088013, 0.895595)));
-        float3 y = pow(min(color * OutputParameters.y, OutputParameters.z) / 10000, 0.1593017578125);
-        color = pow((0.8359375 + 18.8515625 * y) / (1 + 18.6875 * y), 78.84375);
-    }
-    else
-    {
-        if (Projection.w != 0) color = saturate((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14));
-        color = pow(color, 1.0 / 2.2);
-    }
-    Encoded[tid.xy] = float4(color, 1);
 }

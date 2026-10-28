@@ -29,7 +29,7 @@ internal static unsafe class NrdMotionProbe
         using var device = DxrDevice.CreateDefault();
         using var native = device.Device.QueryInterface<ID3D12Device5>();
         using var messages = native.QueryInterface<ID3D12InfoQueue>();
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         sr.Configure(ReconstructionMode.Off, 100, width, height, true);
         Require(sr.Status.NrdActive, sr.Status.Message);
         using var raw = device.CreateTexture2D<Float4>(width, height);

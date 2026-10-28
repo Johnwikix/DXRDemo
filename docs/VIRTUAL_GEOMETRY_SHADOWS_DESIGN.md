@@ -1,6 +1,6 @@
 # 虚拟几何、动态无缝 LOD 与 VSM 联合设计
 
-状态：设计提案，尚未实现。初稿：2026-10-26；审查修订：2026-10-27。
+状态：设计与实施跟踪；M0.1 已开始实现共享场景与逻辑身份，虚拟几何/VSM 尚未实现。初稿：2026-10-26；审查修订：2026-10-28。
 
 本文补充[主渲染管线设计](RASTER_PIPELINE_DESIGN.md)，对应新增的两个目标：类似 Nanite 的运行时几何细节选择，以及类似 UE5 Virtual Shadow Maps 的直接光阴影。二者使用同一个场景、几何层级、裁剪器和间接绘制基础设施。
 
@@ -45,9 +45,11 @@ flowchart TD
 
 当前 [SceneAsset.cs](../DXRDemo/Scene/SceneAsset.cs) 中每个 `SceneMesh` 只有一个材质，[GltfImporter.cs](../DXRDemo/Assets/Importers/GltfImporter.cs) 又会把同一 glTF 逻辑网格的各 primitive 拆成独立 `SceneMesh/SceneInstance`。为落实跨材质 cluster 而不永久锁死拓扑，共享输入必须补充稳定 `LogicalMeshId`、`GeometryInstanceId` 和 primitive material ranges；派生几何以逻辑网格构建、以逻辑几何实例选择，原始 RT 的网格/实例映射保持不变。
 
-同一 `GeometryInstanceId` 下的所有材质桶必须消费同一个合法 Cut 和同一组滞回状态，不能按拆分后的 primitive 各自选择层级。缺少显式身份的旧资产只能按单 primitive 保守构建并保留外边界，不得按名称、相同变换或空间接近程度启发式合并。
+同一几何视图族中，同一 `GeometryInstanceId` 下的所有材质桶必须消费同一个合法 Cut 和同一组滞回状态，不能按拆分后的 primitive 各自选择层级。滞回/驻留选择键是 `(GeometryInstanceId, GeometryViewFamilyKey)`；主相机、各 Card 捕获以及各灯光 face/clipmap/mip 必须隔离选择状态，不能只用 GeometryInstanceId 让不同投影互相覆盖。缺少显式身份的旧资产只能按单 primitive 保守构建并保留外边界，不得按名称、相同变换或空间接近程度启发式合并。
 
 `GeometryView` 描述投影、裁剪体积、误差目标和用途。主视图、阴影页、Surface Card 捕获用相同的遍历与绘制接口，分别得到不可变的 `GeometryCut`。一个 frame 中的深度预通道与 GBuffer 必须使用同一个主视图 Cut。
+
+同一个灯光 face/clipmap/mip 内，先依据一致的投影误差与视图族状态确定几何 Cut，再按各脏页的裁剪体积生成绘制桶；不能让相邻物理页各自维护不同滞回状态，使同一表面在页边界使用不一致的表示。视图族身份不包含物理 slot 或相机平移后的页窗口位置，投影语义变化才更新其 epoch。
 
 ## 3. 离线/后台几何构建
 
@@ -133,7 +135,7 @@ Geomorph 还需保存上一帧形变状态来生成运动矢量，处理 UV/法�
 1. 从当前深度、VSM 之前的 `TransparentReceiverPrepass` 和需要更新的 Surface Cards 生成 shadow requests，计算光源影响与接收表面的投影精度。预通道只产生接收位置/深度及请求所需语义，正式透明着色在其后复用结果；首期不隐式读取尚未执行的透明最终 pass，也不把上一帧透明数据当作无条件有效的当前帧输入。
 2. 请求覆盖滤波 footprint，并压缩去重。每个 light 保留预算内的低分辨率常驻覆盖；方向光优先主视图，局部光按贡献排序。
 3. 合并失效信息，分配或复用 PhysicalSlot，生成 dirty-page 列表；新页在清理、绘制完成前不对查询发布为有效。
-4. 阴影专用 GeometryView 按页/clipmap 裁剪候选 cluster，以 shadow-texel 误差选择合法 Cut，并生成页绘制桶。
+4. 阴影专用 GeometryView 按 face/clipmap/mip 的统一投影误差与视图族状态选择合法 Cut，再按各脏页体积裁剪候选 cluster，生成页绘制桶。
 5. 清理并绘制脏页，转换资源状态后发布有效页表，供直接光与透明阶段查询。
 
 投影中的 caster 裁剪按光空间体积执行，不只遍历主相机可见列表；屏幕外物体仍可能向画面内投影阴影。方向光还需为接收区域沿光线方向扩展 caster 查询范围，避免裁掉靠近光源一侧的遮挡物。
@@ -249,4 +251,4 @@ DXRDemo/Shaders/Shadows/             # feedback、page、projection、SMRT
 
 上述主视图 LOD0 与缺身份时的单 primitive 回退是审查后增加的正确性门槛，不是可选优化；它们用于把虚拟几何/VSM 的独立验收与尚未解决的混合表示风险隔离开。
 
-目前仅完成 2026-10-27 的设计审查修订，没有实现或验证上述运行时系统。
+2026-10-28 复审补充了几何视图族状态隔离和同投影阴影页的 Cut 一致性要求。M0.1 已开始抽取共享 SceneSession/SceneCatalog，导入器保留 LogicalMeshId、GeometryInstanceId 和 primitive ranges；具体执行与验证见主设计的实施记录。虚拟几何运行时、VSM 和 Geomorph 仍待后续阶段实现。

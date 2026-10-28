@@ -141,6 +141,10 @@ public sealed class DxrShaderCompiler : IDisposable
     public void CompileCompute(string entryHlsl, string entryPoint)
         => Compile(entryHlsl, "cs_6_0", entryPoint);
 
+    /// <summary>编译原生光栅图形阶段；共享同一 DXC 发现与错误报告逻辑。</summary>
+    public void CompileGraphics(string entryHlsl, string entryPoint, bool pixelShader = false)
+        => Compile(entryHlsl, pixelShader ? "ps_6_0" : "vs_6_0", entryPoint);
+
     private void Compile(string entryHlsl, string profile, string? entryPoint, bool useSer = false, bool useShaderModel69 = false, bool reorderThreads = true)
     {
         if (!File.Exists(entryHlsl))

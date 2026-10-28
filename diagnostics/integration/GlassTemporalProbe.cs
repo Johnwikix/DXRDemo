@@ -76,7 +76,7 @@ internal static unsafe class GlassTemporalProbe
         backend.SetScene(scene with { Instances=scene.Instances.Where(i=>i.Mesh is not (48 or 49)).ToArray() });
         backend.Trace(view,0,1,4,default,0,referenceRaw,referenceNormal,referenceSurface,referenceGuide,referenceSignals);
         var reference=referenceRaw.ToArray();backend.SetScene(scene);
-        using var sr=new SuperResolutionRenderer(device);
+        using var sr=new PathTracingResolve(device);
         using var target=device.CreateTexture2D<Rgba64>(width,height);
         var results=new List<Result>();Directory.CreateDirectory(output);
         foreach(var mode in new[] { ReconstructionMode.Fsr,ReconstructionMode.XeSS,ReconstructionMode.Dlss })

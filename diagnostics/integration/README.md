@@ -1,5 +1,21 @@
 # Offline RTXPT validation
 
+`--raster` 检查真实 LOD0 光栅：GBuffer/PBR、reverse-Z 与极端 near/far 精度、非零 mesh vertex/index offset、去抖 motion、视锥/镜像/单双面、材质贴图、MASK/BLEND、独立折射快照、CSM/点光/聚光阴影，以及 70 灯簇容量溢出时的能量守恒。
+
+`--common-frame` 检查共享 LinearFrame 与 NativeTAA 的历史/响应/遮挡失效/cut，SDR/HDR 对照独立 CPU 编码，真实 FSR/XeSS/DLSS SR 与路径 DLSSD（不允许回退），跨管线共享相机/GPU 资源、失败候选、尺寸/HDR 及 WARP 无 AS 出图。WARP 是否报告 DXR 由运行日志给出，不把它当作无 DXR 物理设备的覆盖。所有新增 GPU 模式均要求 D3D12 Error/Corruption=0。
+
+`--raster-scenes` 在 160×100、无 jitter、固定相机下，逐一对照四个封装资产的光栅深度与既有 DxrSceneBackend 主射线。材质副本关闭 alpha/透射以隔离几何；透明由 `--raster` 单独覆盖。深度断言计入 1/256 像素取整误差，薄片遮挡变化使用独立 CPU 三角形固定网格投影/插值复核（相对 4e-6 加绝对 1e-10），不把连续射线深度当成逐位相同的硬件光栅结果。CPU 参考只处理当前回查样本的未跨近面三角形；缺少可验证参考仍触发失败。覆盖率必须超过 .98，各场景有效深度比较超过 100。
+
+`--scene-session` 是 2026-10-28 新增的无 GPU 事务回归：解析/上传失败、取消、旧解析与旧上传迟到、失败导入恢复目录选择、关闭与空闲帧复用；还检查多材质逻辑网格、同名同变换但不同节点的身份、重新导入的稳定性与未知身份回退。
+
+`--scene-session-gpu` 用 64×48 原生帧执行真实 GPU 上传、非法候选失败恢复、导入目录提交及共享会话借用生命周期；要求 D3D12 Error/Corruption 为零。该模式固定关闭 SR/降噪以隔离场景事务，不代表厂商 SDK 或画质回归。
+
+`--gpu-scene-cache` 验证一个共享设备上的公共 GPU 场景租约、按需 LOD0 BLAS/TLAS、两个真实 DXR 后端的独立可写描述符、交错渲染像素完全一致、缩放/消费者销毁隔离、取消/失败/放弃候选、缓存先关闭和最后租约释放。空闲项必须为 0；不同设备用 WARP 身份验证拒绝共享，不用 WARP 渲染。要求 D3D12 Error/Corruption 为零，不作性能或异步退休结论。
+
+`--scene-core` 执行 `--scene` 前半段现有的完整资源/材质/灯光断言（glTF/GLB、实例与 mip、MASK/BLEND、金属/自发光、点/聚光/方向光、太阳阴影、三种降噪及真实 NRD），末尾核对 debug queue。它不执行后半启动/导入/厂商模式检查，不能计作完整 `--scene` 通过；默认入口和阈值不变。
+
+`--hud` 验证原生 GPU 诊断信息的字体/字符常量缓冲布局，逐像素对照已知字形，覆盖非四元素对齐的字符、跨文本行、1×/2× 尺寸、SDR/HDR 编码白值及生产 HUD 绘制；要求存在实际亮字形像素，且 D3D12 Error/Corruption 为零。它验证显示契约，不把 HUD 的 FPS 计数当作基准。
+
 `IntegrationProbe.exe --offline` renders exactly one 256×144, 4-SPP frame with
 256-pixel textures, no window, warmup, photon pass, denoiser or SR. It saves PNG,
 RGBA32F and JSON to `output/rtxpt-offline`. `--cpu-only` checks assets, the authored

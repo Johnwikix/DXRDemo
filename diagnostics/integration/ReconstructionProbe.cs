@@ -27,7 +27,7 @@ internal static unsafe class ReconstructionProbe
         using var queue = native.QueryInterface<ID3D12InfoQueue>();
         using var pass = new RayTracePass();
         pass.Initialize(device, default);
-        pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+        pass.SceneIndex = SceneCatalog.RainyCorner;
         pass.ReconstructionMode = ReconstructionMode.Off;
         pass.DenoiserMode = RayTraceDenoiserMode.NrdRelax;
         using var target = device.CreateTexture2D<Rgba64>(480, 270);
@@ -89,10 +89,10 @@ internal static unsafe class ReconstructionProbe
                 Require(pass.ReconstructionStatus.InputWidth == 148 && pass.ReconstructionStatus.InputHeight == 83, "Odd resize dimensions");
                 VerifyPixels(odd); VerifyDebug(queue);
             }
-            pass.SceneIndex = RayTracePass.RtxptKitchenSceneIndex;
+            pass.SceneIndex = SceneCatalog.Kitchen;
             Render(pass, target, false, 3);
             VerifyPixels(target); VerifyDebug(queue);
-            pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+            pass.SceneIndex = SceneCatalog.RainyCorner;
             using (var tinyInput = device.CreateTexture2D<Rgba64>(1600, 900))
             {
                 pass.RenderScalePercent = 1;
@@ -173,7 +173,7 @@ internal static unsafe class ReconstructionProbe
     {
         var mode = status.Supports(ReconstructionMode.Fsr) ? ReconstructionMode.Fsr : ReconstructionMode.XeSS;
         Require(status.Supports(mode), "No SR provider available for guide verification");
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         using var backend = new DxrSceneBackend { CausticsEnabled = false };
         backend.Initialize(device);
         backend.SetScene(GlassReconstructionProbe.Fixture());
@@ -200,7 +200,7 @@ internal static unsafe class ReconstructionProbe
         float[] still = ReadTexture(native, sr.Motion, true);
         Require(still.Max(Math.Abs) < 0.002f, "Static motion incorrectly includes jitter");
         float[] depth = ReadTexture(native, sr.Depth, false);
-        Require(depth.All(x => float.IsFinite(x) && x is >= 0 and <= 1) && depth.Min() < 0.999f && depth.Max() > 0.9999f, "Invalid device depth");
+        Require(depth.All(x => float.IsFinite(x) && x is >= 0 and <= 1) && depth.Max() > 1 - 0.999f && depth.Min() < 1 - 0.9999f, "Invalid reverse-Z device depth");
         Frame(new(0.05f, 0.165f), new(0.1f, -0.2f), 2);
         float[] moving = ReadTexture(native, sr.Motion, true);
         Require(moving.All(float.IsFinite) && moving.Max(Math.Abs) > 0.1f, "Moving camera did not produce finite nonzero motion");
@@ -235,7 +235,7 @@ internal static unsafe class ReconstructionProbe
             int index = y * width + x;
             Require(MathF.Abs(motion[index * 2] - mx) < 0.02f && MathF.Abs(motion[index * 2 + 1] - my) < 0.02f,
                 "Motion vector disagrees with independent CPU view/projection matrices");
-            Require(MathF.Abs(depth[index] - a.Z / a.W) < 0.00001f, "Depth disagrees with camera projection");
+            Require(MathF.Abs(depth[index] - (1 - a.Z / a.W)) < 0.00001f, "Depth disagrees with camera projection");
             checkedPixels++;
         }
         Require(checkedPixels > 50, "Insufficient geometry samples for projection verification");
@@ -248,7 +248,7 @@ internal static unsafe class ReconstructionProbe
         foreach (var mode in new[] { ReconstructionMode.Fsr, ReconstructionMode.XeSS })
         {
             if (!status.Supports(mode)) continue;
-            using var sr = new SuperResolutionRenderer(device);
+            using var sr = new PathTracingResolve(device);
             sr.Configure(mode, 67, 320, 180);
             Require(sr.Active == mode, sr.Status.Message);
             int width = sr.InputWidth, height = sr.InputHeight;
@@ -332,7 +332,7 @@ internal static unsafe class ReconstructionProbe
         SceneDocument document = RtxptAssets.LoadAsync(RtxptScene.Convergence).GetAwaiter().GetResult();
         SceneAsset asset = document.Scenes[document.DefaultScene];
         CameraFrame camera = asset.DefaultCamera ?? throw new InvalidOperationException("Convergence fixture has no authored camera");
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         sr.Configure(ReconstructionMode.Off, 100, width, height, true, true);
         Require(sr.Status.NrdActive, sr.Status.Message);
         sr.PrepareStablePlanes();
@@ -410,7 +410,7 @@ internal static unsafe class ReconstructionProbe
         Require(ReadTexture(native, sr.DenoisedColor, true).All(float.IsFinite), "Nonfinite NRD output while moving camera");
         sr.Reset(); Frame(0, camera, 1);
         float[] reset = ReadTexture(native, sr.DenoisedColor, true);
-        using var fresh = new SuperResolutionRenderer(device);
+        using var fresh = new PathTracingResolve(device);
         fresh.Configure(ReconstructionMode.Off, 100, width, height, true, true);
         fresh.PrepareStablePlanes();
         Require(fresh.Execute(raw, normals, surfaces, target, default, 0, default,

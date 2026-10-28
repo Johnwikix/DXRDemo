@@ -53,7 +53,7 @@ internal static class SceneProbe
             for(int y=0;y<height;y++)for(int x=0;x<width;x++){int p=(y*width+x)*3;var v=values[y,x];reference[p]+=v.X/32;reference[p+1]+=v.Y/32;reference[p+2]+=v.Z/32;}
         }
         Trace(47,2); var noisy=raw.ToArray();
-        using var sr=new SuperResolutionRenderer(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
+        using var sr=new PathTracingResolve(device);sr.Configure(ReconstructionMode.Off,100,width,height,true,true);
         double[] noisySum=new double[width*height*3],noisySquare=new double[width*height*3];
         double[] stableSum=new double[width*height*3],stableSquare=new double[width*height*3];
         double[] linearSum=new double[width*height*3];
@@ -247,7 +247,7 @@ internal static class SceneProbe
         Console.WriteLine("PASS: only-model-lighting preview, actual NRD, output/scenes/RainyCorner-dxr.png");
     }
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
-    internal static async Task Run(string? external = null)
+    internal static async Task Run(string? external = null, bool materialOnly = false)
     {
         Directory.CreateDirectory("output/scenes");
         using var debug = D3D12.D3D12GetDebugInterface<ID3D12Debug>(); debug.EnableDebugLayer();
@@ -353,7 +353,7 @@ internal static class SceneProbe
         VerifyDebug(debugQueue);
         Console.WriteLine($"PASS: MASK/BLEND (ratio {transparencyRatio:F3}), reactive mask, directional/spot lights, emissive surfaces, scale-invariant texture LOD.");
 
-        using var sr = new SuperResolutionRenderer(device);
+        using var sr = new PathTracingResolve(device);
         var sunlight = new SunLightSettings(true, 315, 40, 3, 0);
         backend.SetScene(asset with { Lights = [] }); Trace(0, sun: sunlight, bounces: 1);
         float sunEnergy = Energy(raw.ToArray()); Require(sunEnergy > .005, "Enabled sun is dark");
@@ -401,11 +401,17 @@ internal static class SceneProbe
         }
         Console.WriteLine($"PASS: DXR PBR energy={energy:F6}, lobe error={difference:E2}, metal, explicit lights, 3 denoisers, actual NRD {sr.NrdDispatchCount} dispatches.");
 
-        using var pass = (RayTracePass)DXRDemo.Shaders.ShaderCatalog.All[0].Factory(); pass.Initialize(device, default);
+        // 独立的资源/材质回归入口；默认 --scene 仍执行全部启动与厂商模式断言。
+        if (materialOnly) { VerifyDebug(debugQueue); return; }
+
+        using var session = new SceneSession { Exposure = 1.3f };
+        using var sceneCache = new DXRDemo.Rendering.GpuSceneCache();
+        using var sharedRenderer = new DXRDemo.Rendering.SceneRenderer();
+        using var pass = (RayTracePass)DXRDemo.Shaders.ShaderCatalog.All[0].Factory(session, sceneCache, sharedRenderer); pass.Initialize(device, default);
         var packagedDocument = await RtxptAssets.LoadAsync(RtxptScene.Kitchen);
         var packagedAsset = packagedDocument.Scenes[packagedDocument.DefaultScene];
         string packagedLightCount = $"{packagedAsset.Lights.Length} LIGHTS";
-        Require(pass.SceneIndex == RayTracePass.RtxptKitchenSceneIndex && pass.ExternalLightingEnabled &&
+        Require(pass.SceneIndex == SceneCatalog.Kitchen && pass.ExternalLightingEnabled &&
             pass.Exposure == RtxptAssets.InitialExposure(RtxptScene.Kitchen),
             "The application does not start with the packaged Kitchen demo");
         for (int attempt = 0; attempt < 24000 && pass.ReconstructionStatus?.NrdActive != true; attempt++)
@@ -420,12 +426,12 @@ internal static class SceneProbe
         while (!loading.IsCompleted) { pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default); await Task.Delay(1); }
         await loading;
         int previousScene = pass.SceneIndex;
-        Require(previousScene >= RayTracePass.PackagedSceneCount &&
-            pass.Scenes[RayTracePass.RtxptKitchenSceneIndex].FileName == RtxptAssets.KitchenPath,
+        Require(previousScene >= SceneCatalog.Packaged.Count &&
+            pass.Scenes[SceneCatalog.Kitchen].FileName == RtxptAssets.KitchenPath,
             "Import replaced the packaged demo catalog entry");
-        pass.SceneIndex = RayTracePass.RainyCornerSceneIndex;
+        pass.SceneIndex = SceneCatalog.RainyCorner;
         pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
-        pass.SceneIndex = RayTracePass.RtxptKitchenSceneIndex;
+        pass.SceneIndex = SceneCatalog.Kitchen;
         pass.TryExecute(target, width, height, TimeSpan.Zero, HdrRenderParameters.Default);
         Require(pass.DiagnosticText.Contains(packagedLightCount), "Cannot return to packaged demo after an import");
         pass.SceneIndex = previousScene;

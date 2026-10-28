@@ -18,6 +18,12 @@
     <Compile Include="Probe.cs" />
     <Compile Include="ReconstructionProbe.cs" />
     <Compile Include="SceneProbe.cs" />
+    <Compile Include="SceneSessionProbe.cs" />
+    <Compile Include="HudProbe.cs" />
+    <Compile Include="GpuSceneCacheProbe.cs" />
+    <Compile Include="RasterProbe.cs" />
+    <Compile Include="CommonFrameProbe.cs" />
+    <Compile Include="RasterSceneProbe.cs" />
     <Compile Include="GlassReconstructionProbe.cs" />
     <Compile Include="LightingProbe.cs" />
     <Compile Include="OfflineProbe.cs" />
@@ -34,18 +40,22 @@
     <Content Include="Shaders/*" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../DXRDemo/Shaders/ShaderCatalog.cs" />
     <Compile Include="../../DXRDemo/DXR/*.cs" />
+    <Compile Include="../../DXRDemo/Rendering/*.cs" />
     <Compile Include="../../DXRDemo/Shaders/RayTrace/*.cs" />
+    <Compile Include="../../DXRDemo/Shaders/Raster/*.cs" />
     <Compile Include="../../DXRDemo/SuperResolution/*.cs" />
     <Compile Include="../../DXRDemo/Camera/*.cs;../../DXRDemo/Scene/*.cs;../../DXRDemo/Assets/Importers/*.cs" />
-    <Compile Include="../../DXRDemo/Shaders/IShaderPass.cs;../../DXRDemo/Shaders/ShaderAuthor.cs;../../DXRDemo/Shaders/ShaderCapabilities.cs" />
+    <Compile Include="../../DXRDemo/Shaders/ISceneShaderPass.cs;../../DXRDemo/Shaders/IShaderPass.cs;../../DXRDemo/Shaders/ShaderAuthor.cs;../../DXRDemo/Shaders/ShaderCapabilities.cs" />
     <Compile Include="../../DXRDemo/Hdr/IHdrShaderRunner.cs;../../DXRDemo/Hdr/IRenderDiagnostics.cs;../../DXRDemo/Hdr/GpuDiagnostics.cs" />
     <Content Include="../../DXRDemo/Assets/Models/**" Link="Assets/Models/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../Samples/RainyCorner/RainyCorner.glb" Link="Assets/Models/RainyCorner.glb" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/FrameEffects.hlsl" Link="Shaders/DXR/FrameEffects.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Reconstruction.hlsl" Link="Shaders/DXR/Reconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/DisplayOutput.hlsl;../../DXRDemo/Shaders/DXR/CommonReconstruction.hlsl" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/StableReconstruction.hlsl" Link="Shaders/DXR/StableReconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli" Link="Shaders/DXR/SceneLighting.hlsli" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/Raster.hlsl;../../DXRDemo/Shaders/DXR/SceneTypes.hlsli;../../DXRDemo/Shaders/DXR/SceneEnvironment.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Path*.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/RTXPT/*.hlsli" Link="Shaders/DXR/RTXPT/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Licenses/RTXPT.txt" Link="Licenses/RTXPT.txt" CopyToOutputDirectory="PreserveNewest" />
