@@ -32,6 +32,8 @@ internal static unsafe partial class NativeNrd
     internal static partial int Create(nint device, uint width, uint height, out nint context);
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdCreatePbr")]
     internal static partial int CreatePbr(nint device, uint width, uint height, out nint context);
+    [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdCreateRadiance")]
+    internal static partial int CreateRadiance(nint device, uint width, uint height, out nint context);
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdExecute")]
     internal static partial int Execute(nint context, nint commands, Frame* frame);
     [LibraryImport("DXRDemo.Reconstruction", EntryPoint = "NrdDispatchCount")]

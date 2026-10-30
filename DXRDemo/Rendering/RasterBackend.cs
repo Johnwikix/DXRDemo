@@ -21,10 +21,17 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     }
     private readonly DxrDevice _gpu = new();
     private readonly GpuSceneCache _cache;
-    private readonly bool _requestHardwareLighting;
+    private readonly bool _requestHardwareLighting, _denoiseHardware;
     private RasterHardwareLighting? _hardware;
     private uint _frameIndex;
     internal bool HardwareLightingActive => _hardware != null;
+    internal bool NrdAvailable => _hardware?.NrdAvailable == true;
+    internal bool NrdActive => _hardware?.NrdActive == true;
+    internal uint NrdDispatchCount => _hardware?.NrdDispatchCount ?? 0;
+    internal uint NrdMaxAccumulatedFrames => _hardware?.NrdMaxAccumulatedFrames ?? 0;
+    internal ID3D12Resource? NrdViewZ => _hardware?.NrdViewZ;
+    internal ID3D12Resource? NrdMotion => _hardware?.NrdMotion;
+    internal string NrdStatus => _hardware?.NrdStatus ?? "NRD inactive";
     private readonly Resources _owned = new();
     private Resources _sized = new();
     private GpuSceneLease? _lease;
@@ -68,12 +75,13 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     }
 
     /// <summary>离屏探针可显式缩小阴影尺寸；生产默认预算保持不变。</summary>
-    internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false)
+    internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false, bool denoiseHardware = true)
     {
         if (shadowSize is < 16 or > 2048 || localSize is < 16 or > 1024)
             throw new ArgumentOutOfRangeException(nameof(shadowSize));
         _cache = cache;
         _requestHardwareLighting = hardwareLighting;
+        _denoiseHardware = denoiseHardware;
         ShadowSize = shadowSize;
         LocalSize = localSize;
     }
@@ -146,7 +154,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
                     _gpu.Device.CreateUnorderedAccessView(null, null, uav, Handle(Textures + table * ExtraCount + 7 + i));
             }
             if (_requestHardwareLighting && _gpu.SupportsRayTracing && _gpu.HighestShaderModel >= ShaderModel.Model6_5)
-                _hardware = _owned.Keep(new RasterHardwareLighting(device));
+                _hardware = _owned.Keep(new RasterHardwareLighting(device, _denoiseHardware));
             _timer = _owned.Keep(new GpuInterval(_gpu));
             _initialized = true;
         }
@@ -504,7 +512,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             Transition(_color, ResourceStates.CopySource, ResourceStates.UnorderedAccess);
             if (_hardware != null)
             {
-                _hardware.Record(cmd, _lease!, camera, jitter, _frameIndex, environment, sun);
+                _hardware.Record(cmd, _lease!, camera, jitter, _frameIndex, environment, sun, previous, previousJitter, seconds);
                 // 结束私有 resolve 的静态 SRV 绑定，再更新它刚读取的 OpaqueColor。
                 cmd.SetComputeRootSignature(_root);
             }

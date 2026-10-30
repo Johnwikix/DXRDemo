@@ -144,7 +144,7 @@ struct NrdContext {
     uint8_t* mapped = nullptr;
     uint32_t width = 0, height = 0, stride = 0, descriptorsPerSet = 0, constantStride = 0, maxSets = 0;
     uint32_t dispatchCount = 0, configuredMaxFrames = 0;
-    bool sh = false, settingsInitialized = false;
+    bool sh = false, combined = false, settingsInitialized = false;
     ~NrdContext() {
         if (mapped) constants->Unmap(0, nullptr);
         if (instance) api.destroy(*instance);
@@ -176,13 +176,13 @@ struct NrdContext {
             settings.diffuseMaxFastAccumulatedFrameNum = std::min(settings.diffuseMaxFastAccumulatedFrameNum, maxFrames - 1);
             settings.specularMaxFastAccumulatedFrameNum = std::min(settings.specularMaxFastAccumulatedFrameNum, maxFrames - 1);
         }
-        if (sh) settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
+        if (combined) settings.hitDistanceReconstructionMode = nrd::HitDistanceReconstructionMode::AREA_3X3;
         Check(api.settings(*instance, denoiserId, &settings), "Configure NRD RELAX");
         configuredMaxFrames = maxFrames; settingsInitialized = true;
     }
-    void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h, bool pbr = false) {
-        device = gpu; width = w; height = h; sh = pbr;
-        nrd::DenoiserDesc denoiser{denoiserId, pbr ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : nrd::Denoiser::RELAX_DIFFUSE};
+    void Initialize(ID3D12Device* gpu, uint32_t w, uint32_t h, bool pbr = false, bool radiancePbr = false) {
+        device = gpu; width = w; height = h; sh = pbr; combined = pbr || radiancePbr;
+        nrd::DenoiserDesc denoiser{denoiserId, sh ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR_SH : combined ? nrd::Denoiser::RELAX_DIFFUSE_SPECULAR : nrd::Denoiser::RELAX_DIFFUSE};
         nrd::InstanceCreationDesc creation{}; creation.denoisers = &denoiser; creation.denoisersNum = 1;
         Check(api.create(creation, instance), "Create NRD RELAX_DIFFUSE");
         SetSettings(0);
@@ -324,6 +324,17 @@ API int NrdCreatePbr(ID3D12Device* device, uint32_t width, uint32_t height, NrdC
         *output = context.release(); return 0;
     } catch (const std::exception& e) { strncpy_s(diagnostic, e.what(), _TRUNCATE); return -2; }
     catch (...) { strcpy_s(diagnostic, "Unknown PBR NRD initialization error"); return -3; }
+}
+// Raster radiance mode has an independent history and reuses the official dispatch executor.
+API int NrdCreateRadiance(ID3D12Device* device, uint32_t width, uint32_t height, NrdContext** output) noexcept {
+    if (!output) return -1;
+    *output = nullptr;
+    if (!device || !width || !height || width > 65535 || height > 65535) return -1;
+    try {
+        auto context = std::make_unique<NrdContext>(); context->Initialize(device, width, height, false, true);
+        *output = context.release(); return 0;
+    } catch (const std::exception& e) { strncpy_s(diagnostic, e.what(), _TRUNCATE); return -2; }
+    catch (...) { strcpy_s(diagnostic, "Unknown radiance NRD initialization error"); return -3; }
 }
 API uint32_t NrdDispatchCount(const NrdContext* context) noexcept { return context ? context->dispatchCount : 0; }
 API uint32_t NrdMaxAccumulatedFrames(const NrdContext* context) noexcept { return context && context->settingsInitialized ? context->configuredMaxFrames : 0; }

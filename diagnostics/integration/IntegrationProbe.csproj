@@ -24,6 +24,7 @@
     <Compile Include="RasterProbe.cs" />
     <Compile Include="RasterLightingProbe.cs" />
     <Compile Include="RasterHardwareProbe.cs" />
+    <Compile Include="RasterNrdProbe.cs" />
     <Compile Include="CommonFrameProbe.cs" />
     <Compile Include="RasterSceneProbe.cs" />
     <Compile Include="GlassReconstructionProbe.cs" />
@@ -57,7 +58,7 @@
     <Content Include="../../DXRDemo/Shaders/DXR/StableReconstruction.hlsl" Link="Shaders/DXR/StableReconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli" Link="Shaders/DXR/SceneLighting.hlsli" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../DXRDemo/Shaders/DXR/RasterHardware.hlsl;../../DXRDemo/Shaders/DXR/RasterHardwareResolve.hlsl;../../DXRDemo/Shaders/DXR/SceneRayCore.hlsli;../../DXRDemo/Shaders/DXR/SceneVisibility.hlsli;../../DXRDemo/Shaders/DXR/Raster.hlsl;../../DXRDemo/Shaders/DXR/SceneTypes.hlsli;../../DXRDemo/Shaders/DXR/SceneEnvironment.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/RasterHardwareNrd.hlsl;../../DXRDemo/Shaders/DXR/RasterHardware.hlsl;../../DXRDemo/Shaders/DXR/RasterHardwareResolve.hlsl;../../DXRDemo/Shaders/DXR/SceneRayCore.hlsli;../../DXRDemo/Shaders/DXR/SceneVisibility.hlsli;../../DXRDemo/Shaders/DXR/Raster.hlsl;../../DXRDemo/Shaders/DXR/SceneTypes.hlsli;../../DXRDemo/Shaders/DXR/SceneEnvironment.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Path*.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/RTXPT/*.hlsli" Link="Shaders/DXR/RTXPT/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Licenses/RTXPT.txt" Link="Licenses/RTXPT.txt" CopyToOutputDirectory="PreserveNewest" />

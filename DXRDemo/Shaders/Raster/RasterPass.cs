@@ -22,6 +22,8 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
     private TimeSpan _lastTime;
     private int _cameraCut = -1, _width, _height;
     private bool _disposed;
+    private ReconstructionStatus? _statusSource, _publishedStatus;
+    private string? _nrdStatus;
     public RasterPass() : this(new SceneSession(), new GpuSceneCache(), new SceneRenderer(), true, true) { }
     public RasterPass(SceneSession session) : this(session, new GpuSceneCache(), new SceneRenderer(), true, false) { }
     internal RasterPass(SceneSession session, GpuSceneCache cache, SceneRenderer renderer) : this(session, cache, renderer, false, false) { }
@@ -52,7 +54,7 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
             var status = Session.ReconstructionStatus;
             string reconstruction = status == null ? "SR INITIALIZING" : status.Active == ReconstructionMode.Off ? "NATIVE TAA" :
                 $"SR {status.Active} {status.InputWidth}x{status.InputHeight} -> {status.OutputWidth}x{status.OutputHeight}";
-            string lighting = _backend?.HardwareLightingActive == true ? "RT GI + HIT LIGHTING" : "SSR + FILTERED IBL | NO GI";
+            string lighting = _backend?.HardwareLightingActive == true ? $"RT GI + HIT LIGHTING | {(_backend.NrdActive ? "NRD RELAX" : "NRD FALLBACK")}" : "SSR + FILTERED IBL | NO GI";
             return $"CLUSTERED RASTER | LOD0\n{scene.Asset?.Name ?? "LOADING"}  {scene.Asset?.TriangleCount ?? 0:N0} TRIANGLES\nCSM | LOCAL SHADOWS {_backend?.ShadowedLocalLights ?? 0}/2 | {lighting}\n{reconstruction}";
         }
     }
@@ -107,7 +109,20 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
             Revisions = new(scene.SceneRevision, scene.Revision, cut, _renderer.PipelineRevision)
         };
         bool produced = _renderer.Output(frame, target, parameter is HdrRenderParameters hdr ? hdr : HdrRenderParameters.Default, scene.Exposure);
-        Session.PublishReconstructionStatus(reconstruction.Status);
+        var status = reconstruction.Status;
+        string nrdStatus = _backend.NrdStatus;
+        if (!ReferenceEquals(_statusSource, status) || _publishedStatus?.NrdActive != _backend.NrdActive || _nrdStatus != nrdStatus)
+        {
+            // 只在状态变化时创建不可变快照，避免每个渲染帧复制 record/拼接字符串。
+            _statusSource = status;
+            _nrdStatus = nrdStatus;
+            _publishedStatus = status with
+            {
+                NrdAvailable = _backend.NrdAvailable, NrdActive = _backend.NrdActive,
+                Message = _backend.HardwareLightingActive ? status.Message + " · " + nrdStatus : status.Message
+            };
+        }
+        Session.PublishReconstructionStatus(_publishedStatus!);
         _previousCamera = camera;
         _previousJitter = jitter;
         _previousScene = scene;

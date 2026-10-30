@@ -6,7 +6,9 @@
 
 `--raster-hardware` 要求真实 DXR 执行，在 64×48 的小场景中验证环境几何遮挡、屏幕外墙面的颜色反弹、发光面 MIS、相机后方且被裁剪物体的 Hit Lighting 反射、物体移除、共享 AS、resize，以及太阳/局部光/透明合成组合；D3D12 Error/Corruption 必须为 0。它与 `--raster-lighting` 的无 AS 降级检查分别验收，不把环境占位当作 GI。
 
-`--raster-preview`（可加 `--bistro` 或 `--rainy`，默认 Kitchen）现在默认渲染 8 帧 **1280×720**：纹理上限 1024、阴影 1024/256、环境 1、曝光 0、太阳开启；支持 DXR/SM6.5 时使用一跳硬件光照，否则为 SSR/环境降级。`--no-hardware-gi`、`--no-sun`、`--sun-azimuth`、`--sun-elevation` 可用于固定输入消融；`--width`、`--height`、`--frames`、`--texture-size`、`--shadow-size` 有显式上限。Bistro 投影检查示例：`./IntegrationProbe.exe --raster-preview --bistro --sun-azimuth 135 --sun-elevation 65`。Kitchen 的模型灯检查可用 `./IntegrationProbe.exe --raster-preview --no-sun`。输出 PNG/JSON 到 ignored `output/raster-validation/`，文件名记录分辨率与照明模式；不启用厂商 SR 或持续呈现。
+`--raster-nrd` 要求真实 `RELAX_DIFFUSE_SPECULAR`：64×48、32 帧、无 TAA，对照同样本双边基线的帧间噪声与平均能量，检查负 viewZ、去抖 motion、8/30 帧历史策略、reset 与 resize。`--raster-nrd-missing` 用于在新进程中临时缺失探针输出 NRD.dll 的回退检查，要求 FSR 仍真实执行；不要移动 External 固定文件。测试后必须恢复 DLL 并核对 SHA-256。详见 [NRD 光栅记录](../../docs/NRD.md#2026-10-30光栅一跳-gi-的独立-relax-上下文)。
+
+`--raster-preview`（可加 `--bistro` 或 `--rainy`，默认 Kitchen）现在默认渲染 8 帧 **1280×720**：纹理上限 1024、阴影 1024/256、环境 1、曝光 0、太阳开启；支持 DXR/SM6.5 时使用一跳硬件光照，并自动使用可用 NRD，否则为 SSR/环境降级。`--require-nrd` 强制 SDK 执行，回退即失败；`--no-nrd` 保留双边基线。`--no-hardware-gi`、`--no-sun`、`--sun-azimuth`、`--sun-elevation` 可用于固定输入消融；`--width`、`--height`、`--frames`、`--texture-size`、`--shadow-size` 有显式上限。Bistro 投影检查示例：`./IntegrationProbe.exe --raster-preview --bistro --sun-azimuth 135 --sun-elevation 65`。Kitchen 的模型灯检查可用 `./IntegrationProbe.exe --raster-preview --no-sun`。输出 PNG/JSON 到 ignored `output/raster-validation/`，文件名记录分辨率、照明模式与实际 `-nrd` / `-raw` 状态；不启用厂商 SR 或持续呈现。
 
 先构建主应用，再用 `dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/NuGet.Config` 构建探针；**切到探针 exe 所在目录运行**，保证 Agility `./D3D12/` 有效。缩小的阴影预算与有限帧不是生产性能基准；逐帧时间戳、当前一跳 GI 的噪声/缓存/透明限制见[设计第 16 节](../../docs/RASTER_PIPELINE_DESIGN.md#16-2026-10-30720p-验证与一跳硬件光照基线)。
 

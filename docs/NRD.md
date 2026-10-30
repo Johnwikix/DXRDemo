@@ -223,3 +223,41 @@ beside it; arrow/PageUp/PageDown input is supported. Changes are applied after
 - [Pinned resource/API contract](https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/Include/NRDDescs.h)
 - [Camera/settings contract](https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/Include/NRDSettings.h)
 - [Rebuild and checksum instructions](../External/NRD/README.md)
+
+
+## 2026-10-30：光栅一跳 GI 的独立 RELAX 上下文
+
+光栅硬件 GI 现在默认使用固定 **NRD 4.17.3 / RELAX_DIFFUSE_SPECULAR**（非 SH），由 `RasterHardwareDenoiser` 持有独立上下文。它复用现有 `NativeNrd` 与原生 `GetComputeDispatches` 执行器，不借用路径追踪/稳定面的历史，也不升级或重建厂商 SDK。选择普通 radiance 模式是因为当前一跳管线直接输出双 lobe 辐亮度，尚未提供 SH 方向矩；不把普通 RGB 强行声明为 SH。未来的 SG resolve/re-jitter 可以另行按输入契约接入。
+
+流程为 `opaque GBuffer → 硬件 GI 双信号 → 材质去调制/官方打包/opaque guides → 官方 RELAX 全 dispatch → 材质还原 → 加回直接光与 emission → 前向透明 → 公共 TAA/SR/显示`。公共 TAA 仍负责抗锯齿；NRD 有效时跳过此前 5×5 双边 GI resolve，避免两套空间过滤叠加。
+
+- Diffuse 保存原 E/π 估计，再按当前 diffuse 因子还原为出射光后用 `NRD_MaterialFactors` 去调制；specular 为 BRDF/PDF 加权的出射光，除以匹配的 specular 因子。两者使用 `RELAX_FrontEnd_PackRadianceAndHitDist` 打包，输出经 `RELAX_BackEnd_UnpackRadiance` 解包并乘回同一因子；禁止对最终合成颜色直接模糊。
+- 双信号 alpha 已从占位常数 1 改为真实首个次级 hit distance（世界单位，无 PDF 权重、不含相机距离）；miss 为 65504，几何法线拒绝或无有效镜面方向时为 0。面积光与环境 NEE 的方向不冒充 hit-distance 采样方向；现阶段使用对应余弦/VNDF 样本作距离 guide。SDK 的 AREA_3X3 重建处理无有效方向的像素。
+- Guides 来自 opaque GBuffer：官方 normal/roughness 打包、右手系负线性 viewZ（sky=-1000000 或更远）、当前→上一帧的输入像素 motion（无 jitter）。NRD 原生桥缩放为 UV；current/previous 的 view 与 projection 独立提交，NRD 使用当前/上一 ray jitter。前向玻璃尚未覆盖这些 guides。
+- 场景/灯光/camera cut/配置显式 reset 清历史；尺寸变化重建上下文。静止历史 30 帧、相机变化 8 帧，继续复用原生设置策略。所有命令录制在 RasterBackend 当前列表上，沿原同步 fence 保护 SDK 池、描述符、导入纹理与销毁；不添加新队列或逐 pass CPU 等待。
+- 输入/输出纹理进出 NRD 均为 NonPixelShaderResource，转换/打包阶段显式配对 UAV barrier。C++/C# `NativeNrd.Frame` 仍为 384 字节，新增导出 `NrdCreateRadiance` 不改变原 `NrdCreate` 与 `NrdCreatePbr` 的算法选择。
+- NRD DLL 缺失、架构/入口不匹配或初始化失败时，硬件 GI 使用现有双边过滤+公共 TAA/SR 回退；HUD 与共享 ReconstructionStatus 报告实际 NRD 状态及原因。状态快照仅在变化时创建。`--require-nrd` 与 `--raster-nrd` 必须有真实 SDK dispatch，回退即失败。
+- SDK 池之外，NRD 适配器拥有 48 bytes/pixel 的打包/normal/viewZ/motion/双输出纹理，720p 为 44236800 字节（不含驱动对齐与 SDK permanent/transient pools）；随尺寸归还。原始 GI 双纹理另计。未测量热路径 GC 分配，不宣称零分配。
+
+### 本次离屏证据（Intel Arc 140T，报告 15GB）
+
+`--raster-nrd` 在 64×48 跑 32 帧，不接 TAA；同像素、同随机帧序号对照旧双边 GI resolve。舍弃前 16 帧，统计接收面内部 24×18 区域的红通道帧间 RMS 与平均亮度：
+
+| 指标 | 原始结果 |
+| --- | --- |
+| 双边基线帧间 RMS | `0.19084694496942395` |
+| NRD 帧间 RMS | `0.001620510324862552` |
+| 双边基线平均值 | `1.247356485437464` |
+| NRD 平均值 | `1.2340340790925202` |
+| 平移 motion 对独立 CPU 投影的误差 | `0.00085258484` 输入像素 |
+| reset/resize | 清除旧照明，重建实际上下文；resize 首帧 32 个含清理的 SDK dispatch |
+
+上述小场景数据不是任意资产/运动的收益比例，也不是图像相对于高 SPP 参考的 RMSE。静止 jitter 的 motion、负 viewZ、移动时 8 帧历史、回到静止 30 帧与显式 reset 均有断言，D3D12 Error/Corruption=0。
+
+Kitchen（额外太阳关闭）与 Bistro（太阳方位 135°/仰角 65°）各用 1280×720、8 帧、1024 上限纹理、1024/256 阴影、环境 1、曝光 0 验证；`--require-nrd` 强制真实 NRD，稳态均为每帧 13 个官方 dispatch，D3D12 Error/Corruption=0。PNG/JSON 在 ignored `output/raster-validation/`，含 `-nrd` 后缀；`--no-nrd` 可保留同输入的双边基线。8 帧只是有限负载的冷启动预览，仍可能有低频斑块、偏软的粗糙镜面和未收敛区，复杂运动/消遮挡/多显示器未在本次遍历。
+
+`--raster-nrd-missing` 临时移走的仅是探针输出 NRD.dll：验证 GI 回退且真实 FSR 继续执行，之后恢复并核对 SHA-256 完全一致。固定 External 目录未修改。原有 `--nrd-motion --width 128 --height 96 --frames 25` 的单 diffuse NRD 路径通过，最大线性 RMSE=`0.005412440793496404`；`--common-frame` 的真实 FSR/XeSS、切换、resize/HDR、WARP 与 D3D12 检查通过。本机不支持 NVIDIA DLSS，未宣称 DLSS RR 或完整 PT SH/稳定面回归已执行。
+
+### 本机原生桥构建记录
+
+新增 C++ 导出触发重链接后，本机 VS 18/v145 报 `LNK1101 MSPDB140.DLL` 版本错误。使用已安装 VS2022 的 MSBuild，单次输入 `/p:PlatformToolset=v143 /p:VCToolsVersion=14.44.35207 /p:PreferredToolArchitecture=x64` 成功构建 **应用自己的 Reconstruction 桥**，未改工程 toolset、SDK 版本或厂商文件。随后主应用 Debug/Release 与探针使用 `-p:SkipReconstructionNativeBuild=true` 复用这份刚构建的桥，均构建成功；已有生成 XAML 的 Icon CS0618 警告仍在。健康 v145 环境仍走标准自动构建入口。

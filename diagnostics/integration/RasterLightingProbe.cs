@@ -22,13 +22,16 @@ internal static class RasterLightingProbe
         using var debug = device.Device.QueryInterface<ID3D12InfoQueue>();
         using var cache = new GpuSceneCache();
         bool preview = args.Contains("--raster-preview"), hardwareTest = args.Contains("--raster-hardware");
-        bool hardware = hardwareTest || (preview && !args.Contains("--no-hardware-gi"));
+        bool nrdTest = args.Contains("--raster-nrd") || args.Contains("--raster-nrd-missing");
+        bool hardware = hardwareTest || nrdTest || (preview && !args.Contains("--no-hardware-gi"));
         int shadowSize = preview ? Option(args, "--shadow-size", 1024, 2048) : 256;
-        using var backend = new RasterBackend(cache, shadowSize, preview ? 256 : 128, hardware);
+        using var backend = new RasterBackend(cache, shadowSize, preview ? 256 : 128, hardware, !hardwareTest && !args.Contains("--no-nrd"));
         Console.WriteLine($"Adapter: {GpuName(device)}; hardware lighting requested={hardware}.");
         backend.Initialize(device);
         if (args.Contains("--raster-preview"))
             await Preview(device, backend, args);
+        else if (nrdTest)
+            RasterNrdProbe.Run(device, cache, backend, args.Contains("--raster-nrd-missing"));
         else if (hardwareTest)
             RasterHardwareProbe.Run(device, cache, backend);
         else
@@ -214,20 +217,22 @@ internal static class RasterLightingProbe
         var timings = new double[frames];
         string directory = Path.GetFullPath("../../../../../output/raster-validation");
         Directory.CreateDirectory(directory);
-        string stem = $"{name}-{width}x{height}" + (screenReflections ? "" : "-no-ssr") + (sun.Enabled ? $"-sun-a{sun.Azimuth}-e{sun.Elevation}" : "-no-sun") + (backend.HardwareLightingActive ? "-rt" : "-raster");
         for (int i = 0; i < frames; i++)
         {
             var jitter = renderer.Reconstruction.Jitter(true);
             var frame = backend.Render(camera, camera, jitter, previous, width, height, 1.0 / 60, i == 0, 1,
                 sun, screenReflections: screenReflections);
             timings[i] = backend.GpuMilliseconds;
+            if (args.Contains("--require-nrd"))
+                RasterProbe.Require(backend.NrdActive && backend.NrdDispatchCount > 0, $"NRD fixed preview fell back: {backend.NrdStatus}");
             renderer.Output(frame, target, HdrRenderParameters.Default, 0);
             previous = jitter;
         }
+        string stem = $"{name}-{width}x{height}" + (screenReflections ? "" : "-no-ssr") + (sun.Enabled ? $"-sun-a{sun.Azimuth}-e{sun.Elevation}" : "-no-sun") + (backend.HardwareLightingActive ? "-rt" : "-raster") + (backend.NrdActive ? "-nrd" : "-raw");
         SceneProbe.Save(target, Path.Combine(directory, stem + ".png"));
         var report = new { name, width, height, frames, textureLimit, shadows = $"{Option(args, "--shadow-size", 1024, 2048)}/256", environment = 1, exposure = 0, sun, gpuMilliseconds = timings,
-            gi = backend.HardwareLightingActive ? "one bounce HWRT" : "not implemented", reflections = backend.HardwareLightingActive ? "RT hit lighting" : screenReflections ? "SSR + prefiltered environment" : "prefiltered environment only", camera, hardware = GpuName(device) };
+            gi = backend.HardwareLightingActive ? "one bounce HWRT" : "not implemented", nrd = backend.NrdActive, nrdDispatches = backend.NrdDispatchCount, nrdStatus = backend.NrdStatus, reflections = backend.HardwareLightingActive ? "RT hit lighting" : screenReflections ? "SSR + prefiltered environment" : "prefiltered environment only", camera, hardware = GpuName(device) };
         File.WriteAllText(Path.Combine(directory, stem + ".json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }));
-        Console.WriteLine($"PASS: {name} headless preview: {width}x{height}, {frames} frames, hardware lighting={backend.HardwareLightingActive}, textures {textureLimit}; {directory}");
+        Console.WriteLine($"PASS: {name} headless preview: {width}x{height}, {frames} frames, hardware lighting={backend.HardwareLightingActive}, NRD={backend.NrdActive}, dispatches={backend.NrdDispatchCount}, textures {textureLimit}; {directory}");
     }
 }

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using DXRDemo.Camera;
 using DXRDemo.DXR;
 using DXRDemo.Scene;
+using DXRDemo.SuperResolution;
 using Vortice.Direct3D12;
 using Vortice.DXGI;
 
@@ -31,10 +32,20 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
     private GpuScene? _scene;
     private ID3D12Resource? _boundMaterial;
     private int _width, _height;
+    private readonly bool _denoise;
+    private RasterHardwareDenoiser? _denoiser;
+    internal bool NrdAvailable { get; private set; }
+    internal bool NrdActive => _denoiser != null;
+    internal uint NrdDispatchCount => _denoiser?.DispatchCount ?? 0;
+    internal uint NrdMaxAccumulatedFrames => _denoiser?.MaxAccumulatedFrames ?? 0;
+    internal ID3D12Resource? NrdViewZ => _denoiser?.ViewZ;
+    internal ID3D12Resource? NrdMotion => _denoiser?.Motion;
+    internal string NrdStatus { get; private set; } = "NRD disabled";
 
-    internal RasterHardwareLighting(DxrDevice device)
+    internal RasterHardwareLighting(DxrDevice device, bool denoise)
     {
         _device = device.Device;
+        _denoise = denoise;
         try
         {
             Keep(_sized);
@@ -77,6 +88,7 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         ID3D12Resource direct, ID3D12Resource color)
     {
         if (_width == width && _height == height && ReferenceEquals(_boundMaterial, material)) return;
+        _denoiser = null;
         _sized.Reset();
         _width = _height = 0;
         _boundMaterial = null;
@@ -94,12 +106,30 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         _device.CreateUnorderedAccessView(_specular, null, null, start + 4 * _stride);
         _resolve.Srv(0, material); _resolve.Srv(1, normal); _resolve.Srv(2, depth); _resolve.Srv(3, direct);
         _resolve.Srv(4, _diffuse); _resolve.Srv(5, _specular); _resolve.Uav(0, color);
+        if (_denoise)
+        {
+            try
+            {
+                NrdAvailable = NativeNrd.Available() != 0;
+                if (!NrdAvailable)
+                    NrdStatus = Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "NRD unavailable";
+                else
+                {
+                    _denoiser = _sized.Current.Keep(new RasterHardwareDenoiser(_device, width, height, material, normal, depth, direct, _diffuse, _specular, color));
+                    NrdStatus = "NRD RELAX DIFFUSE + SPECULAR";
+                }
+            }
+            catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException or InvalidOperationException)
+            {
+                NrdStatus = "NRD fallback: " + error.Message;
+            }
+        }
         _width = width; _height = height;
         _boundMaterial = material;
     }
 
     internal void Record(ID3D12GraphicsCommandList4 commands, GpuSceneLease lease, in CameraFrame camera, Vector2 jitter,
-        uint frame, float environment, SunLightSettings sun)
+        uint frame, float environment, SunLightSettings sun, in CameraFrame previous, Vector2 previousJitter, double seconds)
     {
         var scene = lease.Scene;
         if (!ReferenceEquals(_scene, scene))
@@ -145,11 +175,15 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
             new(_table.GPUVirtualAddress + 128, 64, 64), default, (uint)_width, (uint)_height, 1));
         commands.ResourceBarrierTransition(_diffuse, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
         commands.ResourceBarrierTransition(_specular, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
-        _resolve.Dispatch(commands, _constants, _width, _height);
+        if (_denoiser != null)
+            _denoiser.Record(commands, camera, previous, jitter, previousJitter, frame, seconds);
+        else
+            _resolve.Dispatch(commands, _constants, _width, _height);
     }
 
     internal void ReleaseSize()
     {
+        _denoiser = null;
         _sized.Dispose();
         _width = _height = 0;
         _boundMaterial = null;

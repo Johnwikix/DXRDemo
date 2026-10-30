@@ -97,9 +97,11 @@ void RasterLightingRayGen() {
     uint rng=PathSeed(pixel,(uint)Control.z,7);
     float2 u=float2(Random(rng),Random(rng));float radius=sqrt(u.x),phi=2*PI*u.y;
     float3 l=Local(s.n,float3(radius*cos(phi),radius*sin(phi),sqrt(1-u.x)));
+    float diffuseHit=0;
     float3 incoming=AreaLight(s,view,rng,true)+EnvironmentLight(s,view,rng,true);
     if(dot(s.g,l)>0) {
         Payload hit=Trace(Offset(s,l),l,CameraRight.w,false,rng,false,true);
+        diffuseHit=hit.instance==0xffffffff?65504:hit.t;
         bool stochastic;
         float3 transmission=TransmissionVisibility(Offset(s,l),l,hit.t-Limits.x*4,rng,stochastic);
         float pdf=saturate(dot(s.n,l))/PI;
@@ -110,14 +112,15 @@ void RasterLightingRayGen() {
             incoming+=transmission*(secondary.emission*Mis(pdf,lightPdf)+HitLighting(secondary,-l,rng));
         }
     }
-    IndirectDiffuse[pixel]=float4(min(max(incoming,0),65000),1);
+    IndirectDiffuse[pixel]=float4(min(max(incoming,0),65000),min(diffuseHit,65504));
 
     // 独立 GGX VNDF 镜面样本，命中重新着色；不读取当前最终颜色或漫反射缓存。
     float3 micro=Local(s.n,sampleGGX_VNDF(s.roughness*s.roughness,ToLocal(s.n,view),float2(Random(rng),Random(rng))));
-    l=reflect(-view,micro);float3 reflected=0;
+    l=reflect(-view,micro);float3 reflected=0;float specularHit=0;
     float specPdf=ReflectionPdf(s,view,l);
     if(specPdf>0) {
         Payload hit=Trace(Offset(s,l),l,CameraRight.w,false,rng,false,true);
+        specularHit=hit.instance==0xffffffff?65504:hit.t;
         float3 radiance=Sky(l);
         if(hit.instance!=0xffffffff) {
             Surface secondary=Evaluate(hit.instance,hit.primitive,hit.bary,hit.t*CameraForward.w*2/Size.y,-l);
@@ -128,5 +131,5 @@ void RasterLightingRayGen() {
         float3 transmission=TransmissionVisibility(Offset(s,l),l,hit.t-Limits.x*4,rng,stochastic);
         reflected=r*radiance*transmission*saturate(dot(s.n,l))/specPdf;
     }
-    IndirectSpecular[pixel]=float4(min(max(reflected,0),65000),1);
+    IndirectSpecular[pixel]=float4(min(max(reflected,0),65000),min(specularHit,65504));
 }

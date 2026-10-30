@@ -15,7 +15,7 @@ if (args.Contains("--scene-session")) { await SceneSessionProbe.Run(); return; }
 if (args.Contains("--scene-session-gpu")) { await SceneSessionProbe.RunGpu(); return; }
 if (args.Contains("--gpu-scene-cache")) { GpuSceneCacheProbe.Run(); return; }
 if (args.Contains("--scene-core")) { DxrDevice.TryActivateAgilityRuntime(); await SceneProbe.Run(materialOnly: true); return; }
-if (args.Contains("--raster-hardware") || args.Contains("--raster-lighting") || args.Contains("--raster-preview")) { await RasterLightingProbe.Run(args); return; }
+if (args.Contains("--raster-nrd") || args.Contains("--raster-nrd-missing") || args.Contains("--raster-hardware") || args.Contains("--raster-lighting") || args.Contains("--raster-preview")) { await RasterLightingProbe.Run(args); return; }
 if (args.Contains("--raster")) { RasterProbe.Run(); return; }
 if (args.Contains("--common-frame")) { CommonFrameProbe.Run(); return; }
 if (args.Contains("--raster-scenes")) { await RasterSceneProbe.Run(); return; }
