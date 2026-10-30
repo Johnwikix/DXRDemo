@@ -10,23 +10,29 @@ using Vortice.DXGI;
 
 namespace DXRDemo.Rendering;
 
-/// <summary>LOD0 分簇延迟光栅基线；仅借用公共几何，不创建 BLAS/TLAS。</summary>
+/// <summary>共享 LOD0 分簇光栅；可选硬件一跳光照按需借用同一份 AS。</summary>
 internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
 {
-    private const int Textures = GpuSceneCache.MaxTextures, ExtraCount = 10, ShadowSize = 2048, LocalSize = 1024;
+    private const int Textures = GpuSceneCache.MaxTextures, ExtraCount = 10;
+    private readonly int ShadowSize, LocalSize;
     private const ResourceStates ShaderRead = ResourceStates.PixelShaderResource | ResourceStates.NonPixelShaderResource;
     private sealed class Resources : GpuResourceOwner
     {
     }
     private readonly DxrDevice _gpu = new();
     private readonly GpuSceneCache _cache;
+    private readonly bool _requestHardwareLighting;
+    private RasterHardwareLighting? _hardware;
+    private uint _frameIndex;
+    internal bool HardwareLightingActive => _hardware != null;
     private readonly Resources _owned = new();
     private Resources _sized = new();
     private GpuSceneLease? _lease;
     private ID3D12RootSignature _root = null!;
-    private ID3D12PipelineState _depthPass = null!, _gbuffer = null!, _shadow = null!, _transparentPass = null!, _clustersPass = null!, _lighting = null!;
+    private ID3D12PipelineState _depthPass = null!, _gbuffer = null!, _shadow = null!, _transparentPass = null!, _transparentGuides = null!, _clustersPass = null!, _lighting = null!, _reflections = null!;
+    private ID3D12Resource? _filteredEnvironment;
     private ID3D12Resource _constants = null!, _sunShadow = null!, _localShadow = null!, _clusters = null!;
-    private ID3D12Resource _base = null!, _normal = null!, _emission = null!, _depth = null!, _color = null!, _motion = null!, _reactive = null!, _opaqueColor = null!;
+    private ID3D12Resource _base = null!, _normal = null!, _emission = null!, _depth = null!, _guideDepth = null!, _color = null!, _motion = null!, _reactive = null!, _opaqueColor = null!;
     private ID3D12DescriptorHeap _heap = null!, _rtv = null!, _dsv = null!;
     private readonly ID3D12DescriptorHeap[] _heaps = new ID3D12DescriptorHeap[2];
     private GpuInterval _timer = null!;
@@ -61,7 +67,16 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         public Vector4 ShadowIds, PreviousOrigin, Environment, EnvironmentMap;
     }
 
-    internal RasterBackend(GpuSceneCache cache) => _cache = cache;
+    /// <summary>离屏探针可显式缩小阴影尺寸；生产默认预算保持不变。</summary>
+    internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false)
+    {
+        if (shadowSize is < 16 or > 2048 || localSize is < 16 or > 1024)
+            throw new ArgumentOutOfRangeException(nameof(shadowSize));
+        _cache = cache;
+        _requestHardwareLighting = hardwareLighting;
+        ShadowSize = shadowSize;
+        LocalSize = localSize;
+    }
     internal void Initialize(DxrDevice device)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -85,19 +100,22 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 7, 0, 2),
                 new DescriptorRange1(DescriptorRangeType.UnorderedAccessView, 3, 1, 0)), ShaderVisibility.All));
             parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(7, 0), ShaderVisibility.All));
+            parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(8, 0), ShaderVisibility.All));
             _root = _owned.Keep(_gpu.Device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.AllowInputAssemblerInputLayout, parameters.ToArray())));
             _depthPass = Graphics("VertexMain", "DepthPixel", [], true, false);
             _gbuffer = Graphics("VertexMain", "GBufferPixel", [Format.R8G8B8A8_UNorm, Format.R16G16B16A16_Float, Format.R16G16B16A16_Float], false, false);
             _shadow = Graphics("ShadowVertex", "DepthPixel", [], true, true);
-            _transparentPass = Graphics("VertexMain", "TransparentPixel", [Format.R16G16B16A16_Float, Format.R16G16_Float, Format.R8_UNorm], false, false, true);
+            _transparentPass = Graphics("VertexMain", "TransparentPixel", [Format.R16G16B16A16_Float], false, false, true);
+            _transparentGuides = Graphics("VertexMain", "TransparentGuides", [Format.R16G16_Float, Format.R8_UNorm], true, false);
             _clustersPass = Compute("BuildClusters");
             _lighting = Compute("DeferredLighting");
+            _reflections = Compute("ResolveReflections");
             _stride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
             _rtvStride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.RenderTargetView);
             _dsvStride = (int)_gpu.Device.GetDescriptorHandleIncrementSize(DescriptorHeapType.DepthStencilView);
             _heap = _owned.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, Textures + ExtraCount * 3, DescriptorHeapFlags.ShaderVisible)));
             _rtv = _owned.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.RenderTargetView, 6)));
-            _dsv = _owned.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.DepthStencilView, 18)));
+            _dsv = _owned.Keep(_gpu.Device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.DepthStencilView, 19)));
             _heaps[0] = _heap;
             _constants = _owned.Keep(DxrResources.CreateUploadBuffer(_gpu.Device, 2048));
             _sunShadow = _owned.Keep(DepthTexture(ShadowSize, ShadowSize, 4, ShaderRead));
@@ -127,6 +145,8 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
                 for (int i = 0; i < 3; i++)
                     _gpu.Device.CreateUnorderedAccessView(null, null, uav, Handle(Textures + table * ExtraCount + 7 + i));
             }
+            if (_requestHardwareLighting && _gpu.SupportsRayTracing && _gpu.HighestShaderModel >= ShaderModel.Model6_5)
+                _hardware = _owned.Keep(new RasterHardwareLighting(device));
             _timer = _owned.Keep(new GpuInterval(_gpu));
             _initialized = true;
         }
@@ -207,7 +227,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     public IPreparedScene PrepareScene(SceneAsset asset, CancellationToken cancellation)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var lease = _cache.Acquire(asset, cancellation: cancellation);
+        var lease = _cache.Acquire(asset, rayTracing: _hardware != null, cancellation: cancellation);
         try
         {
             var opaque = new List<int>();
@@ -237,7 +257,18 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
                 float scale = MathF.Sqrt(m.M11 * m.M11 + m.M12 * m.M12 + m.M13 * m.M13 + m.M21 * m.M21 + m.M22 * m.M22 + m.M23 * m.M23 + m.M31 * m.M31 + m.M32 * m.M32 + m.M33 * m.M33);
                 radii[i] = (hi - lo).Length() * .5f * scale;
             }
-            return new Candidate(this, lease, opaque.ToArray(), transparent.ToArray(), centers, radii);
+            var filtered = RasterEnvironment.Prepare(asset.EnvironmentMap, cancellation);
+            var environment = DxrResources.CreateUploadBuffer(_gpu.Device, (ulong)(filtered.Length * 16));
+            try
+            {
+                void* pointer;
+                environment.Map(0, null, &pointer).CheckError();
+                filtered.AsSpan().CopyTo(new Span<Vector4>(pointer, filtered.Length));
+                environment.Unmap(0);
+                cancellation.ThrowIfCancellationRequested();
+                return new Candidate(this, lease, opaque.ToArray(), transparent.ToArray(), centers, radii, environment);
+            }
+            catch { environment.Dispose(); throw; }
         }
         catch { lease.Dispose(); throw; }
     }
@@ -248,9 +279,10 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         using var candidate = PrepareScene(asset, default);
         candidate.Commit();
     }
-    private sealed class Candidate(RasterBackend owner, GpuSceneLease lease, int[] opaque, int[] transparent, Vector3[] centers, float[] radii) : IPreparedScene
+    private sealed class Candidate(RasterBackend owner, GpuSceneLease lease, int[] opaque, int[] transparent, Vector3[] centers, float[] radii, ID3D12Resource environment) : IPreparedScene
     {
         private GpuSceneLease? _lease = lease;
+        private ID3D12Resource? _environment = environment;
         private readonly int[] _visibleOpaque = new int[opaque.Length], _visibleTransparent = new int[transparent.Length];
         public void Commit()
         {
@@ -259,6 +291,9 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             owner._gpu.Device.CopyDescriptorsSimple(Textures, owner.Handle(0), next.Scene.TextureViews.GetCPUDescriptorHandleForHeapStart(), DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
             owner._lease?.Dispose();
             owner._lease = next;
+            owner._filteredEnvironment?.Dispose();
+            owner._filteredEnvironment = _environment;
+            _environment = null;
             owner._heaps[1] = next.Scene.Samplers;
             owner._opaque = opaque;
             owner._transparent = transparent;
@@ -270,8 +305,12 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         }
         public void Dispose()
         {
-            _lease?.Dispose();
+            var cleanup = new ResourceCleanup();
+            cleanup.Release(_lease);
             _lease = null;
+            cleanup.Release(_environment);
+            _environment = null;
+            cleanup.Finish();
         }
     }
     private ID3D12Resource Target(int width, int height, Format format)
@@ -295,6 +334,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         _reactive = Target(width, height, Format.R8_UNorm);
         _opaqueColor = Target(width, height, Format.R16G16B16A16_Float);
         _depth = _sized.Keep(DepthTexture(width, height, 1, ResourceStates.DepthRead | ShaderRead));
+        _guideDepth = _sized.Keep(DepthTexture(width, height, 1, ResourceStates.DepthRead | ShaderRead));
         ulong clusterBytes = checked((ulong)((width + 15) / 16) * ((ulong)(height + 15) / 16) * 24 * 65 * 4);
         _clusters = _sized.Keep(DxrResources.CreateDefaultBuffer(_gpu.Device, clusterBytes, ResourceFlags.AllowUnorderedAccess, ResourceStates.UnorderedAccess));
         ID3D12Resource[] targets = [_base, _normal, _emission, _color, _motion, _reactive];
@@ -302,6 +342,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             _gpu.Device.CreateRenderTargetView(targets[i], null, Rtv(i));
         var depthView = new DepthStencilViewDescription { Format = Format.D32_Float, ViewDimension = DepthStencilViewDimension.Texture2D };
         _gpu.Device.CreateDepthStencilView(_depth, depthView, Dsv(16));
+        _gpu.Device.CreateDepthStencilView(_guideDepth, depthView, Dsv(18));
         depthView.Flags = DepthStencilViewFlags.ReadOnlyDepth;
         _gpu.Device.CreateDepthStencilView(_depth, depthView, Dsv(17));
         for (int table = 0; table < 2; table++)
@@ -330,6 +371,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         _gpu.Device.CreateUnorderedAccessView(_color, null, null, Handle(Textures + 7));
         _gpu.Device.CreateUnorderedAccessView(_motion, null, null, Handle(Textures + 8));
         _gpu.Device.CreateUnorderedAccessView(_reactive, null, null, Handle(Textures + 9));
+        _hardware?.Prepare(width, height, _base, _normal, _depth, _opaqueColor, _color);
         _width = width;
         _height = height;
     }
@@ -349,6 +391,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             cmd.SetComputeRootShaderResourceView(5, scene.Lights.GPUVirtualAddress);
             cmd.SetComputeRootUnorderedAccessView(6, _clusters.GPUVirtualAddress);
             cmd.SetComputeRootShaderResourceView(10, scene.EnvironmentTexels.GPUVirtualAddress);
+            cmd.SetComputeRootShaderResourceView(11, _filteredEnvironment!.GPUVirtualAddress);
             cmd.SetComputeRootDescriptorTable(7, _heap.GetGPUDescriptorHandleForHeapStart());
             cmd.SetComputeRootDescriptorTable(8, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
             cmd.SetComputeRootDescriptorTable(9, _heap.GetGPUDescriptorHandleForHeapStart() + (Textures + extraTable * ExtraCount) * _stride);
@@ -363,6 +406,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             cmd.SetGraphicsRootShaderResourceView(5, scene.Lights.GPUVirtualAddress);
             cmd.SetGraphicsRootUnorderedAccessView(6, _clusters.GPUVirtualAddress);
             cmd.SetGraphicsRootShaderResourceView(10, scene.EnvironmentTexels.GPUVirtualAddress);
+            cmd.SetGraphicsRootShaderResourceView(11, _filteredEnvironment!.GPUVirtualAddress);
             cmd.SetGraphicsRootDescriptorTable(7, _heap.GetGPUDescriptorHandleForHeapStart());
             cmd.SetGraphicsRootDescriptorTable(8, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
             cmd.SetGraphicsRootDescriptorTable(9, _heap.GetGPUDescriptorHandleForHeapStart() + (Textures + extraTable * ExtraCount) * _stride);
@@ -387,12 +431,14 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     }
     private void Transition(ID3D12Resource resource, ResourceStates before, ResourceStates after) => _gpu.CommandList.ResourceBarrierTransition(resource, before, after);
     internal LinearFrame Render(in CameraFrame camera, in CameraFrame previous, Vector2 jitter, Vector2 previousJitter,
-        int width, int height, double seconds, bool reset, float environment, SunLightSettings sun, float lodBias = 0)
+        int width, int height, double seconds, bool reset, float environment, SunLightSettings sun, float lodBias = 0, bool screenReflections = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         EnsureSize(width, height);
         Cull(camera);
         Constants constants = BuildFrame(camera, previous, jitter, previousJitter, reset, environment, sun, lodBias);
+        constants.Temporal.W = screenReflections ? 1 : 0;
+        if (reset) _frameIndex = 0;
         void* pointer;
         _constants.Map(0, null, &pointer).CheckError();
         *(Constants*)pointer = constants;
@@ -454,6 +500,24 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             Transition(_opaqueColor, ResourceStates.NonPixelShaderResource, ResourceStates.CopyDest);
             cmd.CopyResource(_opaqueColor, _color);
             Transition(_opaqueColor, ResourceStates.CopyDest, ShaderRead);
+            // SSR 只读当前帧直接光/漫反射快照，禁止把最终镜面反馈到自身。
+            Transition(_color, ResourceStates.CopySource, ResourceStates.UnorderedAccess);
+            if (_hardware != null)
+            {
+                _hardware.Record(cmd, _lease!, camera, jitter, _frameIndex, environment, sun);
+                // 结束私有 resolve 的静态 SRV 绑定，再更新它刚读取的 OpaqueColor。
+                cmd.SetComputeRootSignature(_root);
+            }
+            else
+            {
+                Bind(true, 0);
+                cmd.SetPipelineState(_reflections);
+                cmd.Dispatch((uint)(width + 7) / 8, (uint)(height + 7) / 8, 1);
+            }
+            Transition(_color, ResourceStates.UnorderedAccess, ResourceStates.CopySource);
+            Transition(_opaqueColor, ShaderRead, ResourceStates.CopyDest);
+            cmd.CopyResource(_opaqueColor, _color);
+            Transition(_opaqueColor, ResourceStates.CopyDest, ShaderRead);
             Transition(_color, ResourceStates.CopySource, ResourceStates.RenderTarget);
             Transition(_motion, ResourceStates.UnorderedAccess, ResourceStates.RenderTarget);
             Transition(_reactive, ResourceStates.UnorderedAccess, ResourceStates.RenderTarget);
@@ -463,10 +527,25 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
             Bind(false, 1);
             cmd.SetPipelineState(_transparentPass);
             buffers[0] = Rtv(3);
-            buffers[1] = Rtv(4);
-            buffers[2] = Rtv(5);
-            cmd.OMSetRenderTargets(buffers, Dsv(17));
+            cmd.OMSetRenderTargets(buffers[..1], Dsv(17));
             Draw(_visibleTransparent, count: _visibleTransparentCount);
+            if (_visibleTransparentCount > 0)
+            {
+                // 颜色按后到前合成；重建信号用独立深度测试选择最近透明面，
+                // 避免拿玻璃后的 opaque 深度去重投影玻璃 motion。
+                Transition(_depth, ResourceStates.DepthRead | ShaderRead, ResourceStates.CopySource);
+                Transition(_guideDepth, ResourceStates.DepthRead | ShaderRead, ResourceStates.CopyDest);
+                cmd.CopyResource(_guideDepth, _depth);
+                Transition(_depth, ResourceStates.CopySource, ResourceStates.DepthRead | ShaderRead);
+                Transition(_guideDepth, ResourceStates.CopyDest, ResourceStates.DepthWrite);
+                Bind(false, 2);
+                cmd.SetPipelineState(_transparentGuides);
+                buffers[0] = Rtv(4);
+                buffers[1] = Rtv(5);
+                cmd.OMSetRenderTargets(buffers[..2], Dsv(18));
+                Draw(_visibleTransparent, count: _visibleTransparentCount);
+                Transition(_guideDepth, ResourceStates.DepthWrite, ResourceStates.DepthRead | ShaderRead);
+            }
             Transition(_color, ResourceStates.RenderTarget, ResourceStates.NonPixelShaderResource);
             Transition(_motion, ResourceStates.RenderTarget, ResourceStates.NonPixelShaderResource);
             Transition(_reactive, ResourceStates.RenderTarget, ResourceStates.NonPixelShaderResource);
@@ -481,8 +560,9 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         _gpu.CommandQueue.ExecuteCommandList(cmd);
         _gpu.SignalAndWait();
         GpuMilliseconds = _timer.ReadMilliseconds();
+        _frameIndex++;
         _gpu.Device.DeviceRemovedReason.CheckError();
-        return new(_color, _depth, _motion, _reactive, width, height, camera, jitter, previousJitter, seconds, reset, true, _normal);
+        return new(_color, _visibleTransparentCount > 0 ? _guideDepth : _depth, _motion, _reactive, width, height, camera, jitter, previousJitter, seconds, reset, true, _normal);
     }
     private void Cull(in CameraFrame camera)
     {
@@ -522,6 +602,8 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         var cleanup = new ResourceCleanup();
         if (_initialized) cleanup.Run(() => _gpu.SignalAndWait());
         cleanup.Release(_lease); _lease = null;
+        cleanup.Release(_filteredEnvironment); _filteredEnvironment = null;
+        if (_hardware != null) cleanup.Run(_hardware.ReleaseSize);
         cleanup.Release(_sized); cleanup.Release(_owned); cleanup.Release(_gpu);
         cleanup.Finish();
     }

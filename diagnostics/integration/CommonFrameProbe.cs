@@ -164,7 +164,7 @@ internal static class CommonFrameProbe
         using var cache = new GpuSceneCache();
         using var renderer = new SceneRenderer();
         using var path = new RayTracePass(session, cache, renderer) { DenoiserMode = RayTraceDenoiserMode.None, MaxBounces = 2 };
-        using var raster = new RasterPass(session, cache, renderer);
+        using var raster = new RasterPass(session, cache, renderer) { UseHardwareLighting = false };
         path.Initialize(device, default);
         raster.Initialize(device, default);
         using var target = device.CreateTexture2D<Rgba64>(320, 180);

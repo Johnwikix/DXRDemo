@@ -2,6 +2,14 @@
 
 `--raster` 检查真实 LOD0 光栅：GBuffer/PBR、reverse-Z 与极端 near/far 精度、非零 mesh vertex/index offset、去抖 motion、视锥/镜像/单双面、材质贴图、MASK/BLEND、独立折射快照、CSM/点光/聚光阴影，以及 70 灯簇容量溢出时的能量守恒。
 
+`--raster-lighting` 是低负载离屏照明回归：128×96、256/128 阴影，验证常量环境 E/π/GGX 能量、SSR 的真实发光面命中/禁用/物体移除/抖动/确定性/resize，以及 12 帧透明棋盘的 NativeTAA 稳定性、最近透明面 depth/motion 与零 alpha guides。无需 AS，D3D12 Error/Corruption 必须为 0。
+
+`--raster-hardware` 要求真实 DXR 执行，在 64×48 的小场景中验证环境几何遮挡、屏幕外墙面的颜色反弹、发光面 MIS、相机后方且被裁剪物体的 Hit Lighting 反射、物体移除、共享 AS、resize，以及太阳/局部光/透明合成组合；D3D12 Error/Corruption 必须为 0。它与 `--raster-lighting` 的无 AS 降级检查分别验收，不把环境占位当作 GI。
+
+`--raster-preview`（可加 `--bistro` 或 `--rainy`，默认 Kitchen）现在默认渲染 8 帧 **1280×720**：纹理上限 1024、阴影 1024/256、环境 1、曝光 0、太阳开启；支持 DXR/SM6.5 时使用一跳硬件光照，否则为 SSR/环境降级。`--no-hardware-gi`、`--no-sun`、`--sun-azimuth`、`--sun-elevation` 可用于固定输入消融；`--width`、`--height`、`--frames`、`--texture-size`、`--shadow-size` 有显式上限。Bistro 投影检查示例：`./IntegrationProbe.exe --raster-preview --bistro --sun-azimuth 135 --sun-elevation 65`。Kitchen 的模型灯检查可用 `./IntegrationProbe.exe --raster-preview --no-sun`。输出 PNG/JSON 到 ignored `output/raster-validation/`，文件名记录分辨率与照明模式；不启用厂商 SR 或持续呈现。
+
+先构建主应用，再用 `dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/NuGet.Config` 构建探针；**切到探针 exe 所在目录运行**，保证 Agility `./D3D12/` 有效。缩小的阴影预算与有限帧不是生产性能基准；逐帧时间戳、当前一跳 GI 的噪声/缓存/透明限制见[设计第 16 节](../../docs/RASTER_PIPELINE_DESIGN.md#16-2026-10-30720p-验证与一跳硬件光照基线)。
+
 `--common-frame` 检查共享 LinearFrame 与 NativeTAA 的历史/响应/遮挡失效/cut，SDR/HDR 对照独立 CPU 编码，真实 FSR/XeSS/DLSS SR 与路径 DLSSD（不允许回退），跨管线共享相机/GPU 资源、失败候选、尺寸/HDR 及 WARP 无 AS 出图。WARP 是否报告 DXR 由运行日志给出，不把它当作无 DXR 物理设备的覆盖。所有新增 GPU 模式均要求 D3D12 Error/Corruption=0。
 
 `--raster-scenes` 在 160×100、无 jitter、固定相机下，逐一对照四个封装资产的光栅深度与既有 DxrSceneBackend 主射线。材质副本关闭 alpha/透射以隔离几何；透明由 `--raster` 单独覆盖。深度断言计入 1/256 像素取整误差，薄片遮挡变化使用独立 CPU 三角形固定网格投影/插值复核（相对 4e-6 加绝对 1e-10），不把连续射线深度当成逐位相同的硬件光栅结果。CPU 参考只处理当前回查样本的未跨近面三角形；缺少可验证参考仍触发失败。覆盖率必须超过 .98，各场景有效深度比较超过 100。

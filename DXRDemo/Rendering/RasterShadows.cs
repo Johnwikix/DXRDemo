@@ -40,10 +40,10 @@ internal sealed unsafe partial class RasterBackend
             Temporal = new(previousJitter, reset ? 1 : 0, 0),
             SunDirection = new(sun.Direction, 0),
             SunRadiance = new(sun.Radiance, 0),
-            Limits = new(camera.Near, camera.Far, asset.Lights.Length, 0),
+            Limits = new(camera.Near, camera.Far, asset.Lights.Length, Math.Clamp(Vector3.Distance(asset.Minimum, asset.Maximum), 1, 200)),
             ShadowIds = new(-1, -1, -1, -1),
             PreviousOrigin = new(previous.Origin, 0),
-            Environment = new(environment, 0, 0, 0),
+            Environment = new(environment, _hardware != null ? 1 : 0, 0, 0),
             EnvironmentMap = asset.EnvironmentMap is { } map ? new(map.Width, map.Height, map.Rotation, lodBias) : new(0, 0, 0, lodBias)
         };
         int locals = 0;

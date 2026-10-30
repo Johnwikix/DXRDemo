@@ -25,6 +25,25 @@ RWTexture2D<float4> SceneColor : register(u1);
 RWTexture2D<float2> Motion : register(u2);
 RWTexture2D<float> Reactive : register(u3);
 #include "SceneEnvironment.hlsli"
+StructuredBuffer<float4> FilteredEnvironment : register(t8);
+// 与 RasterEnvironment 的固定、有限预积分布局一致；不改变路径追踪的环境 PDF。
+float3 EnvironmentLevel(float3 direction, uint level, bool diffuse = false)
+{
+    uint width = diffuse ? 16u : 128u >> level, height = diffuse ? 8 : max(1u, 64u >> level);
+    uint offset = diffuse ? 10923 : 0;
+    if (!diffuse) for (uint i=0; i<level; i++) offset += (128u >> i)*max(1u,64u >> i);
+    float2 uv = float2(frac(atan2(direction.z,direction.x)/(2*PI)),acos(clamp(direction.y,-1,1))/PI);
+    float2 p = uv*float2(width,height)-.5; int2 q=(int2)floor(p); float2 f=frac(p);
+    uint x0=(q.x+(int)width) % width, x1=(x0+1)%width;
+    uint y0=clamp(q.y,0,(int)height-1), y1=clamp(q.y+1,0,(int)height-1);
+    return lerp(lerp(FilteredEnvironment[offset+y0*width+x0].rgb,FilteredEnvironment[offset+y0*width+x1].rgb,f.x),
+        lerp(FilteredEnvironment[offset+y1*width+x0].rgb,FilteredEnvironment[offset+y1*width+x1].rgb,f.x),f.y)*Environment.x;
+}
+float3 PrefilteredSky(float3 direction, float roughness)
+{
+    float level=saturate(roughness)*7;uint lo=(uint)level;
+    return lerp(EnvironmentLevel(direction,lo),EnvironmentLevel(direction,min(lo+1,7u)),frac(level));
+}
 
 struct Varyings {
     float4 position : SV_Position;
@@ -88,6 +107,10 @@ Surface Evaluate(Varyings input, bool front)
     float4 mr = Texture(m.mrMap,input.uv);
     s.p=input.world; s.n=n; s.base=max(base.rgb,0); s.alpha=saturate(base.a);
     s.roughness=clamp(m.factors.y*mr.g,.02,1); s.metallic=saturate(m.factors.x*mr.b);
+    // 法线在像素内的变化扩大微表面瓣，抑制低分辨率下的亚像素高光闪烁。
+    float3 dx=ddx(n),dy=ddy(n);
+    float variance=min(.5*(dot(dx,dx)+dot(dy,dy)),.25);
+    s.roughness=sqrt(sqrt(saturate(pow(s.roughness,4)+variance)));
     s.emission=max(m.emissive.rgb*Texture(m.emissiveMap,input.uv).rgb,0);
     s.ao=lerp(1,Texture(m.aoMap,input.uv).r,m.factors.w);
     s.transmission=saturate(m.transmission.x*Texture(m.transmissionMap,input.uv).r);
@@ -159,10 +182,22 @@ float3 Brdf(Surface s,float3 v,float3 l)
     float3 f0=lerp(.04,s.base,s.metallic),f=f0+(1-f0)*pow(1-saturate(dot(v,h)),5);
     return ((1-f)*s.base*(1-s.metallic)*(1-s.transmission)/PI+f*d*g/max(4*nv*nl,1e-5))*nl;
 }
-float3 Lighting(Surface s,uint2 pixel,float z)
+float3 EnvironmentWeight(Surface s,float3 v)
+{
+    // GGX split-sum 的解析 DFG 近似；预过滤辐亮度只乘一次 Fresnel/可见性。
+    float nv=saturate(dot(s.n,v));
+    float4 r=s.roughness*float4(-1,-.0275,-.572,.022)+float4(1,.0425,1.04,-.04);
+    float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+    float2 ab=float2(-1.04,1.04)*a004+r.zw;
+    return max(lerp(.04,s.base,s.metallic)*ab.x+ab.y,0);
+}
+float3 Lighting(Surface s,uint2 pixel,float z,bool includeSpecular = true)
 {
     float3 v=normalize(CameraOrigin.xyz-s.p);
-    float3 result=s.emission+(Sky(s.n)*s.base*(1-s.metallic)*.2+Sky(reflect(-v,s.n))*lerp(.04,s.base,s.metallic)*.2)*s.ao;
+    float3 f0=lerp(.04,s.base,s.metallic);
+    float3 result=s.emission;
+    if(includeSpecular||Environment.y==0)result+=EnvironmentLevel(s.n,0,true)*s.base*(1-s.metallic)*(1-s.transmission)*(1-f0)*s.ao;
+    if(includeSpecular) result+=PrefilteredSky(reflect(-v,s.n),s.roughness)*EnvironmentWeight(s,v)*s.ao;
     if(any(SunRadiance.rgb>0)) result+=Brdf(s,v,SunDirection.xyz)*SunRadiance.rgb*SunVisibility(s,z);
     uint offset=ClusterOffset(pixel,z),count=Clusters[offset]; bool overflow=count>64;
     for(uint j=0;j<(overflow?(uint)Limits.z:count);j++) {
@@ -202,23 +237,94 @@ void DeferredLighting(uint3 tid:SV_DispatchThreadID)
     else {
         Surface s=(Surface)0;float4 a=GBase[p],n=GNormal[p],e=GEmission[p];
         s.p=world;s.n=normalize(n.xyz);s.base=a.rgb;s.metallic=a.w;s.roughness=n.w;s.emission=e.rgb;s.ao=e.w;
-        color=Lighting(s,p,z);
+        color=Lighting(s,p,z,false);
     }
     SceneColor[p]=float4(min(color,65000),1); Motion[p]=clamp(MotionVector(world,sky),-32700,32700); Reactive[p]=0;
 }
-struct TransparentOutput { float4 color:SV_Target0; float2 motion:SV_Target1; float reactive:SV_Target2; };
-TransparentOutput TransparentPixel(Varyings input,bool front:SV_IsFrontFace)
+float ViewDepth(float d) { return Limits.x*Limits.y/(Limits.x+d*(Limits.y-Limits.x)); }
+float3 OpaqueSample(float2 pixel)
+{
+    float2 p=clamp(pixel-.5,0,Size.xy-1); int2 q=(int2)floor(p),r=min(q+1,int2(Size.xy)-1);float2 f=frac(p);
+    return lerp(lerp(OpaqueColor[q].rgb,OpaqueColor[int2(r.x,q.y)].rgb,f.x),
+        lerp(OpaqueColor[int2(q.x,r.y)].rgb,OpaqueColor[r].rgb,f.x),f.y);
+}
+// 有限步数、当前帧颜色的屏幕反射；离屏/遮挡缺失时明确回退预过滤环境。
+float ScreenReflection(float3 origin,float3 direction,float3 normal,float roughness,out float3 radiance)
+{
+    radiance=0;
+    float z=dot(origin-CameraOrigin.xyz,CameraForward.xyz);
+    float footprint=max(z*CameraForward.w*2/Size.y,1e-4);
+    float bias=footprint*1.5;
+    float3 start=origin+normal*bias;
+    float lastDelta=0,previousT=bias;
+    [loop]for(uint i=0;i<48;i++) {
+        float t=bias+Limits.w*pow((i+1)/48.0,2);
+        float3 samplePoint=start+direction*t;float4 clip=mul(float4(samplePoint,1),ViewProjection);
+        if(clip.w<=Limits.x) return 0;
+        float2 pixel=(clip.xy/clip.w*float2(.5,-.5)+.5)*Size.xy-Size.zw;
+        if(any(pixel<1)||any(pixel>=Size.xy-1))return 0;
+        float depth=GDepth[(int2)pixel];
+        float delta=clip.w-ViewDepth(depth);
+        // 必须从可见表面前方穿过深度；不能把已有遮挡背后的起点当成命中。
+        if(depth>0&&delta>0&&lastDelta<=0&&i>0) {
+            float lo=previousT,hi=t;
+            [unroll]for(uint j=0;j<5;j++) {
+                float mid=(lo+hi)*.5;float4 c=mul(float4(start+direction*mid,1),ViewProjection);
+                float2 q=(c.xy/c.w*float2(.5,-.5)+.5)*Size.xy-Size.zw;
+                float d=GDepth[clamp((int2)q,0,int2(Size.xy)-1)];
+                if(d==0||c.w<ViewDepth(d))lo=mid;else hi=mid;
+            }
+            float4 hit=mul(float4(start+direction*hi,1),ViewProjection);
+            pixel=(hit.xy/hit.w*float2(.5,-.5)+.5)*Size.xy-Size.zw;
+            int2 q=clamp((int2)pixel,0,int2(Size.xy)-1);
+            float d=GDepth[q];float error=hit.w-ViewDepth(d);
+            float facing=saturate(dot(normalize(GNormal[q].xyz),-direction)*4);
+            if(d==0||error<0||error>max(footprint*3,hit.w*.01)||hi<bias*3)return 0;
+            radiance=OpaqueSample(pixel);
+            float edge=min(min(pixel.x,pixel.y),min(Size.x-pixel.x,Size.y-pixel.y));
+            return saturate(edge/8)*facing*(1-smoothstep(.35,.65,roughness));
+        }
+        lastDelta=depth==0?-Limits.y:delta;previousT=t;
+    }
+    return 0;
+}
+[numthreads(8,8,1)]
+void ResolveReflections(uint3 tid:SV_DispatchThreadID)
+{
+    uint2 p=tid.xy;if(any(p>=(uint2)Size.xy))return;
+    float depth=GDepth[p];if(depth==0) {SceneColor[p]=OpaqueColor[p];return;}
+    float2 ndc=(p+.5+Size.zw)/Size.xy*2-1;
+    float3 ray=CameraForward.xyz+CameraRight.xyz*ndc.x*CameraRight.w*CameraForward.w-CameraUp.xyz*ndc.y*CameraForward.w;
+    Surface s=(Surface)0;float4 a=GBase[p],n=GNormal[p];
+    s.p=CameraOrigin.xyz+ray*ViewDepth(depth);s.n=normalize(n.xyz);s.base=a.rgb;s.metallic=a.w;s.roughness=n.w;s.ao=GEmission[p].w;
+    float3 v=normalize(-ray),direction=reflect(-v,s.n),hit=0;
+    float confidence=0;
+    if(Temporal.w!=0&&s.roughness<.65)confidence=ScreenReflection(s.p,direction,s.n,s.roughness,hit);
+    float3 reflection=lerp(PrefilteredSky(direction,s.roughness),hit,confidence)*EnvironmentWeight(s,v)*s.ao;
+    SceneColor[p]=float4(min(OpaqueColor[p].rgb+reflection,65000),1);
+}
+float4 TransparentPixel(Varyings input,bool front:SV_IsFrontFace) : SV_Target0
 {
     AlphaTest(input,front);Surface s=Evaluate(input,front);Material m=Materials[Instances[NodeIndex].mesh.z];
+    if(m.flags.x==2 && s.alpha<1.0/255)discard;
     float3 color=Lighting(s,(uint2)input.position.xy,dot(s.p-CameraOrigin.xyz,CameraForward.xyz));
     float alpha=m.flags.x==2?s.alpha:1;
     if(s.transmission>0) {
         float3 view=normalize(CameraOrigin.xyz-s.p);float f0=pow((s.ior-1)/(s.ior+1),2),f=f0+(1-f0)*pow(1-saturate(dot(s.n,view)),5);
         float2 uv=input.position.xy/Size.xy;
         float2 offset=float2(dot(s.n,CameraRight.xyz),-dot(s.n,CameraUp.xyz))*s.thickness*(1-1/s.ior)/max(length(CameraOrigin.xyz-s.p),.01);
-        int2 q=clamp((int2)((uv+offset)*Size.xy),0,int2(Size.xy)-1);
+        float2 q=(uv+offset)*Size.xy;
         float3 absorption=m.attenuation.w>0?pow(max(m.attenuation.rgb,1e-6),s.thickness/m.attenuation.w):1;
-        color=lerp(color,Sky(reflect(-view,s.n))*f+OpaqueColor[q].rgb*absorption*s.base*(1-f),s.transmission);
+        color=lerp(color,PrefilteredSky(reflect(-view,s.n),s.roughness)*f+OpaqueSample(q)*absorption*s.base*(1-f),s.transmission);
     }
-    TransparentOutput result;result.color=float4(min(color,65000)*alpha,alpha);result.motion=MotionVector(s.p,false);result.reactive=1;return result;
+    return float4(min(color,65000)*alpha,alpha);
+}
+
+struct TransparentGuideOutput { float2 motion:SV_Target0; float reactive:SV_Target1; };
+TransparentGuideOutput TransparentGuides(Varyings input,bool front:SV_IsFrontFace)
+{
+    AlphaTest(input,front);Material m=Materials[Instances[NodeIndex].mesh.z];
+    float alpha=m.flags.x==2?saturate(m.baseColor.a*input.color.a*Texture(m.baseMap,input.uv).a):1;
+    if(alpha<1.0/255)discard;
+    TransparentGuideOutput result;result.motion=MotionVector(input.world,false);result.reactive=alpha*.25;return result;
 }

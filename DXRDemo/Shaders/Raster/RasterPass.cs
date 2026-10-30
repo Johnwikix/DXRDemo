@@ -33,13 +33,14 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
         _ownsServices = ownsServices;
         _ownsSession = ownsSession;
     }
+    internal bool UseHardwareLighting { get; init; } = true;
     public SceneSession Session
     {
         get;
     }
     public string Id => "raster";
     public string DisplayName => "Clustered raster";
-    public string Description => "LOD0 clustered deferred PBR, CSM, forward transparency and shared HDR reconstruction.";
+    public string Description => "LOD0 clustered PBR, CSM, optional one-bounce hardware GI/hit-lighting reflections, forward transparency and shared HDR reconstruction.";
     public ShaderAuthor Author { get; } = new("RT Demo", null, "See Assets/Models/SOURCES.md for model terms");
     public string? OriginalUrl => null;
     public ShaderCapabilities Capabilities => ShaderCapabilities.UsesMouse | ShaderCapabilities.UsesResolution;
@@ -51,14 +52,15 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
             var status = Session.ReconstructionStatus;
             string reconstruction = status == null ? "SR INITIALIZING" : status.Active == ReconstructionMode.Off ? "NATIVE TAA" :
                 $"SR {status.Active} {status.InputWidth}x{status.InputHeight} -> {status.OutputWidth}x{status.OutputHeight}";
-            return $"CLUSTERED RASTER | LOD0\n{scene.Asset?.Name ?? "LOADING"}  {scene.Asset?.TriangleCount ?? 0:N0} TRIANGLES\nCSM | LOCAL SHADOWS {_backend?.ShadowedLocalLights ?? 0}/2 | ENVIRONMENT FALLBACK\n{reconstruction}";
+            string lighting = _backend?.HardwareLightingActive == true ? "RT GI + HIT LIGHTING" : "SSR + FILTERED IBL | NO GI";
+            return $"CLUSTERED RASTER | LOD0\n{scene.Asset?.Name ?? "LOADING"}  {scene.Asset?.TriangleCount ?? 0:N0} TRIANGLES\nCSM | LOCAL SHADOWS {_backend?.ShadowedLocalLights ?? 0}/2 | {lighting}\n{reconstruction}";
         }
     }
     public void Initialize(DxrDevice device, RenderSize size)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _renderer.Initialize(device);
-        _backend = new RasterBackend(_cache);
+        _backend = new RasterBackend(_cache, hardwareLighting: UseHardwareLighting);
         _backend.Initialize(device);
         _effects = new GpuFrameEffects(device);
     }
@@ -99,7 +101,7 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
         };
         var frame = _backend.Render(camera, _previousCamera, jitter, _previousJitter, reconstruction.Status.InputWidth, reconstruction.Status.InputHeight,
             seconds, reset, scene.ExternalLightingEnabled ? scene.Environment : 0, sun,
-            reconstruction.Status.Active == ReconstructionMode.Off ? 0 : MathF.Log2(reconstruction.Status.InputWidth / (float)width) - 1);
+            0);
         frame = frame with
         {
             Revisions = new(scene.SceneRevision, scene.Revision, cut, _renderer.PipelineRevision)

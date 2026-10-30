@@ -430,7 +430,8 @@ internal static unsafe class ReconstructionProbe
         var desc = source.Description;
         int width = (int)desc.Width, height = (int)desc.Height;
         int channels = desc.Format is Format.R16G16B16A16_Float or Format.R32G32B32A32_Float ? 4 : half2 ? 2 : 1;
-        uint pitch = (uint)((width * channels * (half2 ? 2 : 4) + 255) & ~255);
+        bool unorm8 = desc.Format == Format.R8_UNorm;
+        uint pitch = (uint)((width * channels * (unorm8 ? 1 : half2 ? 2 : 4) + 255) & ~255);
         using var readback = device.CreateCommittedResource(new HeapProperties(HeapType.Readback), HeapFlags.None,
             ResourceDescription.Buffer((ulong)pitch * (uint)height), ResourceStates.CopyDest);
         using var allocator = device.CreateCommandAllocator(CommandListType.Direct);
@@ -450,7 +451,7 @@ internal static unsafe class ReconstructionProbe
         byte* address = readback.Map<byte>(0);
         var result = new float[width * height * channels];
         for (int y = 0; y < height; y++) for (int x = 0; x < width * channels; x++)
-            result[y * width * channels + x] = half2 ? (float)((Half*)(address + y * pitch))[x] : ((float*)(address + y * pitch))[x];
+            result[y * width * channels + x] = unorm8 ? address[y * pitch + x] / 255f : half2 ? (float)((Half*)(address + y * pitch))[x] : ((float*)(address + y * pitch))[x];
         readback.Unmap(0);
         return result;
     }

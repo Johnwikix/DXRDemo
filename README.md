@@ -261,7 +261,7 @@ DXRDemo/                                  解决方案根
 
 ## 光栅化与硬件 GI 管线设计
 
-新增管线的设计与执行进度见 [现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md)：共享场景、相机、GPU 场景与超分组件；不透明物体采用分簇延迟着色，间接光和反射参考 Hardware Lumen 的表面缓存与探针架构。[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 进一步定义类似 Nanite 的动态无裂缝 LOD、分页阴影与缓存联动。2026-10-28 已接入统一 LinearFrame、共享 NativeTAA/SR/RR 与显示编码，并提供可选择的真实 LOD0 分簇延迟光栅入口（CSM/局部阴影、前向透明、独立折射快照）；基础场景/相机/GPU 资源继续共用。动态 LOD、VSM 和硬件 GI 仍为后续阶段，实施范围及验证限制见设计第 14 节。
+新增管线的设计与执行进度见 [现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md)：共享场景、相机、GPU 场景与超分组件；不透明物体采用分簇延迟着色，间接光和反射参考 Hardware Lumen 的表面缓存与探针架构。[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 进一步定义类似 Nanite 的动态无裂缝 LOD、分页阴影与缓存联动。2026-10-28 已接入统一 LinearFrame、共享 NativeTAA/SR/RR 与显示编码，并提供可选择的真实 LOD0 分簇延迟光栅入口（CSM/局部阴影、前向透明、独立折射快照）；基础场景/相机/GPU 资源继续共用。2026-10-30 补充了 SSR、按粗糙度预积分的环境照明、光栅纹理/高光抗闪烁，以及最近透明面的独立重建深度/运动信号（低负载离屏验证见设计第 15 节）。随后接入共享 LOD0 AS 的一跳硬件 GI、实际环境遮挡、发光面 MIS 与 RT Hit Lighting，并将离屏实景验证提高到 720p（设计第 16 节）。无 DXR 时保持 SSR/过滤环境降级；动态 LOD、VSM、Surface/World Cache、多次反弹及完整混合管线验收仍待完成。实施范围及验证限制见设计第 14–16 节。
 
 ---
 
