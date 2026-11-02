@@ -42,7 +42,7 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
     }
     public string Id => "raster";
     public string DisplayName => "Clustered raster";
-    public string Description => "LOD0 clustered PBR, CSM, optional one-bounce hardware GI/hit-lighting reflections, forward transparency and shared HDR reconstruction.";
+    public string Description => "LOD0 clustered PBR, CSM, world-probe diffuse GI/hit-lighting reflections, forward transparency and shared HDR reconstruction.";
     public ShaderAuthor Author { get; } = new("RT Demo", null, "See Assets/Models/SOURCES.md for model terms");
     public string? OriginalUrl => null;
     public ShaderCapabilities Capabilities => ShaderCapabilities.UsesMouse | ShaderCapabilities.UsesResolution;
@@ -54,7 +54,7 @@ public sealed class RasterPass : ISceneShaderPass, IRenderDiagnostics
             var status = Session.ReconstructionStatus;
             string reconstruction = status == null ? "SR INITIALIZING" : status.Active == ReconstructionMode.Off ? "NATIVE TAA" :
                 $"SR {status.Active} {status.InputWidth}x{status.InputHeight} -> {status.OutputWidth}x{status.OutputHeight}";
-            string lighting = _backend?.HardwareLightingActive == true ? $"RT GI + HIT LIGHTING | {(_backend.NrdActive ? "NRD RELAX" : "NRD FALLBACK")}" : "SSR + FILTERED IBL | NO GI";
+            string lighting = _backend?.HardwareLightingActive == true ? $"WORLD PROBE GI | RT REFL 1/{_backend.GiDivisor} | {(_backend.NrdActive ? "NRD RELAX" : "NRD FALLBACK")}" : "SSR + FILTERED IBL | NO GI";
             return $"CLUSTERED RASTER | LOD0\n{scene.Asset?.Name ?? "LOADING"}  {scene.Asset?.TriangleCount ?? 0:N0} TRIANGLES\nCSM | LOCAL SHADOWS {_backend?.ShadowedLocalLights ?? 0}/2 | {lighting}\n{reconstruction}";
         }
     }

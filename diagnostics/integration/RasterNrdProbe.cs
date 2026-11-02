@@ -38,7 +38,7 @@ internal static class RasterNrdProbe
             return;
         }
         RasterProbe.Require(backend.NrdActive && backend.NrdDispatchCount > 0, $"NRD did not execute: {backend.NrdStatus}");
-        using var baseline = new RasterBackend(cache, 256, 128, hardwareLighting: true, denoiseHardware: false);
+        using var baseline = new RasterBackend(cache, 256, 128, hardwareLighting: true, denoiseHardware: false, giDivisor: 1, cachedGi: false);
         baseline.Initialize(device);
         baseline.SetScene(asset);
         double baselineSquare = 0, denoisedSquare = 0, baselineMean = 0, denoisedMean = 0;

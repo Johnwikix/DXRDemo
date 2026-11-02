@@ -21,19 +21,25 @@ internal static class RasterLightingProbe
         using var device = DxrDevice.CreateDefault(false);
         using var debug = device.Device.QueryInterface<ID3D12InfoQueue>();
         using var cache = new GpuSceneCache();
-        bool preview = args.Contains("--raster-preview"), hardwareTest = args.Contains("--raster-hardware");
+        bool preview = args.Contains("--raster-preview"), hardwareTest = args.Contains("--raster-hardware") || args.Contains("--raster-sparse");
         bool nrdTest = args.Contains("--raster-nrd") || args.Contains("--raster-nrd-missing");
-        bool hardware = hardwareTest || nrdTest || (preview && !args.Contains("--no-hardware-gi"));
+        bool worldTest = args.Contains("--raster-world");
+        bool hardware = worldTest || hardwareTest || nrdTest || (preview && !args.Contains("--no-hardware-gi"));
         int shadowSize = preview ? Option(args, "--shadow-size", 1024, 2048) : 256;
-        using var backend = new RasterBackend(cache, shadowSize, preview ? 256 : 128, hardware, !hardwareTest && !args.Contains("--no-nrd"));
+        using var backend = new RasterBackend(cache, shadowSize, preview ? 256 : 128, hardware, !hardwareTest && !args.Contains("--no-nrd"), preview ? Option(args, "--gi-divisor", 4, 4) : args.Contains("--raster-sparse") || worldTest ? 4 : 1, cachedGi: worldTest || preview && !args.Contains("--reference-pixel-gi"));
         Console.WriteLine($"Adapter: {GpuName(device)}; hardware lighting requested={hardware}.");
         backend.Initialize(device);
         if (args.Contains("--raster-preview"))
             await Preview(device, backend, args);
+        else if (worldTest)
+            RasterWorldProbe.Run(device, backend);
         else if (nrdTest)
             RasterNrdProbe.Run(device, cache, backend, args.Contains("--raster-nrd-missing"));
         else if (hardwareTest)
+        {
             RasterHardwareProbe.Run(device, cache, backend);
+            if (args.Contains("--raster-sparse")) RasterSparseProbe.Run(device, cache);
+        }
         else
         {
             EnvironmentEnergy();
@@ -197,7 +203,7 @@ internal static class RasterLightingProbe
     private static async Task Preview(DxrDevice device, RasterBackend backend, string[] args)
     {
         int width = Option(args, "--width", 1280, 1920), height = Option(args, "--height", 720, 1080);
-        int frames = Option(args, "--frames", 8, 16), textureLimit = Option(args, "--texture-size", 1024, 1024);
+        int frames = Option(args, "--frames", 8, 32), textureLimit = Option(args, "--texture-size", 1024, 1024);
         bool screenReflections = !args.Contains("--no-ssr");
         var sun = new SunLightSettings(!args.Contains("--no-sun"), Option(args, "--sun-azimuth", 315, 360), Option(args, "--sun-elevation", 45, 90), 3, 0);
         string name = args.Contains("--bistro") ? "bistro" : args.Contains("--rainy") ? "rainy" : "kitchen";
@@ -205,6 +211,20 @@ internal static class RasterLightingProbe
             ? await GltfImporter.LoadAsync(Path.Combine(AppContext.BaseDirectory, "Assets", "Models", "RainyCorner.glb"), maximumTextureSize: textureLimit)
             : await RtxptAssets.LoadAsync(name == "bistro" ? RtxptScene.Bistro : RtxptScene.Kitchen, maximumTextureSize: textureLimit);
         var asset = document.Scenes[document.DefaultScene];
+        if (args.Contains("--no-emissive"))
+            asset = asset with { Materials = asset.Materials.Select(m => { m.Emissive = Vector4.Zero; return m; }).ToArray() };
+        if (args.Contains("--lamps-only"))
+        {
+            RasterProbe.Require(name == "kitchen", "--lamps-only is the packaged Kitchen fixture");
+            // 固定资产中 46 是发光窗外平面，1/7/47 是橱柜灯、吊灯和微波炉灯；不添加替代灯。
+            asset = asset with { Materials = asset.Materials.Select((m,index) => { if (index == 46) m.Emissive = Vector4.Zero; return m; }).ToArray() };
+        }
+        float environment = args.Contains("--no-environment") ? 0 : 1;
+        var distribution = new SceneLightDistribution(asset);
+        Console.WriteLine($"Scene: lights={asset.Lights.Length}, emitters={distribution.Emitters.Length}, power={distribution.TotalPower:R}");
+        for (int m = 0; m < asset.Materials.Length; m++)
+            if (asset.Materials[m].Emissive.LengthSquared() > 0)
+                Console.WriteLine($"Emissive material {m}: {asset.Materials[m].Emissive}");
         backend.SetScene(asset);
         var controller = new CameraController();
         controller.FrameScene(asset, width / (float)height);
@@ -215,23 +235,41 @@ internal static class RasterLightingProbe
         using var target = device.CreateTexture2D<Rgba64>(width, height);
         Vector2 previous = default;
         var timings = new double[frames];
-        string directory = Path.GetFullPath("../../../../../output/raster-validation");
+        var stages = new object[frames];
+        var workspace=new DirectoryInfo(AppContext.BaseDirectory);
+        while(workspace.Parent!=null&&!File.Exists(Path.Combine(workspace.FullName,"DXRDemo","DXRDemo.csproj")))workspace=workspace.Parent;
+        string directory=Path.Combine(workspace.Parent==null?AppContext.BaseDirectory:workspace.FullName,"output","raster-validation");
         Directory.CreateDirectory(directory);
         for (int i = 0; i < frames; i++)
         {
             var jitter = renderer.Reconstruction.Jitter(true);
-            var frame = backend.Render(camera, camera, jitter, previous, width, height, 1.0 / 60, i == 0, 1,
+            var frame = backend.Render(camera, camera, jitter, previous, width, height, 1.0 / 60, i == 0, environment,
                 sun, screenReflections: screenReflections);
             timings[i] = backend.GpuMilliseconds;
+            stages[i] = new { shadow = backend.ShadowMilliseconds, shadowDraws = backend.ShadowDrawCount, shadowsReused = backend.ShadowsReused, geometry = backend.GeometryMilliseconds, direct = backend.DirectMilliseconds, gi = backend.GiMilliseconds, trace = backend.TraceMilliseconds, denoise = backend.DenoiseMilliseconds };
+            Console.WriteLine($"GPU {i}: total={timings[i]:F3}, shadow={backend.ShadowMilliseconds:F3}, geometry={backend.GeometryMilliseconds:F3}, direct={backend.DirectMilliseconds:F3}, GI trace={backend.TraceMilliseconds:F3}, denoise={backend.DenoiseMilliseconds:F3} ms");
             if (args.Contains("--require-nrd"))
                 RasterProbe.Require(backend.NrdActive && backend.NrdDispatchCount > 0, $"NRD fixed preview fell back: {backend.NrdStatus}");
             renderer.Output(frame, target, HdrRenderParameters.Default, 0);
             previous = jitter;
         }
-        string stem = $"{name}-{width}x{height}" + (screenReflections ? "" : "-no-ssr") + (sun.Enabled ? $"-sun-a{sun.Azimuth}-e{sun.Elevation}" : "-no-sun") + (backend.HardwareLightingActive ? "-rt" : "-raster") + (backend.NrdActive ? "-nrd" : "-raw");
+        string stem = $"{name}-{width}x{height}" + (environment == 0 ? "-no-env" : "") + (args.Contains("--lamps-only") ? "-lamps" : "") + (args.Contains("--no-emissive") ? "-no-emissive" : "") + (screenReflections ? "" : "-no-ssr") + (sun.Enabled ? $"-sun-a{sun.Azimuth}-e{sun.Elevation}" : "-no-sun") + (backend.HardwareLightingActive ? $"-rt-{(backend.CachedGi ? "world" : "pixel")}-d{backend.GiDivisor}" : "-raster") + (backend.NrdActive ? "-nrd" : "-raw");
+        var linear = ReconstructionProbe.ReadTexture(device.Device, backend.SceneColor, true);
+        var emission = ReconstructionProbe.ReadTexture(device.Device, backend.EmissionBuffer, true);
+        double receiverSum = 0; int receiverCount = 0;
+        for (int pixel = 0; pixel < width*height; pixel++)
+            if (emission[pixel*4+3] >= 0 && emission[pixel*4]+emission[pixel*4+1]+emission[pixel*4+2] == 0)
+            { receiverSum += linear[pixel*4]; receiverCount++; }
+        double receiverMean = receiverSum / Math.Max(receiverCount,1);
+        Console.WriteLine($"Non-emissive receiver red mean={receiverMean:R}, pixels={receiverCount}.");
+        if (args.Contains("--lamps-only") && environment == 0 && !sun.Enabled)
+            RasterProbe.Require(args.Contains("--no-emissive") ? receiverMean < 1e-6 : receiverMean > .001, "Authored indoor lamps did not change receiver illumination");
+        int warmup = Math.Min(backend.CachedGi ? 16 : 4, frames / 2);
+        double Median(IEnumerable<double> values) { var sorted = values.Order().ToArray(); return sorted.Length % 2 == 0 ? (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]) * .5 : sorted[sorted.Length / 2]; }
+        Console.WriteLine($"Measured total GPU median={Median(timings.Skip(warmup)):R} ms, discarded={warmup}, samples={frames-warmup}.");
         SceneProbe.Save(target, Path.Combine(directory, stem + ".png"));
-        var report = new { name, width, height, frames, textureLimit, shadows = $"{Option(args, "--shadow-size", 1024, 2048)}/256", environment = 1, exposure = 0, sun, gpuMilliseconds = timings,
-            gi = backend.HardwareLightingActive ? "one bounce HWRT" : "not implemented", nrd = backend.NrdActive, nrdDispatches = backend.NrdDispatchCount, nrdStatus = backend.NrdStatus, reflections = backend.HardwareLightingActive ? "RT hit lighting" : screenReflections ? "SSR + prefiltered environment" : "prefiltered environment only", camera, hardware = GpuName(device) };
+        var report = new { name, width, height, frames, textureLimit, shadows = $"{Option(args, "--shadow-size", 1024, 2048)}/256", environment, exposure = 0, sun, receiverMean, receiverCount, warmup, samples = frames - warmup, medianGpuMilliseconds = Median(timings.Skip(warmup)), gpuMilliseconds = timings, stages,
+            giDivisor = backend.GiDivisor, gi = backend.HardwareLightingActive ? backend.CachedGi ? "scrolling world irradiance cache" : "reference pixel HWRT" : "not implemented", worldUpdates = backend.WorldUpdates, worldProbeRays = backend.CachedGi ? (RasterWorldCache.Rays+1)*RasterWorldCache.Budget : 0, pixelDiffuseRays = backend.CachedGi ? 0 : (width+backend.GiDivisor-1)/backend.GiDivisor*((height+backend.GiDivisor-1)/backend.GiDivisor), nrd = backend.NrdActive, nrdDispatches = backend.NrdDispatchCount, nrdStatus = backend.NrdStatus, reflections = backend.HardwareLightingActive ? "RT hit lighting" : screenReflections ? "SSR + prefiltered environment" : "prefiltered environment only", camera, hardware = GpuName(device) };
         File.WriteAllText(Path.Combine(directory, stem + ".json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true, IncludeFields = true }));
         Console.WriteLine($"PASS: {name} headless preview: {width}x{height}, {frames} frames, hardware lighting={backend.HardwareLightingActive}, NRD={backend.NrdActive}, dispatches={backend.NrdDispatchCount}, textures {textureLimit}; {directory}");
     }

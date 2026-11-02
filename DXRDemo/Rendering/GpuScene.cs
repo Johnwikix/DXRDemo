@@ -11,6 +11,7 @@ internal struct GpuSceneInstance
 {
     public uint VertexOffset, IndexOffset, Material, CausticCaster;
     public Matrix4x4 World, Normal;
+    // XY 保持 PT 面积 PDF/首个 emitter；ZW 为光栅混合提议的条件概率，仍为 160 字节实例 ABI。
     public Vector4 EmissionSampling;
 }
 
@@ -45,10 +46,10 @@ internal sealed class GpuScene : GpuResourceOwner
     internal required SceneAsset Asset;
     internal (int Vertex, int Index)[] MeshOffsets = [];
     internal ID3D12Resource Vertices = null!, Indices = null!, Instances = null!, Materials = null!;
-    internal ID3D12Resource Lights = null!, Emitters = null!, EnvironmentTexels = null!;
+    internal ID3D12Resource Lights = null!, Emitters = null!, EmitterGroups = null!, EnvironmentTexels = null!;
     // CPU SRV 堆供各管线复制；采样器堆只读，可以直接绑定。
     internal ID3D12DescriptorHeap TextureViews = null!, Samplers = null!;
-    internal uint EmitterCount;
+    internal uint EmitterCount, EmitterGroupCount;
     internal float EmitterPower;
     internal bool HasTransmission, HasRefractiveVolumes;
     internal Vector4 CausticBounds;

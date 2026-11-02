@@ -5,9 +5,12 @@ float Luminance(float3 value) { return dot(value,float3(.2126,.7152,.0722)); }
 #include "PathBsdf.hlsli"
 #include "SceneVisibility.hlsli"
 
+#include "RasterWorldCache.hlsli"
+StructuredBuffer<uint> EmitterGroups : register(t8);
 Texture2D<float4> RasterBase : register(t0, space3);
 Texture2D<float4> RasterNormal : register(t1, space3);
 Texture2D<float> RasterDepth : register(t2, space3);
+Texture2D<float4> RasterEmission : register(t3, space3);
 RWTexture2D<float4> IndirectDiffuse : register(u0, space3);
 RWTexture2D<float4> IndirectSpecular : register(u1, space3);
 
@@ -19,7 +22,8 @@ float RasterZ(float depth) {
     return CameraOrigin.w*CameraRight.w/(CameraOrigin.w+depth*(CameraRight.w-CameraOrigin.w));
 }
 float3 RasterPosition(int2 pixel) {
-    float2 ndc=(pixel+.5+Size.zw)/Size.xy*2-1;
+    float2 source=min(pixel*max(PreviousSize.z,1)+floor(max(PreviousSize.z,1)*.5),Size.xy-1);
+    float2 ndc=(source+.5+Size.zw)/Size.xy*2-1;
     float3 ray=CameraForward.xyz+CameraRight.xyz*ndc.x*(Size.x/Size.y)*CameraForward.w-CameraUp.xyz*ndc.y*CameraForward.w;
     return CameraOrigin.xyz+ray*RasterZ(RasterDepth[pixel]);
 }
@@ -28,7 +32,7 @@ Surface PrimarySurface(int2 pixel) {
     float4 a=RasterBase[pixel],n=RasterNormal[pixel];
     s.p=RasterPosition(pixel);s.n=SafeNormalize(n.xyz,float3(0,1,0));s.g=s.n;
     // 从 opaque depth 选择同表面的一侧导数；几何法线负责起点偏移，不能沿凹凸法线穿墙。
-    int2 lo=max(pixel-1,0),hi=min(pixel+1,int2(Size.xy)-1);
+    int2 lo=max(pixel-1,0),hi=min(pixel+1,int2(PreviousSize.xy)-1);
     float3 left=RasterPosition(int2(lo.x,pixel.y)),right=RasterPosition(int2(hi.x,pixel.y));
     float3 up=RasterPosition(int2(pixel.x,lo.y)),down=RasterPosition(int2(pixel.x,hi.y));
     float3 dx=length(s.p-left)<length(right-s.p)?s.p-left:right-s.p;
@@ -38,8 +42,53 @@ Surface PrimarySurface(int2 pixel) {
     return s;
 }
 
+float RasterEmitterPdf(Emitter e) {
+    float4 group=Instances[(uint)e.meta.z].emissionSampling;
+    return .5*e.e1.w+.5*group.z*group.w/max(e.meta.x,1e-12);
+}
+Emitter SampleRasterEmitter(inout uint rng,out float2 bary) {
+    Emitter e;
+    if(Random(rng)<.5&&Environment.w>0) {
+        uint group=EmitterGroups[min((uint)(Random(rng)*Environment.w),(uint)Environment.w-1)];
+        float4 sampling=Instances[group].emissionSampling;uint triangles=(uint)round(1/sampling.z);
+        e=Emitters[(uint)sampling.y-1+min((uint)(Random(rng)*triangles),triangles-1)];
+    } else {
+        uint index=min((uint)(Random(rng)*Environment.y),(uint)Environment.y-1);Emitter column=Emitters[index];
+        e=Emitters[Random(rng)<column.p0.w?index:(uint)column.e2.w];
+    }
+    float u=sqrt(Random(rng));bary=float2(u*(1-Random(rng)),0);bary.y=u-bary.x;return e;
+}
+// RIS 在同一功率 alias 分布上按接收点的几何贡献重采样，只追一次选中灯的阴影。
+// 发光面直接路径由此估计器独占；余弦命中不再叠加 emission，避免使用错误的 RIS/MIS PDF。
+float3 ResampledAreaLight(Surface s,inout uint rng) {
+    if(Environment.y<=0)return 0;
+    Emitter chosen=(Emitter)0;float2 chosenBary=0;float total=0,chosenWeight=0;
+    [loop]for(uint candidate=0;candidate<8;candidate++) {
+        float2 bary;Emitter e=SampleRasterEmitter(rng,bary);float proposal=RasterEmitterPdf(e);
+        float3 delta=e.p0.xyz+e.e1.xyz*bary.x+e.e2.xyz*bary.y-s.p;
+        float r2=dot(delta,delta);float3 l=delta*rsqrt(max(r2,1e-12));
+        float3 normal=SafeNormalize(cross(e.e1.xyz,e.e2.xyz),float3(0,1,0));
+        float cosine=dot(s.g,l)>0?saturate(dot(s.n,l)):0;
+        Material material=Materials[Instances[(uint)e.meta.z].mesh.z];
+        float weight=e.meta.x>0?max(Luminance(material.emissive.rgb),1e-4)*cosine*abs(dot(normal,-l))/(PI*max(r2*proposal,1e-12)):0;
+        total+=weight;
+        if(weight>0&&Random(rng)*total<weight) {chosen=e;chosenBary=bary;chosenWeight=weight;}
+    }
+    if(chosenWeight<=0)return 0;
+    float3 delta=chosen.p0.xyz+chosen.e1.xyz*chosenBary.x+chosen.e2.xyz*chosenBary.y-s.p;
+    float distance=length(delta);float3 l=delta/max(distance,1e-8);
+    Surface lamp=Evaluate((uint)chosen.meta.z,(uint)chosen.meta.w,chosenBary,0,-l);
+    Material m=Materials[lamp.material];
+    if((m.flags.z==0&&lamp.front==0)||(m.flags.x==1&&lamp.alpha<m.flags.y))return 0;
+    float proposal=RasterEmitterPdf(chosen);
+    float pdf=proposal*distance*distance/max(abs(dot(lamp.g,-l)),1e-8);
+    bool stochastic;float3 visibility=Visibility(Offset(s,l),l,distance-max(Limits.x*8,distance*1e-5),rng,stochastic);
+    return lamp.emission*(m.flags.x==2?lamp.alpha:1)*visibility*saturate(dot(s.n,l))/(PI*max(pdf,1e-8))*total/(8*chosenWeight);
+}
+
 // 对共享发光面 CDF 的一个面积样本。返回出射反射光；primaryDiffuse 时保存 E/π。
 float3 AreaLight(Surface s,float3 view,inout uint rng,bool primaryDiffuse) {
+    if(primaryDiffuse&&PreviousSize.z>1)return ResampledAreaLight(s,rng);
     if(Environment.y<=0)return 0;
     float choice=Random(rng);uint lo=0,hi=(uint)Environment.y-1;
     while(lo<hi) {uint mid=(lo+hi)/2;if(Emitters[mid].meta.y<=choice)lo=mid+1;else hi=mid;}
@@ -69,6 +118,7 @@ float3 EnvironmentLight(Surface s,float3 view,inout uint rng,bool primaryDiffuse
     return (d+r)*Sky(l)*visibility*cosine/pdf;
 }
 float3 HitLighting(Surface s,float3 view,inout uint rng) {
+    if(Materials[s.material].flags.w!=0)return s.base;
     float3 result=AreaLight(s,view,rng,false)+EnvironmentLight(s,view,rng,false);
     uint count=(uint)Control.w+(any(SunRadiance.rgb>0)?1:0);
     for(uint i=0;i<count;i++) {
@@ -86,20 +136,23 @@ float3 HitLighting(Surface s,float3 view,inout uint rng) {
         bool stochastic;float3 visibility=Visibility(Offset(s,l),l,distance-Limits.x*4,rng,stochastic,true);
         result+=(d+r)*light.colorIntensity.rgb*light.colorIntensity.w*attenuation*saturate(dot(s.n,l))*visibility;
     }
+    if(Lighting.x>0)result+=s.base*(1-s.metallic)*.96*CacheIrradiance(s.p,s.n);
     return result;
 }
 
 [shader("raygeneration")]
 void RasterLightingRayGen() {
     uint2 pixel=DispatchRaysIndex().xy;
-    if(RasterDepth[pixel]==0) {IndirectDiffuse[pixel]=0;IndirectSpecular[pixel]=0;return;}
+    if(RasterDepth[pixel]==0||RasterEmission[pixel].w<0) {IndirectDiffuse[pixel]=0;IndirectSpecular[pixel]=0;return;}
     Surface s=PrimarySurface(pixel);float3 view=normalize(CameraOrigin.xyz-s.p);
     uint rng=PathSeed(pixel,(uint)Control.z,7);
     float2 u=float2(Random(rng),Random(rng));float radius=sqrt(u.x),phi=2*PI*u.y;
     float3 l=Local(s.n,float3(radius*cos(phi),radius*sin(phi),sqrt(1-u.x)));
     float diffuseHit=0;
-    float3 incoming=AreaLight(s,view,rng,true)+EnvironmentLight(s,view,rng,true);
-    if(dot(s.g,l)>0) {
+    float3 incoming;
+    if(Lighting.x>0) {incoming=CacheIrradiance(s.p,s.n);diffuseHit=0;}
+    else incoming=AreaLight(s,view,rng,true)+EnvironmentLight(s,view,rng,true);
+    if(Lighting.x==0&&dot(s.g,l)>0) {
         Payload hit=Trace(Offset(s,l),l,CameraRight.w,false,rng,false,true);
         diffuseHit=hit.instance==0xffffffff?65504:hit.t;
         bool stochastic;
@@ -109,11 +162,19 @@ void RasterLightingRayGen() {
         else {
             Surface secondary=Evaluate(hit.instance,hit.primitive,hit.bary,hit.t*CameraForward.w*2/Size.y,-l);
             float lightPdf=secondary.emissionPdf*hit.t*hit.t/max(abs(dot(secondary.g,-l)),1e-8);
-            incoming+=transmission*(secondary.emission*Mis(pdf,lightPdf)+HitLighting(secondary,-l,rng));
+            incoming+=transmission*((PreviousSize.z>1?0:secondary.emission*Mis(pdf,lightPdf))+HitLighting(secondary,-l,rng));
         }
     }
     IndirectDiffuse[pixel]=float4(min(max(incoming,0),65000),min(diffuseHit,65504));
 
+    // 高粗糙度、非金属仅使用低频世界探针近似；光滑/金属继续保留方向准确的 Hit Lighting。
+    if(Lighting.x>0&&s.roughness>.8&&s.metallic<.2) {
+        float4 fit=s.roughness*float4(-1,-.0275,-.572,.022)+float4(1,.0425,1.04,-.04);
+        float a004=min(fit.x*fit.x,exp2(-9.28*saturate(dot(s.n,view))))*fit.x+fit.y;
+        float2 ab=float2(-1.04,1.04)*a004+fit.zw;
+        float3 factor=max(lerp(.04,s.base,s.metallic)*ab.x+ab.y,0);
+        IndirectSpecular[pixel]=float4(CacheIrradiance(s.p,reflect(-view,s.n))*factor,0);return;
+    }
     // 独立 GGX VNDF 镜面样本，命中重新着色；不读取当前最终颜色或漫反射缓存。
     float3 micro=Local(s.n,sampleGGX_VNDF(s.roughness*s.roughness,ToLocal(s.n,view),float2(Random(rng),Random(rng))));
     l=reflect(-view,micro);float3 reflected=0;float specularHit=0;
@@ -133,3 +194,5 @@ void RasterLightingRayGen() {
     }
     IndirectSpecular[pixel]=float4(min(max(reflected,0),65000),min(specularHit,65504));
 }
+
+#include "RasterWorldUpdate.hlsli"

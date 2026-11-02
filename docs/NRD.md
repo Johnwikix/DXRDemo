@@ -261,3 +261,12 @@ Kitchen（额外太阳关闭）与 Bistro（太阳方位 135°/仰角 65°）各
 ### 本机原生桥构建记录
 
 新增 C++ 导出触发重链接后，本机 VS 18/v145 报 `LNK1101 MSPDB140.DLL` 版本错误。使用已安装 VS2022 的 MSBuild，单次输入 `/p:PlatformToolset=v143 /p:VCToolsVersion=14.44.35207 /p:PreferredToolArchitecture=x64` 成功构建 **应用自己的 Reconstruction 桥**，未改工程 toolset、SDK 版本或厂商文件。随后主应用 Debug/Release 与探针使用 `-p:SkipReconstructionNativeBuild=true` 复用这份刚构建的桥，均构建成功；已有生成 XAML 的 Icon CS0618 警告仍在。健康 v145 环境仍走标准自动构建入口。
+
+
+## 2026-11-02：世界缓存 GI 与屏幕重建分辨率
+
+生产漫反射已转为世界探针缓存查询，不再按屏幕像素发射漫反射 GI 射线。它使用自身的方向/时间滤波，raw alpha 为 0；探针间距不充当 NRD 的命中距离。生产 diffuse 的 NRD 输入全填零，合成直接使用缓存 E/π 并恢复全分辨率材质。高粗糙度探针反射同样不送 NRD，仅实际反射射线使用真实 hit distance、官方打包与降噪输出。
+
+独立 RELAX 上下文默认运行于输入尺寸的 1/4 宽高；当前继续复用 combined dispatch 执行器，未使用的 diffuse 输出不参与合成，后续可独立优化为官方 specular 单通道。guides 来自固定网格的真实 opaque 样本，世界位置按原始像素重建；motion 以真实步长换成降噪像素。奇数尺寸使用 padded 投影，不完整边缘 block 标记无效，pixel-center 偏移进入 NRD jitter；极小输入将采样步长缩至 2/1。最终按深度/法线/粗糙度重建，直接光、emission、unlit 与透明后合成保留原分辨率。
+
+世界/表面缓存不借用 NRD 历史，不因 camera cut 或屏幕 resize 清空；场景/灯光失效由缓存自身处理。完整契约与未完成项见[设计第 18 节](RASTER_PIPELINE_DESIGN.md#18-2026-11-02实现核对与缓存式-gi)。原 `--raster-nrd` 继续以 1× 分辨率、关闭世界缓存作为双信号 SDK 契约对照；缺 DLL 仍回退并保留厂商 SR。`--raster-world` 检查缓存输入全零、高粗糙度反射不伪造距离，以及屏幕外金属反射确有真实 NRD hit distance。

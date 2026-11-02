@@ -23,30 +23,36 @@ internal sealed unsafe class RasterHardwareDenoiser : GpuResourceOwner
     private readonly nint _context;
     private readonly ComputePass _prepare, _compose;
     private readonly ID3D12Resource _constants, _packedDiffuse, _packedSpecular, _normal, _viewZ, _motion, _diffuse, _specular;
-    private readonly int _width, _height;
+    private readonly bool _cachedGi;
+    private readonly int _width, _height, _sourceWidth, _sourceHeight, _divisor;
+    internal ID3D12Resource DenoisedDiffuse => _diffuse;
+    internal ID3D12Resource DenoisedSpecular => _specular;
     private bool _executed;
     internal uint DispatchCount => NativeNrd.DispatchCount(_context);
     internal uint MaxAccumulatedFrames => NativeNrd.MaxAccumulatedFrames(_context);
+    internal ID3D12Resource DiffuseInput => _packedDiffuse;
+    internal ID3D12Resource SpecularInput => _packedSpecular;
     internal ID3D12Resource ViewZ => _viewZ;
     internal ID3D12Resource Motion => _motion;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Constants
     {
-        internal Vector4 Origin, Forward, Right, Up, PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, Size, Jitter;
+        internal Vector4 Origin, Forward, Right, Up, PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, Size, Jitter, SourceSize;
     }
 
     internal RasterHardwareDenoiser(ID3D12Device5 device, int width, int height, ID3D12Resource material, ID3D12Resource normal,
-        ID3D12Resource depth, ID3D12Resource direct, ID3D12Resource rawDiffuse, ID3D12Resource rawSpecular, ID3D12Resource output)
+        ID3D12Resource depth, ID3D12Resource emission, ID3D12Resource direct, ID3D12Resource rawDiffuse, ID3D12Resource rawSpecular, ID3D12Resource output, int sourceWidth, int sourceHeight, int divisor, bool cachedGi)
     {
-        _width = width; _height = height;
+        _cachedGi = cachedGi;
+        _width = width; _height = height; _sourceWidth = sourceWidth; _sourceHeight = sourceHeight; _divisor = divisor;
         try
         {
             if (NativeNrd.CreateRadiance(device.NativePointer, (uint)width, (uint)height, out _context) != 0)
                 throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "光栅 NRD 初始化失败。");
             Keep(new Context(_context));
-            _prepare = Keep(new ComputePass(device, "RasterHardwareNrd.hlsl", "Prepare", 8, 6));
-            _compose = Keep(new ComputePass(device, "RasterHardwareNrd.hlsl", "Composite", 8, 6));
+            _prepare = Keep(new ComputePass(device, "RasterHardwareNrd.hlsl", "Prepare", 9, 6));
+            _compose = Keep(new ComputePass(device, "RasterHardwareNrd.hlsl", "Composite", 9, 6));
             _constants = Keep(DxrResources.CreateUploadBuffer(device, 256));
             ID3D12Resource Texture(Format format) => Keep(DxrResources.CreateUnorderedAccessTexture2D(device, (uint)width, (uint)height, format, ResourceStates.NonPixelShaderResource));
             _packedDiffuse = Texture(Format.R16G16B16A16_Float);
@@ -57,14 +63,26 @@ internal sealed unsafe class RasterHardwareDenoiser : GpuResourceOwner
             _diffuse = Texture(Format.R16G16B16A16_Float);
             _specular = Texture(Format.R16G16B16A16_Float);
             _prepare.Srv(0, material); _prepare.Srv(1, normal); _prepare.Srv(2, depth);
+            _prepare.Srv(8, emission);
             _prepare.Srv(3, rawDiffuse); _prepare.Srv(4, rawSpecular);
             _prepare.Uav(0, _packedDiffuse); _prepare.Uav(1, _packedSpecular); _prepare.Uav(2, _normal);
             _prepare.Uav(3, _viewZ); _prepare.Uav(4, _motion);
             _compose.Srv(0, material); _compose.Srv(1, normal); _compose.Srv(2, depth);
+            _compose.Srv(3, rawDiffuse); _compose.Srv(4, rawSpecular); _compose.Srv(8, emission);
             _compose.Srv(5, _diffuse); _compose.Srv(6, _specular); _compose.Srv(7, direct);
             _compose.Uav(5, output);
         }
         catch { Dispose(); throw; }
+    }
+
+    private Vector2 SampleOffset => _divisor == 1 ? default : new(.5f);
+    private Matrix4x4 Projection(in CameraFrame camera)
+    {
+        var projection=Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov,_sourceWidth/(float)_sourceHeight,camera.Near,camera.Far);
+        // 低分辨率网格的最后一个不完整 block 作为无效 guide；投影覆盖完整的 padded 网格。
+        float x=_sourceWidth/(float)(_width*_divisor), y=_sourceHeight/(float)(_height*_divisor);
+        projection.M11*=x;projection.M22*=y;projection.M31=1-x;projection.M32=y-1;
+        return projection;
     }
 
     private void Inputs(ID3D12GraphicsCommandList4 commands, bool write)
@@ -90,7 +108,8 @@ internal sealed unsafe class RasterHardwareDenoiser : GpuResourceOwner
             Right = new(camera.Right, camera.Far), Up = new(camera.Up, 0),
             PreviousOrigin = new(oldCamera.Origin, oldCamera.Near), PreviousForward = new(oldCamera.Forward, MathF.Tan(oldCamera.VerticalFov * .5f)),
             PreviousRight = new(oldCamera.Right, oldCamera.Far), PreviousUp = new(oldCamera.Up, 0),
-            Size = new(_width, _height, reset ? 1 : 0, 0), Jitter = new(jitter.X, jitter.Y, oldJitter.X, oldJitter.Y)
+            Size = new(_width, _height, reset ? 1 : 0, 0), Jitter = new(jitter.X, jitter.Y, oldJitter.X, oldJitter.Y),
+            SourceSize = new(_sourceWidth, _sourceHeight, _divisor, _cachedGi ? 1 : 0)
         };
         void* pointer;
         _constants.Map(0, null, &pointer).CheckError(); *(Constants*)pointer = data; _constants.Unmap(0);
@@ -104,15 +123,15 @@ internal sealed unsafe class RasterHardwareDenoiser : GpuResourceOwner
             Output = _diffuse.NativePointer, SpecularOutput = _specular.NativePointer,
             WorldToView = Matrix4x4.CreateLookAt(camera.Origin, camera.Origin + camera.Forward, camera.Up),
             WorldToViewPrevious = Matrix4x4.CreateLookAt(oldCamera.Origin, oldCamera.Origin + oldCamera.Forward, oldCamera.Up),
-            ViewToClip = Matrix4x4.CreatePerspectiveFieldOfView(camera.VerticalFov, _width / (float)_height, camera.Near, camera.Far),
-            ViewToClipPrevious = Matrix4x4.CreatePerspectiveFieldOfView(oldCamera.VerticalFov, _width / (float)_height, oldCamera.Near, oldCamera.Far),
-            Jitter = jitter, PreviousJitter = oldJitter, Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
+            ViewToClip = Projection(camera),
+            ViewToClipPrevious = Projection(oldCamera),
+            Jitter = (jitter + SampleOffset) / _divisor, PreviousJitter = (oldJitter + SampleOffset) / _divisor, Milliseconds = (float)Math.Clamp(seconds * 1000, 1, 250),
             FrameIndex = frameIndex, Reset = reset ? 1u : 0u, DenoisingRange = camera.Far,
             MaxAccumulatedFrames = camera == oldCamera ? NativeNrd.DefaultMaxAccumulatedFrames : NativeNrd.MotionMaxAccumulatedFrames
         };
         if (NativeNrd.Execute(_context, commands.NativePointer, &frame) != 0)
             throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()) ?? "光栅 NRD 执行失败。");
-        _compose.Dispatch(commands, _constants, _width, _height);
+        if (_divisor == 1) _compose.Dispatch(commands, _constants, _width, _height);
         _executed = true;
     }
 }

@@ -68,6 +68,12 @@ public sealed unsafe partial class GpuSceneCache
             SceneLight[] lights = asset.Lights.Length == 0 ? new SceneLight[1] : asset.Lights;
             scene.Lights = Upload(scene, MemoryMarshal.AsBytes(lights.AsSpan()));
             var distribution = new SceneLightDistribution(asset, cancellation);
+            var groups = new List<uint>();
+            for (int i = 0; i < asset.Instances.Length; i++)
+                if (distribution.InstanceEmitterStart[i] >= 0 && distribution.InstanceAreaPdf[i] > 0 && asset.Meshes[asset.Instances[i].Mesh].Indices.Length > 0)
+                    groups.Add((uint)i);
+            scene.EmitterGroupCount = (uint)groups.Count;
+            scene.EmitterGroups = Upload(scene, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(groups)));
             var instanceData = new GpuSceneInstance[asset.Instances.Length];
             Vector3 glassMin = new(float.PositiveInfinity), glassMax = new(float.NegativeInfinity);
             for (int i = 0; i < instanceData.Length; i++)
@@ -96,7 +102,9 @@ public sealed unsafe partial class GpuSceneCache
                     CausticCaster = causticCaster ? 1u : 0u,
                     World = instance.Transform,
                     Normal = Matrix4x4.Transpose(inverse),
-                    EmissionSampling = new(distribution.InstanceAreaPdf[i], distribution.InstanceEmitterStart[i] + 1, 0, 0)
+                    EmissionSampling = new(distribution.InstanceAreaPdf[i], distribution.InstanceEmitterStart[i] + 1,
+                        distribution.InstanceAreaPdf[i] > 0 && mesh.Indices.Length > 0 ? 3f / mesh.Indices.Length : 0,
+                        groups.Count > 0 && distribution.InstanceAreaPdf[i] > 0 ? 1f / groups.Count : 0)
                 };
             }
             scene.EmitterCount = distribution.TotalPower > 0 ? (uint)distribution.Emitters.Length : 0;

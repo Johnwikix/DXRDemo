@@ -60,6 +60,14 @@ internal sealed class ComputePass : GpuResourceOwner
             } : null;
         _device.CreateShaderResourceView(resource, view, _heap.GetCPUDescriptorHandleForHeapStart() + index * _stride);
     }
+    internal void BufferSrv(int index, ID3D12Resource resource, uint stride, uint count) => _device.CreateShaderResourceView(resource,
+        new ShaderResourceViewDescription { Format = Format.Unknown, ViewDimension = ShaderResourceViewDimension.Buffer,
+            Shader4ComponentMapping = ShaderComponentMapping.Default, Buffer = new() { NumElements = count, StructureByteStride = stride } },
+        _heap.GetCPUDescriptorHandleForHeapStart() + index * _stride);
+    internal void BufferUav(int index, ID3D12Resource resource, uint stride, uint count) => _device.CreateUnorderedAccessView(resource, null,
+        new UnorderedAccessViewDescription { Format = Format.Unknown, ViewDimension = UnorderedAccessViewDimension.Buffer,
+            Buffer = new() { NumElements = count, StructureByteStride = stride } },
+        _heap.GetCPUDescriptorHandleForHeapStart() + (_srvCount + index) * _stride);
     internal void Uav(int index, ID3D12Resource resource) => _device.CreateUnorderedAccessView(resource, null, null, _heap.GetCPUDescriptorHandleForHeapStart() + (_srvCount + index) * _stride);
     internal void Dispatch(ID3D12GraphicsCommandList4 commands, ID3D12Resource constants, int width, int height)
     {

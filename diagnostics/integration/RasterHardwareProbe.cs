@@ -104,7 +104,7 @@ internal static class RasterHardwareProbe
         Console.WriteLine($"PASS: offscreen RT reflection={reflection}, removed={removed}; resize and shared AS lease reuse.");
     }
 
-    private static SceneAsset Room(SceneMaterial receiver, SceneMaterial wall)
+    internal static SceneAsset Room(SceneMaterial receiver, SceneMaterial wall)
     {
         var asset = RasterProbe.Fixture(receiver);
         var quad = asset.Meshes[0];

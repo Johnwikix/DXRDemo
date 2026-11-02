@@ -197,6 +197,10 @@ internal static class RasterProbe
             Textures = [new("AO", 1, 1, [[0, 0, 0, 255]], false)]
         }, 1);
         Require(occluded[center] < 1e-6, "Occlusion map did not gate fallback environment lighting");
+        material=SceneMaterial.Default;material.BaseColor=new(.2f,.4f,.6f,1);material.Emissive=new(.03f,.01f,.02f,0);material.Flags.W=1;
+        var unlit=Draw(Fixture(material),10,new SunLightSettings(true,315,45,30,0));
+        Require(Math.Abs(unlit[center]-.23f)<.001&&Math.Abs(unlit[center+1]-.41f)<.001&&Math.Abs(unlit[center+2]-.62f)<.001,"Unlit material received direct/SSR/IBL illumination");
+        Console.WriteLine($"PASS: unlit base+emission independent of 10x environment and intense sun: {unlit[center]:R}/{unlit[center+1]:R}/{unlit[center+2]:R}.");
         Console.WriteLine($"PASS: sRGB={expected:F9}, UV0/UV1/transform/repeat/nearest, metallic/dielectric GGX, normal and AO maps.");
     }
     private static void Shadows(DxrDevice device, RasterBackend backend, CameraFrame camera)

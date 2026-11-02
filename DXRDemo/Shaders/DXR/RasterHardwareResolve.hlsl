@@ -5,12 +5,13 @@ Texture2D<float> Depth : register(t2);
 Texture2D<float4> Direct : register(t3);
 Texture2D<float4> Diffuse : register(t4);
 Texture2D<float4> Specular : register(t5);
+Texture2D<float4> Emission : register(t6);
 RWTexture2D<float4> Color : register(u0);
 float ViewZ(float d) {return Origin.w*Right.w/(Origin.w+d*(Right.w-Origin.w));}
 [numthreads(8,8,1)]
 void Composite(uint3 tid:SV_DispatchThreadID) {
     int2 p=tid.xy;if(any(p>=(int2)Size.xy))return;
-    if(Depth[p]==0) {Color[p]=Direct[p];return;}
+    if(Depth[p]==0||Emission[p].w<0) {Color[p]=Direct[p];return;}
     float4 n=Normal[p],a=Base[p];float z=ViewZ(Depth[p]);
     float3 diffuse=0,specular=0;float sum=0,specSum=0;
     // 一跳切片的有界空间滤波；颜色/法线/深度守卫防止跨薄墙泄漏。镜面不扩大低粗糙度瓣。

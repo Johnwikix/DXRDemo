@@ -4,8 +4,13 @@ cbuffer RasterFrame : register(b0) {
     float4 CameraOrigin, CameraForward, CameraRight, CameraUp, Size, Temporal;
     float4 SunDirection, SunRadiance, Limits, CascadeSplits;
     row_major float4x4 ShadowViews[16];
-    float4 ShadowIds, PreviousOrigin, Environment, EnvironmentMap;
+    float4 ShadowIds, PreviousOrigin, Environment, EnvironmentMap, WorldOrigin, WorldDimensions;
 }
+#define PreviousOrigin WorldOrigin
+#define PreviousForward WorldDimensions
+#include "RasterWorldCache.hlsli"
+#undef PreviousOrigin
+#undef PreviousForward
 cbuffer Draw : register(b1) { uint NodeIndex, ShadowIndex; }
 StructuredBuffer<Vertex> Vertices : register(t0);
 StructuredBuffer<Instance> Instances : register(t1);
@@ -86,7 +91,7 @@ void AlphaTest(Varyings input, bool front)
     if (m.flags.x == 1 && m.baseColor.a * input.color.a * Texture(m.baseMap, input.uv).a < m.flags.y) discard;
 }
 void DepthPixel(Varyings input, bool front : SV_IsFrontFace) { AlphaTest(input, front); }
-struct Surface { float3 p, n, base, emission; float roughness, metallic, alpha, ao, transmission, thickness, ior; };
+struct Surface { float3 p, n, base, emission; float roughness, metallic, alpha, ao, transmission, thickness, ior, unlit; };
 Surface Evaluate(Varyings input, bool front)
 {
     Material m = Materials[Instances[NodeIndex].mesh.z]; Surface s;
@@ -105,7 +110,7 @@ Surface Evaluate(Varyings input, bool front)
     }
     float4 base = m.baseColor * input.color * Texture(m.baseMap,input.uv);
     float4 mr = Texture(m.mrMap,input.uv);
-    s.p=input.world; s.n=n; s.base=max(base.rgb,0); s.alpha=saturate(base.a);
+    s.unlit=m.flags.w; s.p=input.world; s.n=n; s.base=max(base.rgb,0); s.alpha=saturate(base.a);
     s.roughness=clamp(m.factors.y*mr.g,.02,1); s.metallic=saturate(m.factors.x*mr.b);
     // 法线在像素内的变化扩大微表面瓣，抑制低分辨率下的亚像素高光闪烁。
     float3 dx=ddx(n),dy=ddy(n);
@@ -121,7 +126,7 @@ struct GBuffer { float4 base : SV_Target0; float4 normal : SV_Target1; float4 em
 GBuffer GBufferPixel(Varyings input, bool front : SV_IsFrontFace)
 {
     AlphaTest(input, front); Surface s=Evaluate(input,front); GBuffer result;
-    result.base=float4(s.base,s.metallic); result.normal=float4(s.n,s.roughness); result.emission=float4(s.emission,s.ao); return result;
+    result.base=float4(s.base,s.metallic); result.normal=float4(s.n,s.roughness); result.emission=float4(s.emission,s.unlit!=0?-1:s.ao); return result;
 }
 uint Slice(float z) { return min((uint)(log(max(z,Limits.x)/Limits.x)/log(Limits.y/Limits.x)*24),23u); }
 uint ClusterOffset(uint2 pixel, float z) { uint2 tiles=(uint2(Size.xy)+15)/16; return ((Slice(z)*tiles.y+pixel.y/16)*tiles.x+pixel.x/16)*65; }
@@ -193,10 +198,12 @@ float3 EnvironmentWeight(Surface s,float3 v)
 }
 float3 Lighting(Surface s,uint2 pixel,float z,bool includeSpecular = true)
 {
+    if(s.unlit!=0)return s.base+s.emission;
     float3 v=normalize(CameraOrigin.xyz-s.p);
     float3 f0=lerp(.04,s.base,s.metallic);
     float3 result=s.emission;
-    if(includeSpecular||Environment.y==0)result+=EnvironmentLevel(s.n,0,true)*s.base*(1-s.metallic)*(1-s.transmission)*(1-f0)*s.ao;
+    if(includeSpecular&&Environment.y==2)result+=CacheIrradiance(s.p,s.n)*s.base*(1-s.metallic)*(1-s.transmission)*(1-f0);
+    else if(includeSpecular||Environment.y==0)result+=EnvironmentLevel(s.n,0,true)*s.base*(1-s.metallic)*(1-s.transmission)*(1-f0)*s.ao;
     if(includeSpecular) result+=PrefilteredSky(reflect(-v,s.n),s.roughness)*EnvironmentWeight(s,v)*s.ao;
     if(any(SunRadiance.rgb>0)) result+=Brdf(s,v,SunDirection.xyz)*SunRadiance.rgb*SunVisibility(s,z);
     uint offset=ClusterOffset(pixel,z),count=Clusters[offset]; bool overflow=count>64;
@@ -237,7 +244,7 @@ void DeferredLighting(uint3 tid:SV_DispatchThreadID)
     else {
         Surface s=(Surface)0;float4 a=GBase[p],n=GNormal[p],e=GEmission[p];
         s.p=world;s.n=normalize(n.xyz);s.base=a.rgb;s.metallic=a.w;s.roughness=n.w;s.emission=e.rgb;s.ao=e.w;
-        color=Lighting(s,p,z,false);
+        color=e.w<0?s.base+s.emission:Lighting(s,p,z,false);
     }
     SceneColor[p]=float4(min(color,65000),1); Motion[p]=clamp(MotionVector(world,sky),-32700,32700); Reactive[p]=0;
 }
@@ -292,7 +299,7 @@ float ScreenReflection(float3 origin,float3 direction,float3 normal,float roughn
 void ResolveReflections(uint3 tid:SV_DispatchThreadID)
 {
     uint2 p=tid.xy;if(any(p>=(uint2)Size.xy))return;
-    float depth=GDepth[p];if(depth==0) {SceneColor[p]=OpaqueColor[p];return;}
+    float depth=GDepth[p];if(depth==0||GEmission[p].w<0) {SceneColor[p]=OpaqueColor[p];return;}
     float2 ndc=(p+.5+Size.zw)/Size.xy*2-1;
     float3 ray=CameraForward.xyz+CameraRight.xyz*ndc.x*CameraRight.w*CameraForward.w-CameraUp.xyz*ndc.y*CameraForward.w;
     Surface s=(Surface)0;float4 a=GBase[p],n=GNormal[p];
