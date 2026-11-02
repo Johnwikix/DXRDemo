@@ -55,9 +55,13 @@ internal static class RasterWorldProbe
         RasterProbe.Require(bounce.X-dark.X>.01f && bounce.X-dark.X>(bounce.Y-dark.Y)*2,"World probes failed offscreen color transfer");
         // 同一双面墙的内外表面不能共享光照；光源在封闭房间之外时室内应保持黑暗。
         var outsidePoint=point;outsidePoint.PositionType=new(0,0,6,1);outsidePoint.ColorIntensity=new(1,1,1,40);
-        var external=Mean(room with {Materials=[material,red],Lights=[outsidePoint]},0);
+        var externalAsset=room with {Materials=[material,red],Lights=[outsidePoint]};
+        var external=Mean(externalAsset,0);
         Console.WriteLine($"World exterior light inside closed two-sided room={external}");
         RasterProbe.Require(external.Length()<1e-5,"Surface/probe cache leaked lighting across a two-sided wall");
+        var settledExternal=Mean(externalAsset,0,96);
+        Console.WriteLine($"World exterior light after {backend.WorldUpdates} updates={settledExternal}");
+        RasterProbe.Require(backend.WorldUpdates==128&&settledExternal.Length()<1e-5,$"Coarse cache iteration accumulated exterior light through a sealed wall: {settledExternal}");
         // 恢复有光场景，随后检查移动和缩放不会清空世界缓存。
         Mean(room with {Materials=[material,red],Lights=[point]},0);
         var statistics=ReadStatistics(device,backend.WorldStatistics!);
@@ -71,7 +75,7 @@ internal static class RasterWorldProbe
         RasterProbe.Require(backend.WorldUpdates==updates+2,"Resize reset world cache");
         var probes=ReadProbes(device,backend.WorldProbeData!);
         int valid=0,invalid=0;
-        for(int i=0;i<RasterWorldCache.Count;i++) {if(probes[i*14].W>0)valid++;if(probes[i*14].W<0)invalid++;}
+        for(int i=0;i<RasterWorldCache.Count;i++) {if(probes[i*(RasterWorldCache.Stride/16)].W>0)valid++;if(probes[i*(RasterWorldCache.Stride/16)].W<0)invalid++;}
         RasterProbe.Require(valid>0&&probes.All(v=>float.IsFinite(v.X+v.Y+v.Z+v.W)),"World cache has no valid finite probes");
         var reset=Mean(room with {Name="light removed"},0,8);
         RasterProbe.Require(reset.Length()<1e-5&&backend.WorldUpdates==8,"Lighting/scene change retained old world radiance");
@@ -111,6 +115,7 @@ internal static class RasterWorldProbe
             RasterProbe.Require(packed[(6*16+8)*4+3]>1,"Actual reflection lost its physical NRD hit distance");
         }
         Console.WriteLine($"PASS: cached mode offscreen metal reflection={reflection[center]:R}; NRD={backend.NrdActive}, actual-ray signal assertions run only with the SDK.");
+        RasterWorldClipmapProbe.Run(device,backend);
         Console.WriteLine($"PASS: world cache valid={valid}, invalid={invalid}; 16640 probe directions/frame independent of input resolution (shadow/reflection rays counted separately); scroll, camera cut, resize, scene/light reset.");
     }
 
@@ -125,7 +130,7 @@ internal static class RasterWorldProbe
         void* pointer;readback.Map(0,null,&pointer).CheckError();var result=new ReadOnlySpan<uint>(pointer,4).ToArray();readback.Unmap(0);return result;
     }
 
-    private static unsafe Vector4[] ReadProbes(DxrDevice device,ID3D12Resource source)
+    internal static unsafe Vector4[] ReadProbes(DxrDevice device,ID3D12Resource source)
     {
         using var readback=device.Device.CreateCommittedResource(new HeapProperties(HeapType.Readback),HeapFlags.None,
             ResourceDescription.Buffer(RasterWorldCache.Count*RasterWorldCache.Stride),ResourceStates.CopyDest);
@@ -135,6 +140,6 @@ internal static class RasterWorldProbe
         device.CommandList.ResourceBarrierTransition(source,ResourceStates.CopySource,ResourceStates.NonPixelShaderResource);
         device.CommandList.Close();device.CommandQueue.ExecuteCommandList(device.CommandList);device.SignalAndWait();
         void* pointer;readback.Map(0,null,&pointer).CheckError();
-        var result=new ReadOnlySpan<Vector4>(pointer,RasterWorldCache.Count*14).ToArray();readback.Unmap(0);return result;
+        var result=new ReadOnlySpan<Vector4>(pointer,RasterWorldCache.Count*(RasterWorldCache.Stride/16)).ToArray();readback.Unmap(0);return result;
     }
 }

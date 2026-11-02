@@ -9,7 +9,7 @@ using Vortice.DXGI;
 
 namespace DXRDemo.Rendering;
 
-/// <summary>借用共享 LOD0 AS 的稀疏一跳照明；在低分辨率运行官方 NRD，再按表面 guides 重建。</summary>
+/// <summary>借用共享 LOD0 AS 更新世界缓存和稀疏反射；真实反射运行官方 NRD，再按表面 guides 重建。</summary>
 internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
 {
     private readonly ID3D12Device5 _device;

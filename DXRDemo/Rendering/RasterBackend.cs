@@ -10,7 +10,7 @@ using Vortice.DXGI;
 
 namespace DXRDemo.Rendering;
 
-/// <summary>共享 LOD0 分簇光栅；可选硬件一跳光照按需借用同一份 AS。</summary>
+/// <summary>共享 LOD0 分簇光栅；可选世界缓存 GI/硬件反射按需借用同一份 AS。</summary>
 internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
 {
     private const int Textures = GpuSceneCache.MaxTextures, ExtraCount = 10;
@@ -97,7 +97,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
         public Vector4 ShadowIds, PreviousOrigin, Environment, EnvironmentMap, WorldOrigin, WorldDimensions;
     }
 
-    /// <summary>配置固定阴影预算和 GI 采样步长；生产每 4×4 输入像素共享 GI，探针可取 1 作为全分辨率对照。</summary>
+    /// <summary>配置固定阴影预算和反射采样步长；生产漫反射查询世界缓存，逐像素 GI 仅供诊断对照。</summary>
     internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false, bool denoiseHardware = true, int giDivisor = 4, bool cachedGi = true)
     {
         if (shadowSize is < 16 or > 2048 || localSize is < 16 or > 1024)

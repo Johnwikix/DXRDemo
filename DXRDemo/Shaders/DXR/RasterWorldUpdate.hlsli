@@ -44,6 +44,36 @@ float3 ProbeDiffuseLighting(Surface s,inout uint rng) {
     }
     return s.base*(1-s.metallic)*(1-s.transmission)*.96*irradiance;
 }
+// 反弹反馈需要真实几何可见性：距离矩只作提议，按其权重选一个探针，追一条有界可见性射线。
+// 仅世界探针命中着色调用；主表面漫反射仍不追逐像素 GI 射线。
+float3 ValidatedCacheIrradiance(Surface surface,inout uint rng) {
+    CacheCandidate selected=(CacheCandidate)0;float total=0,remaining=1;
+    [loop]for(uint level=0;level<3;level++) {
+        float coverage=CacheCoverage(surface.p,level),mass=remaining*coverage;
+        remaining*=1-coverage;
+        if(mass>0) {
+            float spacing=CacheGrid(level).w;float3 world=CacheQueryPosition(surface.p,surface.n,spacing);
+            float3 grid=world/spacing-.5;int3 base=(int3)floor(grid);float3 f=frac(grid);
+            CacheCandidate chosen=(CacheCandidate)0;float sum=0;
+            [unroll]for(uint corner=0;corner<8;corner++) {
+                int3 offset=int3(corner&1,(corner>>1)&1,(corner>>2)&1);float3 tri=lerp(1-f,f,(float3)offset);
+                CacheCandidate probe=CacheNeighbor(world,surface.n,base+offset,tri.x*tri.y*tri.z,level);
+                sum+=probe.weight;
+                if(probe.weight>0&&Random(rng)*sum<probe.weight)chosen=probe;
+            }
+            if(sum>.005) {
+                total+=mass;
+                if(Random(rng)*total<mass)selected=chosen;
+            }
+        }
+        if(remaining<=0)break;
+    }
+    if(total<=0)return 0;
+    float3 delta=selected.position-surface.p;float distance=length(delta);
+    if(distance<=Limits.x*8)return selected.irradiance*total;
+    float3 direction=delta/distance;bool stochastic;
+    return selected.irradiance*total*Visibility(Offset(surface,direction),direction,distance-Limits.x*4,rng,stochastic);
+}
 // 三角形/重心位置缓存：严格验证几何身份和灯光 epoch，不会在近邻薄墙间共享结果。
 // 这是一种有界 Surface Lighting 表，不是 Cards 捕获 atlas；材质仍由真实命中求值。
 float3 CachedSurfaceLighting(Surface s,Payload hit,inout uint rng,bool eligible) {
@@ -61,7 +91,7 @@ float3 CachedSurfaceLighting(Surface s,Payload hit,inout uint rng,bool eligible)
         InterlockedAdd(SurfaceStatistics[0],1,ignored);
         if(frame-old.radiance.w<16)return old.radiance.rgb;
     }
-    float3 indirect=factor*CacheIrradiance(s.p,s.n);
+    float3 indirect=factor*ValidatedCacheIrradiance(s,rng);
     if(!eligible) {
         InterlockedAdd(SurfaceStatistics[3],1,ignored);
         return match?old.radiance.rgb:indirect;
@@ -84,9 +114,10 @@ float3 CachedSurfaceLighting(Surface s,Payload hit,inout uint rng,bool eligible)
 [shader("raygeneration")]
 void WorldProbeRayGen() {
     uint2 id=DispatchRaysIndex().xy;
-    uint slot=((uint)PreviousRight.x+id.y)%(uint)PreviousForward.w;int3 cell=CacheCell(slot);WorldProbe old=WorldProbes[slot];
+    uint slot=CacheUpdateSlot(id.y,(uint)PreviousRight.w,(uint)PreviousRight.x,(uint)PreviousRight.y);int3 cell=CacheCell(slot);WorldProbe old=WorldProbes[slot];
     bool same=old.position.w>0&&all((int3)old.cell.xyz==cell);
-    float3 origin=same?old.position.xyz:(cell+.5)*PreviousOrigin.w;
+    float spacing=CacheGrid(slot/CacheCount()).w;
+    float3 origin=same?old.position.xyz:(cell+.5)*spacing;
     uint rng=PathSeed(uint2(slot,id.x),(uint)PreviousRight.w,31);
     ProbeRay output=(ProbeRay)0;
     if(id.x==(uint)PreviousRight.z) {
@@ -105,7 +136,7 @@ void WorldProbeRayGen() {
         uint rotation=PathSeed(uint2(slot,0),((uint)PreviousRight.w+slot%32)/32,19);
         float z=1-2*(id.x+.5)/PreviousRight.z,phi=2*PI*frac(id.x*.61803398875+Random(rotation));float r=sqrt(max(0,1-z*z));
         float3 l=float3(r*cos(phi),z,r*sin(phi));
-        Payload hit=ProbeTrace(origin,l,PreviousUp.z,rng);float3 radiance=Sky(l);float distance=hit.t;
+        Payload hit=ProbeTrace(origin,l,min(PreviousUp.z,spacing*64),rng);float3 radiance=Sky(l);float distance=hit.t;
         if(hit.instance!=0xffffffff) {
             Surface s=Evaluate(hit.instance,hit.primitive,hit.bary,0,-l);Material material=Materials[s.material];
             if(s.front==0&&material.flags.z==0) {distance=-max(distance,1e-6);radiance=0;}

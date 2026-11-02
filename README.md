@@ -263,9 +263,9 @@ DXRDemo/                                  解决方案根
 
 实现与核对清单见[现代光栅化、虚拟几何与硬件光追 GI 管线设计](docs/RASTER_PIPELINE_DESIGN.md#18-2026-11-02实现核对与缓存式-gi)。两条管线共享场景、相机、GPU 场景/AS、重建和显示；光栅入口具备 LOD0 分簇延迟 PBR、CSM/局部阴影、前向透明、独立折射快照与重建 guides。
 
-2026-11-02 按要求跳过逐像素漫反射 GI，生产改为固定预算的滚动世界探针＋有界 Surface Lighting 复用。光滑/金属反射保持实际 Hit Lighting 和官方 NRD；世界缓存漫反射使用自身滤波，不伪造 NRD 命中距离。近处 CSM 精度/静止复用、室内发光网格重要性采样和 unlit 材质同步修正，使用 720p 有界离屏验证。
+2026-11-02 按要求跳过逐像素漫反射 GI，生产改为固定预算的三级滚动世界探针＋有界 Surface Lighting 复用。光滑/金属反射保持实际 Hit Lighting 和官方 NRD；世界缓存漫反射使用自身滤波，不伪造 NRD 命中距离。近处 CSM 精度/静止复用、室内发光网格重要性采样和 unlit 材质同步修正，使用 720p 有界离屏验证。
 
-Cards atlas、Screen Probe Gather、多级世界网格、动态 LOD、VSM 和完整混合管线验收仍未完成；[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 保留为后续目标。无 DXR 时继续使用 SSR/过滤环境降级。各阶段实现及验证边界见设计第 14–18 节，降噪输入见[NRD 光栅记录](docs/NRD.md#2026-11-02世界缓存-gi-与屏幕重建分辨率)。
+三级世界网格已接入；Cards atlas、Screen Probe Gather、自适应缓存调度、动态 LOD、VSM 和完整混合管线验收仍未完成；[虚拟几何与 VSM 联合设计](docs/VIRTUAL_GEOMETRY_SHADOWS_DESIGN.md) 保留为后续目标。无 DXR 时继续使用 SSR/过滤环境降级。三级覆盖、漏光守卫与运动验证见[设计第 19 节](docs/RASTER_PIPELINE_DESIGN.md#19-2026-11-02三级滚动世界缓存与方向可见性)；早期实现见第 14–18 节，降噪输入见[NRD 光栅记录](docs/NRD.md#2026-11-02世界缓存-gi-与屏幕重建分辨率)。
 
 ---
 

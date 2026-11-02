@@ -45,7 +45,7 @@ internal sealed unsafe partial class RasterBackend
             PreviousOrigin = new(previous.Origin, 0),
             Environment = new(environment, CachedGi ? 2 : _hardware != null ? 1 : 0, 0, 0),
             WorldOrigin = CachedGi ? RasterWorldCache.Grid(asset,camera) : default,
-            WorldDimensions = new(16,8,16,RasterWorldCache.Count),
+            WorldDimensions = new(RasterWorldCache.Width,RasterWorldCache.Height,RasterWorldCache.Depth,RasterWorldCache.Count),
             EnvironmentMap = asset.EnvironmentMap is { } map ? new(map.Width, map.Height, map.Rotation, lodBias) : new(0, 0, 0, lodBias)
         };
         int locals = 0;

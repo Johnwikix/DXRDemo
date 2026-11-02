@@ -6,11 +6,13 @@ using Vortice.Direct3D12;
 
 namespace DXRDemo.Rendering;
 
-/// <summary>固定预算的滚动世界辐照度缓存；双版本发布，独立于像素数量和窗口尺寸。</summary>
+/// <summary>固定预算的三级滚动世界辐照度缓存；双版本发布，独立于像素数量和窗口尺寸。</summary>
 internal sealed class RasterWorldCache : GpuResourceOwner
 {
     internal const int SurfaceCapacity = 65536, SurfaceBudget = 2048, SurfaceStride = 48;
-    internal const int Count = 16 * 8 * 16, Budget = 256, Rays = 64, Stride = 224;
+    internal const int Levels = 3, Width = 16, Height = 8, Depth = 16;
+    internal const int ProbesPerLevel = Width * Height * Depth, Count = ProbesPerLevel * Levels;
+    internal const int Budget = 256, NearBudget = 128, FarBudget = 64, Rays = 64, Stride = 640;
     private readonly ID3D12Resource[] _probes = new ID3D12Resource[2];
     private readonly ID3D12Resource _rays, _statistics;
     private readonly ID3D12Resource[] _surfaces = new ID3D12Resource[2];
@@ -56,12 +58,13 @@ internal sealed class RasterWorldCache : GpuResourceOwner
         catch { Dispose(); throw; }
     }
 
-    /// <summary>仅场景或灯光变化清空缓存；相机切换/窗口缩放保留已完成的世界格子。</summary>
-    internal static Vector4 Grid(SceneAsset asset,in CameraFrame camera)
+    /// <summary>取得按整格滚动的指定层；层间间距为二倍关系，与 HLSL CacheGrid 同步。</summary>
+    internal static Vector4 Grid(SceneAsset asset,in CameraFrame camera,int level = 0)
     {
         Vector3 extent=asset.Maximum-asset.Minimum;
         float spacing=Math.Clamp(MathF.Max(extent.X,MathF.Max(extent.Y,extent.Z))/24,.5f,2);
-        return new(MathF.Floor(camera.Origin.X/spacing)-8,MathF.Floor(camera.Origin.Y/spacing)-4,MathF.Floor(camera.Origin.Z/spacing)-8,spacing);
+        spacing *= 1 << level;
+        return new(MathF.Floor(camera.Origin.X/spacing)-Width/2,MathF.Floor(camera.Origin.Y/spacing)-Height/2,MathF.Floor(camera.Origin.Z/spacing)-Depth/2,spacing);
     }
     internal void Frame(Span<Vector4> data, GpuScene scene, in CameraFrame camera, float environment, SunLightSettings sun)
     {
@@ -72,9 +75,9 @@ internal sealed class RasterWorldCache : GpuResourceOwner
             Spacing = Grid(scene.Asset,camera).W;
         }
         data[10] = Grid(scene.Asset,camera);
-        data[11] = new(16,8,16,Count);
-        data[12] = new((_frame*Budget)%Count,Budget,Rays,_frame);
-        data[13] = new(_reset?1:0,0,MathF.Min(camera.Far,Spacing*64),0);
+        data[11] = new(Width,Height,Depth,Count);
+        data[12] = new(NearBudget,Budget,Rays,_frame);
+        data[13] = new(_reset?1:0,0,MathF.Min(camera.Far,Spacing*64*(1 << (Levels-1))),0);
         data[15] = new(1,_epoch,SurfaceCapacity,SurfaceBudget);
     }
 
