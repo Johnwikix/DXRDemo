@@ -27,6 +27,7 @@
     <Compile Include="RasterNrdProbe.cs" />
     <Compile Include="RasterSparseProbe.cs" />
     <Compile Include="RasterWorldProbe.cs" />
+    <Compile Include="RasterCardsProbe.cs" />
     <Compile Include="RasterWorldClipmapProbe.cs" />
     <Compile Include="CommonFrameProbe.cs" />
     <Compile Include="RasterSceneProbe.cs" />
@@ -60,6 +61,7 @@
     <Content Include="../../DXRDemo/Shaders/DXR/DisplayOutput.hlsl;../../DXRDemo/Shaders/DXR/CommonReconstruction.hlsl" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/StableReconstruction.hlsl" Link="Shaders/DXR/StableReconstruction.hlsl" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneTrace.hlsl" Link="Shaders/DXR/SceneTrace.hlsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../DXRDemo/Shaders/DXR/RasterCards*.hlsl;../../DXRDemo/Shaders/DXR/RasterCards*.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/SceneLighting.hlsli;../../DXRDemo/Shaders/DXR/RasterWorldContract.hlsl" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/RasterUpscaleCore.hlsli;../../DXRDemo/Shaders/DXR/RasterHardwareUpscaleFallback.hlsl;../../DXRDemo/Shaders/DXR/RasterSurfaceCache.hlsl;../../DXRDemo/Shaders/DXR/RasterWorldCache.hlsli;../../DXRDemo/Shaders/DXR/RasterWorldBlend.hlsl;../../DXRDemo/Shaders/DXR/RasterWorldUpdate.hlsli;../../DXRDemo/Shaders/DXR/RasterHardwareSampling.hlsl;../../DXRDemo/Shaders/DXR/RasterHardwareUpscale.hlsl;../../DXRDemo/Shaders/DXR/RasterHardwareNrd.hlsl;../../DXRDemo/Shaders/DXR/RasterHardware.hlsl;../../DXRDemo/Shaders/DXR/RasterHardwareResolve.hlsl;../../DXRDemo/Shaders/DXR/SceneRayCore.hlsli;../../DXRDemo/Shaders/DXR/SceneVisibility.hlsli;../../DXRDemo/Shaders/DXR/Raster.hlsl;../../DXRDemo/Shaders/DXR/SceneTypes.hlsli;../../DXRDemo/Shaders/DXR/SceneEnvironment.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="../../DXRDemo/Shaders/DXR/Path*.hlsli" Link="Shaders/DXR/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />

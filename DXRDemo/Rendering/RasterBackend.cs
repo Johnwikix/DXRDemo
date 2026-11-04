@@ -23,7 +23,11 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     private readonly GpuSceneCache _cache;
     private readonly bool _requestHardwareLighting, _denoiseHardware;
     private readonly int _giDivisor;
-    private readonly bool _cachedGi;
+    private readonly bool _cachedGi, _cards;
+    internal RasterCardAtlas? CardAtlas => _hardware?.Cards;
+    internal double WorldCacheMilliseconds=>_hardware?.WorldMilliseconds??0;
+    internal double ReflectionMilliseconds=>_hardware?.ReflectionMilliseconds??0;
+    internal object HardwareStackDiagnostic=>new {pipeline=_hardware?.PipelineStackBytes,world=_hardware?.WorldStackBytes,reflection=_hardware?.ReflectionStackBytes,card=_hardware?.CardStackBytes};
     internal bool CachedGi => _hardware?.CachedGi == true;
     internal ID3D12Resource? WorldProbeData => _hardware?.WorldProbeData;
     internal ID3D12Resource? WorldStatistics => _hardware?.WorldStatistics;
@@ -98,13 +102,14 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
     }
 
     /// <summary>配置固定阴影预算和反射采样步长；生产漫反射查询世界缓存，逐像素 GI 仅供诊断对照。</summary>
-    internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false, bool denoiseHardware = true, int giDivisor = 4, bool cachedGi = true)
+    internal RasterBackend(GpuSceneCache cache, int shadowSize = 2048, int localSize = 1024, bool hardwareLighting = false, bool denoiseHardware = true, int giDivisor = 4, bool cachedGi = true, bool cards = true)
     {
         if (shadowSize is < 16 or > 2048 || localSize is < 16 or > 1024)
             throw new ArgumentOutOfRangeException(nameof(shadowSize));
         if (giDivisor is not (1 or 2 or 4)) throw new ArgumentOutOfRangeException(nameof(giDivisor));
         _giDivisor = giDivisor;
         _cachedGi = cachedGi;
+        _cards = cards;
         _cache = cache;
         _requestHardwareLighting = hardwareLighting;
         _denoiseHardware = denoiseHardware;
@@ -183,7 +188,7 @@ internal sealed unsafe partial class RasterBackend : IDisposable, ISceneUploader
                     _gpu.Device.CreateUnorderedAccessView(null, null, uav, Handle(Textures + table * ExtraCount + 7 + i));
             }
             if (_requestHardwareLighting && _gpu.SupportsRayTracing && _gpu.HighestShaderModel >= ShaderModel.Model6_5)
-                _hardware = _owned.Keep(new RasterHardwareLighting(device, _denoiseHardware, _giDivisor, _cachedGi));
+                _hardware = _owned.Keep(new RasterHardwareLighting(device, _denoiseHardware, _giDivisor, _cachedGi, _cards));
             _timer = _owned.Keep(new GpuInterval(_gpu));
             _shadowTimer = _owned.Keep(new GpuInterval(_gpu));
             _geometryTimer = _owned.Keep(new GpuInterval(_gpu));

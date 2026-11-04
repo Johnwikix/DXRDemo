@@ -14,7 +14,12 @@ struct [raypayload] Payload {
 #else
 struct Payload { float t; uint instance, primitive; float2 bary; uint random, transparency; };
 #endif
-struct Surface { float3 p, n, g, base, emission; float metallic, roughness, alpha, ao, transmission, ior, thickness; uint material, front, causticCaster, emitter; float emissionPdf, bsdfSampling, eta; };
+struct Surface {
+#ifdef RASTER_SURFACE_LOCAL
+    // 只在光栅 Card 查询保留已求得的局部命中，PT 的结构/求值与随机序列保持原样。
+    float3 localP,localG;
+#endif
+    float3 p, n, g, base, emission; float metallic, roughness, alpha, ao, transmission, ior, thickness; uint material, front, causticCaster, emitter; float emissionPdf, bsdfSampling, eta; };
 cbuffer Frame : register(b0) {
     float4 CameraOrigin, CameraForward, CameraRight, CameraUp, Size, Control, Environment, Limits, SunDirection, SunRadiance;
     float4 PreviousOrigin, PreviousForward, PreviousRight, PreviousUp, PreviousSize;
@@ -111,6 +116,9 @@ Surface Evaluate(uint instance, uint primitive, float2 bary, float cone, float3 
     float4 base=material.baseColor*Sample(material.baseMap,uv,footprint[(uint)material.baseMap.info.y])*(a.color*weights.x+b.color*weights.y+c.color*weights.z);
     float4 mr=Sample(material.mrMap,uv,footprint[(uint)material.mrMap.info.y]);
     Surface result;
+#ifdef RASTER_SURFACE_LOCAL
+    result.localP=a.position.xyz*weights.x+b.position.xyz*weights.y+c.position.xyz*weights.z;result.localG=localG;
+#endif
     result.p=p0+e1*bary.x+e2*bary.y; result.n=n; result.g=g; result.base=max(base.rgb,0); result.alpha=saturate(base.a);
     result.metallic=saturate(material.factors.x*mr.b); result.roughness=saturate(material.factors.y*mr.g);
     result.emission=material.emissive.rgb*Sample(material.emissiveMap,uv,footprint[(uint)material.emissiveMap.info.y]).rgb;

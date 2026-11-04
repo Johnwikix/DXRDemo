@@ -1,4 +1,5 @@
 // 与路径追踪共用材质求值、MASK/BLEND、阴影透射、GGX 和实例 ABI。
+#define RASTER_SURFACE_LOCAL 1
 #include "SceneRayCore.hlsli"
 #include "PathEnvironment.hlsli"
 float Luminance(float3 value) { return dot(value,float3(.2126,.7152,.0722)); }
@@ -6,6 +7,7 @@ float Luminance(float3 value) { return dot(value,float3(.2126,.7152,.0722)); }
 #include "SceneVisibility.hlsli"
 
 #include "RasterWorldCache.hlsli"
+#include "RasterCardsQuery.hlsli"
 StructuredBuffer<uint> EmitterGroups : register(t8);
 Texture2D<float4> RasterBase : register(t0, space3);
 Texture2D<float4> RasterNormal : register(t1, space3);

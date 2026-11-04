@@ -272,3 +272,5 @@ Kitchen（额外太阳关闭）与 Bistro（太阳方位 135°/仰角 65°）各
 世界/表面缓存不借用 NRD 历史，不因 camera cut 或屏幕 resize 清空；场景/灯光失效由缓存自身处理。完整契约与未完成项见[设计第 18 节](RASTER_PIPELINE_DESIGN.md#18-2026-11-02实现核对与缓存式-gi)。原 `--raster-nrd` 继续以 1× 分辨率、关闭世界缓存作为双信号 SDK 契约对照；缺 DLL 仍回退并保留厂商 SR。`--raster-world` 检查缓存输入全零、高粗糙度反射不伪造距离，以及屏幕外金属反射确有真实 NRD hit distance。
 
 三级世界缓存继续遵守上述信号隔离：三个 16×8×16 网格共享每帧 256 个探针的更新预算，世界探针私有 stride 改为 640 字节（六轴 irradiance＋8×8 方向距离矩），不改变 NativeNrd.Frame、payload 或公共 LinearFrame。层间按覆盖混合，窗口 resize 保留全部层；NRD 只处理实际反射射线，仍使用原官方 combined 上下文。层级结构与验证见[设计第 19 节](RASTER_PIPELINE_DESIGN.md#19-2026-11-02三级滚动世界缓存与方向可见性)。
+
+2026-11-04 的 Cards atlas 同样使用独立的材质/漫反射 radiance/stamp，不进入 NRD 池。Card 更新只读上一版世界缓存；生产主表面 diffuse alpha 与 NRD diffuse 输入继续为 0，高粗糙度近似不伪造射线距离，真实光滑/金属反射继续走原 RELAX 打包和 dispatch。Frame/payload/NativeNrd ABI 未变，Cards 的私有 space5 根表见[设计第 20 节](RASTER_PIPELINE_DESIGN.md#20-2026-11-04cards-材质捕获与光照-atlas)。

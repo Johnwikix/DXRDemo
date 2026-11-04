@@ -1,6 +1,6 @@
 # 现代光栅化、虚拟几何与硬件光追 GI 管线设计
 
-状态：共享场景/GPU 资源、统一帧/重建/编码与 M1 LOD0 光栅基线已落地；2026-10-30 补充透明重建信号、SSR，以及共享 AS 的一跳硬件光照/Hit Lighting 基线（第 15–17 节）。2026-11-02 改为有界表面光照复用与滚动世界探针缓存（第 18 节），生产不再发射逐像素漫反射 GI 射线。同日继续完成三级滚动覆盖与方向距离矩（第 19 节）。Cards atlas、屏幕探针、自适应调度、虚拟几何、VSM 与完整混合管线验收仍为后续阶段。初稿：2026-10-26；复审及执行：2026-10-28–29。实施代码基线：`02c1fd2`。
+状态：共享场景/GPU 资源、统一帧/重建/编码与 M1 LOD0 光栅基线已落地；2026-10-30 补充透明重建信号、SSR，以及共享 AS 的一跳硬件光照/Hit Lighting 基线（第 15–17 节）。2026-11-02 改为有界表面光照复用与滚动世界探针缓存（第 18 节），生产不再发射逐像素漫反射 GI 射线。同日继续完成三级滚动覆盖与方向距离矩（第 19 节）。2026-11-04 接入有界 Cards 材质/光照图集（第 20 节）。屏幕探针、完整自适应调度、虚拟几何、VSM 与完整混合管线验收仍为后续阶段。初稿：2026-10-26；复审及执行：2026-10-28–29。实施代码基线：`02c1fd2`。
 
 目标是在现有路径追踪之外增加一个实时混合渲染器：主表面由光栅化确定，间接光和反射参考 UE5 Hardware Lumen 的缓存架构。场景、相机、GPU 场景资源、灯光定义、超分和显示输出抽成共享组件，两条管线只保留各自的可见性与光传输算法。
 
@@ -670,7 +670,7 @@ Bistro 阴影检查使用太阳方位 135°、仰角 65°，方便观察街面�
 | M2 动态无裂缝 LOD | 未实现 | 逻辑身份已准备，但没有 cluster/group DAG、合法 Cut、GPU 遍历、ExecuteIndirect 或切换验收 |
 | M3 VSM | 未实现 | 没有虚拟页表、物理页池、反馈、clipmap、脏页调度与 SMRT；不能把 CSM 地图复用称为 VSM |
 | M4 Screen Probe Gather | 未实现 | 规则稀疏屏幕采样不等于 16×16 屏幕探针＋8×8 方向图；没有断层补点、Hi-Z GI 屏幕追踪与置信度调度 |
-| M5 Surface Lighting 复用 | 本轮实现基线，部分完成 | 按实例/三角形/重心格子缓存视角无关的漫反射出射光，验证 epoch、限制更新预算并记录命中/回退。尚未实现 Cards 捕获、覆盖图、atlas/mip/LRU |
+| M5 Surface Lighting 复用 | 本轮实现基线，部分完成 | 当前已接入 Cards 正交材质捕获、双版本漫反射 atlas、受控 mip、深度/法线/正反面覆盖核验及反馈/LRU（第 20 节）；未覆盖时保留原三角形/重心缓存与有预算的 Hit Lighting。复杂凹面自适应细化、完整反馈优先调度与全部画质矩阵仍未关闭 |
 | M5 世界缓存与跨帧反弹 | 本轮实现基线，部分完成 | 当前为三级滚动世界探针、六轴辐照度/8×8 方向距离矩、实体内部失效/重定位、双版本迭代；每层 16×8×16 格，间距 1/2/4 倍，预算 128/64/64，见第 19 节。稀疏分配/自适应反馈优先级、长时收敛与全场景参考误差尚未完成 |
 | M6 连续过渡与规模扩展 | 未实现 | 没有 Geomorph、几何 streaming、缺页粗 Cut 或 Mesh Shader 路径 |
 
@@ -799,3 +799,76 @@ Kitchen 灯具隔离的非发光接收面 red 均值=`0.005926101420884586`（92
 最终 Debug/Release x64、lib_6_5/lib_6_9 均通过；复用现有应用原生桥，未重建/改写厂商 SDK。`--raster`、`--raster-world`、`--raster-nrd` 与 `--common-frame` 均通过。旧独立 RELAX 对照的 RMS=`0.001620510324862552`、mean=`1.2340340790925202`、motion error=`0.00085258484`，与原基线一致；真实 FSR/XeSS、resize/HDR、WARP 无 AS 仍通过。仅临时移走探针输出 NRD.dll 的新进程也通过整套世界缓存（含 128 帧漏光）与真实 FSR 回退；随后恢复 DLL，SHA-256 一致，External 既有字节未改动。
 
 本阶段补齐固定容量三级覆盖，仍未实现稀疏页面/反馈优先调度、Cards 捕获/atlas/mip/LRU、Screen Probe Gather、VSM/SMRT、动态 LOD/streaming 或完整跨帧异步退休。方向矩在低采样下、层间更新不同步与粗层的大间距仍有画质边界；完整长时收敛、薄墙/复杂透明/掠射矩阵、PT 高 SPP RMSE、物理 SM6.5/Tier1.0/ARM64/无 DXR、设备移除和持续 UI/多显示器压力未在此阶段完成。
+
+
+## 20. 2026-11-04：Cards 材质捕获与光照 atlas
+
+本阶段将第 18/19 节的纯命中点表面复用扩展为真实的正交捕获图集。`RasterCardAtlas` 持有固定页池、材质 atlas、双版本漫反射 radiance、generation/age、紧凑反馈与 LRU；`RasterCardCapture` 复用原始共享 VB/IB、实例、纹理和 `Raster.hlsl` 的顶点/材质求值。没有新建场景目录、第二份几何或额外 AS。构造函数只保存设备引用，GPU 创建由显式 `Initialize` 完成，随后端释放，窗口 resize 保留图集。
+
+### 20.1 覆盖与查询
+
+- 共享 mesh 的局部边界在场景上传阶段生成并观察取消；按局部 ±X/±Y/±Z 建立确定投影。非平面轴分为四个深度区域，平面轴为一个区域，至多 24 个逻辑 Card/实例。实例共享局部布局，光照 tile 独立；不按名称或相同变换合并节点。此表示不能保证覆盖任意强凹面，未覆盖区域必须回退。
+- 每帧最多捕获 2 页、累计至多 100000 个源三角形，只绘制相应实例的共享原始 mesh，不逐页绘制全场景。超过单帧几何预算的 mesh 当前保留命中着色回退，尚无动态 LOD/Cut。正交投影在局部空间裁剪对应深度区域，不修改主视图几何；显式处理负缩放、MASK、双面与正反面。BLEND/透射表面不被当作 opaque Card 填入。
+- 五张材质表保存 base/metallic、shading normal/roughness、emission/AO/unlit、世界位置/带正反面符号的源 primitive 身份、geometric normal/transmission。捕获与查询共用实例逆变换。查询核验实例、方向、捕获深度、几何/着色法线、正反面、光照 generation 与 age；不以包围盒投影命中代替真实覆盖。
+- 固定 64 个物理页，16×16 内部 texel，四边各 4 texel padding，24×24 pitch，8×8 页排列为 192×192 atlas。padding 只复制相同页的有效边缘，内部 MASK/遮挡孔洞保持无效。radiance 有 mip0/1/2（内部 16/8/4）；每级仅在四个子样本全部有效且属于当前 generation 时生成有效值，不能跨 tile 或越过无效覆盖平均颜色。查询仍以 base 深度/法线验证；高 mip 无效时保留有效 base 样本或回退。
+
+### 20.2 光照、版本与调度
+
+每帧最多着色一个 16×16 Card（256 个 texel）；沿共享发光面混合提议、8 候选 RIS、环境与 punctual/太阳做视角无关的漫反射直接光，并从上一版世界缓存补充经真实可见性验证的间接光。atlas 不存自身 emission 或镜面出射项；真实命中仍求 emission，光滑/金属反射仍为 Hit Lighting。NRD 不处理 Card radiance，不伪造 hit distance。
+
+材质捕获与光照更新分开。光照更新和世界更新都只读取上一版本，写各自下一版本后发布，禁止同轮循环反馈。换场景清空映射；灯光 epoch 改变时仅作废 radiance generation，保留静态材质捕获；camera cut/resize 保留有效页。每 texel 使用独立 uint generation/frame stamp，避免在 half alpha 中存储增长的帧号。当前 age 硬上限 128 个 Card 帧，超时即回退。
+
+世界探针命中在 GPU 用双 uint（帧标记/队列位置）去重并写最多 256 个紧凑请求及命中次数，溢出计数公开；用渲染器原有 fence 后的 readback 交给下一帧，未增加队列或等待。CPU 用固定数组按命中次数排序，重要性逐帧衰减；每帧最多两次分配，至少 8 帧驻留保护后优先替换低复用页，新请求的重要性需明显高于近期使用页才抢占。光照调度同时考虑年龄和受限的对数重要性，未着色页获得冷启动权重，避免只按请求到达顺序填满池。新归属清材质 validity、推进 generation，旧照明 stamp/mip 不能被新实例读取。原三角形缓存的 2048 次直接光着色预算仍独立，Card 新增上限 256 次；16640 个世界主探针方向不变，阴影/反馈可见性与反射查询另计，不能宣称全部射线数不增加。
+
+新增固定逻辑存储为 3292712 字节，加每实例 288 字节的映射/请求 flags，以及共享 GpuScene 中每实例 32 字节的局部边界视图；不含 committed resource 对齐、描述符、PSO、时间戳基础设施和 managed 元数据。GPU 创建/销毁显式成对；每帧只在映射或 generation 变化时更新既有 upload 缓冲，不创建描述符堆或 upload resource。关闭 Cards 时不初始化图集/捕获管线，根槽绑定合法 typed null，继续旧缓存路径。padding 所需 RGBA16F/RGBA32F typed UAV load 由 `TypedUAVLoadAdditionalFormats` 能力位控制，不支持则保留回退；格式组依据 [Microsoft 文档](https://learn.microsoft.com/en-us/windows/win32/direct3d12/typed-unordered-access-view-loads)。
+
+硬件 Frame 仍为 20 个 float4，私有 16–18 槽用于 Card 参数（17.x 保持 0，避免改变共享阴影的 caustic 行为）；新增 space5 的第 18 根描述符表，10 SRV＋4 UAV。Card metadata 为 80 字节，实例边界为 32 字节，独立捕获 b2 为 80 字节。RasterFrame 1408、PT 实例 160、payload 28 和 NativeNrd.Frame 384 字节均未改变；两种 library 目标及实际 VS/PS/CS 入口均需要验证。光栅专用宏额外保留材质求值时已有的 local position/geometric normal，未驻留页先走轻量反馈；深度核验只变换一次平面法线，stamp/深度失败时不继续读取其他材质纹理。PT 宏关闭，局部字段不进入 payload 或 C# ABI。
+
+反馈请求的原子到达顺序可影响预算内选页，Card 直接光使用独立 slot/texel/clock 种子，不使用 Present 计数；因此不宣称跨运行逐位相同。原 PT 随机序列和 NRD 信号契约不变，画质/能量以独立断言判定。
+
+### 20.3 验证与边界
+
+2026-11-04，Intel Arc 140T（报告 15GB），D3D12 debug layer。`--raster-cards` 专门在低负载 64×48 检查实际捕获/查询，关闭 NRD 以避免过滤掩盖材质或缓存错误；实际 SDK 使用由 `--raster-nrd` 与后续 720p 固定模式另外验证。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 单面接收面，32 帧累计图集命中 | `4489`，1 页驻留、1 次捕获；最后帧无命中是该轮探针在表面背面，不将单帧零计数当作全序列未使用 |
+| 正交捕获位置与四边 padding | 最大位置误差 `0` |
+| mip0/1/2 与相邻未分配 tile | 有效性隔离通过，无跨 tile 混色 |
+| camera cut、65×49 resize | 捕获数/generation 保留 |
+| 环境关闭 | 几何不重新捕获，光照 generation 失效；原接收面旧亮度拒绝 |
+| 负且非均匀缩放、换场景蓝色材质 | 实际查询通过，无旧场景材质残留 |
+| 16×16 MASK 交替列 | `128/256` 覆盖；孔洞使对应高 mip 保持无效 |
+| 单 mesh 四个互相遮挡的深度区域 | 四区均独立捕获 |
+| 延迟反馈与超过容量的新页 | 保持 64 页、每帧 ≤2 捕获；2 个复用页拒绝旧归属光照 mip |
+
+HDR 捕获还检查合法的高强度 emission：输入 500000 的半精度捕获为 `64992`，对应反射 diffuse 为 `0.38305664`；实际 emission 仍由真实命中求值，未被当作漫反射 atlas 直接叠加。
+
+`--raster-world` 仍保留开放/封闭能量、红墙反弹、发光灯具、透明、真实反射、缓存年龄、1×1、滚动/resize 断言。新的 Card 复用可能替代旧 hash 命中，复用断言核验当前场景实际 Card 累计命中或旧 hash 命中，2048 次 fallback 着色预算断言未放宽；图集专用探针独立证明了查询和旧页拒绝。128 帧外部点光漏光仍须低于原 `1e-5`，不以“画面变亮”作为通过条件。最终记录：32 帧=`<5.3085387E-06, 9.5926225E-08, 9.5926225E-08>`，128 帧=`<5.4013603E-06, 4.4703484E-08, 4.4703484E-08>`；这是 Cards 的低分辨率近似误差，未将第 19 节无 Cards 的精确零值冒充当前结果。红墙增量=`<0.062408447, 0.0015093386, 0.0015093386>`，仅发光墙透明贡献=`0.25268555`；屏幕外金属反射=`3.9941406`，缓存不伪造 NRD 输入的断言保留。
+
+Cards 是固定预算基线，仍缺少任意复杂凹面的自适应增补、覆盖质量离线优化、细粒度区域灯光失效、完整优先反馈调度及全场景高 SPP 误差矩阵。Screen Probe Gather、VSM/SMRT、动态 LOD/streaming 与完整异步退休仍未实现；M5 仍按阶段部分完成，不将 atlas 接入等同于全部 Lumen 功能。
+
+
+### 20.4 720p 性能口径与对照
+
+初版独立进程对照曾出现 Cards 更慢：64 帧、后 32 帧中位数，Bistro on/off=`28.218151041666665 / 23.396015625 ms`，Kitchen=`9.898072916666667 / 9.474739583333333 ms`。初版 Bistro 采样段每帧 Card 命中中位数为 939.5，后续加入命中次数排序/重要性调度后为 1537；捕获/光照各约 .1/.2ms，不能把独立进程全部差值归因于图集更新。新增 world/reflection 子计时与只读栈诊断后，Bistro on/off 默认 pipeline stack 均为 304 字节（world=160、reflection=288、Card=96），没有据此改写 pipeline stack 或放宽正确性。
+
+独立进程中 geometry 与未调用 Card 查询的 reflection 段也有较大波动，因此新增 `--raster-cards-compare`：同进程、同一 SceneAsset/GpuScene/AS，两个同类型 RasterBackend 各自持有可写历史/输出，逐帧交换 on/off 先后顺序；每种模式 64 帧，舍弃 32 帧、采样后 32 帧。它不是新增生产后端。固定 1280×720、纹理上限 1024、CSM/local 1024/256、环境 1；Bistro 太阳 135°/65°/强度 3，Kitchen 无外加太阳。使用零 jitter，不调用公共 TAA/SR、输出编码或 Present，强制真实 NRD。
+
+| 同进程交错对照 | Cards on GPU p50 | Cards off GPU p50 |
+| --- | --- | --- |
+| Bistro | `35.22518229166667 ms` | `42.66385416666667 ms` |
+| Kitchen | `14.446354166666666 ms` | `14.283020833333333 ms` |
+
+GPU 时间戳包含传统阴影、geometry、cluster/direct、世界/表面缓存复制更新、Card 捕获/光照/mip、硬件反射、官方 NRD/合成及透明；排除 CPU 导入、DXC/PSO 冷编译、AS 创建、公共重建/编码/呈现。每进程共享 AS 构建数断言为 1，D3D12 Error/Corruption=0。JSON 逐帧数组与各段 p50 写到 ignored `output/raster-validation/*cards-interleaved.json`；不同段的中位数不可相加。
+
+这次交错对照中 Bistro 有收益，Kitchen 无收益，不将其外推为任意资产/GPU 的帧率提升。交错模式的 GPU 资源、缓存热度和调用间隔与单后端预览也不同，绝对时间不能与普通 preview 混用。两种口径均保留，不选取单个较快样本代替完整记录。冷启动含 runtime DXC 与驱动 PSO，调试层下单次初始化曾为约 40–60 秒，不包含在这些 GPU 帧样本内，也未声明生产 UI 启动已优化。
+
+
+最终版本的普通预览另以原生 TAA 导出 720p 图像，不混入交错对照：Bistro 往返运动 64 帧（32 暖机＋32 样本）GPU p50/p95=`30.129635416666666 / 34.1465625 ms`；Kitchen 灯具隔离 32 帧（16＋16）=`9.075546875 / 12.208125 ms`，非发光接收面 red 均值=`0.005800539502245985`（921096 像素），仍关闭太阳、环境和发光窗、未加替代点光。两者真实 NRD 稳态 dispatch=13、AS=1、D3D12 Error/Corruption=0。已查看最终运动峰值、灯具隔离图及材质/光照图集；低频斑块、16 texel 表面近似与有限容量/覆盖仍是画质边界，不把低照度曝光或截图当作完整 PT 参考验收。
+
+最终 Debug/Release x64、lib_6_5/lib_6_9 与实际 Card VS/PS/CS 入口通过；复用既有应用原生桥，未改原生桥或厂商 SDK。原 `--raster`、`--raster-world`、`--raster-nrd`、`--gpu-scene-cache`、`--common-frame` 以及 36 项 PT GPU 契约均通过。共享缓存覆盖同一资源/AS、独立可写描述符、确定性像素、取消/候选/加载失败、resize/释放与设备身份隔离；真实 FSR/XeSS 和 WARP 无 AS 的既有降级仍通过。原 NRD RMS=`0.001620510324862552`、mean=`1.2340340790925202`、motion error=`0.00085258484` 未变。
+
+未执行物理 SM6.5/Tier1.0、缺 typed-UAV 格式组的物理 GPU、ARM64、设备移除压力、持续 UI/多显示器和完整 PT 高 SPP 图像误差。缺格式组与显式关闭 Cards 走同一回退分支；单独探针验证不等于上述物理设备验证。所有日志/PNG/JSON 位于 ignored `output/cards-*` 和 `output/raster-validation/`，不提交。SDK 文件必须保持原始字节，NRD 缺失验证只操作探针输出副本。
+
+临时移走探针输出 NRD.dll 后的新进程通过完整 Cards/世界缓存回归及真实 FSR 回退，随后 finally 恢复 DLL，SHA-256 完全相同。External/NRD、External/Upscalers 既有文件字节未改动。

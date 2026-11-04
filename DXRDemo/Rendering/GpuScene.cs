@@ -46,6 +46,8 @@ internal sealed class GpuScene : GpuResourceOwner
     internal required SceneAsset Asset;
     internal (int Vertex, int Index)[] MeshOffsets = [];
     internal ID3D12Resource Vertices = null!, Indices = null!, Instances = null!, Materials = null!;
+    internal RasterCardBounds[] CardBounds = [];
+    internal ID3D12Resource CardInstanceBounds = null!;
     internal ID3D12Resource Lights = null!, Emitters = null!, EmitterGroups = null!, EnvironmentTexels = null!;
     // CPU SRV 堆供各管线复制；采样器堆只读，可以直接绑定。
     internal ID3D12DescriptorHeap TextureViews = null!, Samplers = null!;

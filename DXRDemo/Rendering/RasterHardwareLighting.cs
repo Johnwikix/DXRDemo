@@ -24,19 +24,31 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
     internal int SampleStep => _divisor;
     private readonly bool _cachedGi;
     private readonly RasterWorldCache _world;
+    private readonly RasterCardAtlas _cards;
+    private readonly bool _cardsEnabled;
+    internal RasterCardAtlas Cards => _cards;
     internal bool CachedGi => _cachedGi;
     internal ID3D12Resource WorldProbeData => _world.Data;
     internal ID3D12Resource WorldStatistics => _world.Statistics;
     internal uint WorldUpdates => _world.UpdateCount;
     private int _traceWidth, _traceHeight;
     private ID3D12Resource _sampleBase = null!, _sampleNormal = null!, _sampleDepth = null!, _sampleEmission = null!;
-    private readonly GpuInterval _traceTimer, _denoiseTimer;
+    private readonly GpuInterval _traceTimer, _denoiseTimer, _worldTimer, _reflectionTimer;
+    internal double WorldMilliseconds {get;private set;}
+    internal double ReflectionMilliseconds {get;private set;}
+    internal ulong PipelineStackBytes {get;private set;}
+    internal ulong WorldStackBytes {get;private set;}
+    internal ulong ReflectionStackBytes {get;private set;}
+    internal ulong CardStackBytes {get;private set;}
     internal double TraceMilliseconds { get; private set; }
     internal double DenoiseMilliseconds { get; private set; }
     internal void ReadTimings()
     {
         TraceMilliseconds = _traceTimer.ReadMilliseconds();
         DenoiseMilliseconds = _denoiseTimer.ReadMilliseconds();
+        _cards.ReadFeedback();
+        if(_cachedGi)WorldMilliseconds=_worldTimer.ReadMilliseconds();
+        ReflectionMilliseconds=_reflectionTimer.ReadMilliseconds();
     }
     private readonly int _stride;
     private readonly SizedResources _sized = new();
@@ -63,18 +75,23 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
     internal ID3D12Resource? NrdMotion => _denoiser?.Motion;
     internal string NrdStatus { get; private set; } = "NRD disabled";
 
-    internal RasterHardwareLighting(DxrDevice device, bool denoise, int divisor, bool cachedGi)
+    internal RasterHardwareLighting(DxrDevice device, bool denoise, int divisor, bool cachedGi, bool cards = true)
     {
         _device = device.Device;
         _denoise = denoise;
         _configuredDivisor = _divisor = divisor;
         _cachedGi = cachedGi;
+        // padding 使用 RGBA16F/RGBA32F typed UAV load；不具备该格式组时保留三角形/世界缓存回退。
+        _cardsEnabled = cards && device.Device.CheckFeatureSupport<FeatureDataD3D12Options>(Vortice.Direct3D12.Feature.Options).TypedUAVLoadAdditionalFormats;
         try
         {
             Keep(_sized);
             _world = Keep(new RasterWorldCache(_device));
+            _cards = Keep(new RasterCardAtlas(device));
+            if(_cachedGi&&_cardsEnabled)_cards.Initialize(device);
             _traceTimer = Keep(new GpuInterval(device));
             _denoiseTimer = Keep(new GpuInterval(device));
+            _worldTimer=Keep(new GpuInterval(device));_reflectionTimer=Keep(new GpuInterval(device));
             var parameters = new List<RootParameter1>
             { new(RootParameterType.ConstantBufferView, new RootDescriptor1(0, 0), ShaderVisibility.All) };
             for (uint i = 0; i < 8; i++)
@@ -89,6 +106,8 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
             parameters.Add(new(RootParameterType.ShaderResourceView, new RootDescriptor1(10, 0), ShaderVisibility.All));
             parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(1, 4), ShaderVisibility.All));
             parameters.Add(new(RootParameterType.UnorderedAccessView, new RootDescriptor1(2, 4), ShaderVisibility.All));
+            parameters.Add(new(new RootDescriptorTable1(new DescriptorRange1(DescriptorRangeType.ShaderResourceView,10,0,5),
+                new DescriptorRange1(DescriptorRangeType.UnorderedAccessView,4,0,5)),ShaderVisibility.All));
             _root = Keep(_device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())));
             using var compiler = new DxrShaderCompiler();
             // 支持 SM 6.9 时复用 PT 的内联遍历，减少 Hit Lighting 多次 TraceRay 的状态保存；旧设备仍走 6.5。
@@ -96,24 +115,31 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
             compiler.CompileLibrary(Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "RasterHardware.hlsl"),
                 useShaderModel69: inline, useSer: inline, reorderThreads: false);
             _pipeline = Keep(_device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
-            [new(new DxilLibraryDescription(compiler.DxilBytes, [new("RasterLightingRayGen"), new("WorldProbeRayGen"), new("ClosestHit"), new("AnyHit"), new("Miss")])),
+            [new(new DxilLibraryDescription(compiler.DxilBytes, _cachedGi&&_cardsEnabled
+                ? [new("RasterLightingRayGen"),new("WorldProbeRayGen"),new("CardLightingRayGen"),new("ClosestHit"),new("AnyHit"),new("Miss")]
+                : [new("RasterLightingRayGen"),new("WorldProbeRayGen"),new("ClosestHit"),new("AnyHit"),new("Miss")])),
              new(new HitGroupDescription("RasterHitGroup", HitGroupType.Triangles, anyHitShaderImport: "AnyHit", closestHitShaderImport: "ClosestHit")),
              new(new GlobalRootSignature(_root)), new(new RaytracingPipelineConfig(1)), new(new RaytracingShaderConfig(28, 8))])));
-            _table = Keep(DxrResources.CreateUploadBuffer(_device, 256));
+            _table = Keep(DxrResources.CreateUploadBuffer(_device, 320));
             using var properties = _pipeline.QueryInterface<ID3D12StateObjectProperties>();
+            PipelineStackBytes=properties.PipelineStackSize;WorldStackBytes=properties.GetShaderStackSize("WorldProbeRayGen");
+            ReflectionStackBytes=properties.GetShaderStackSize("RasterLightingRayGen");
+            if(_cachedGi&&_cardsEnabled)CardStackBytes=properties.GetShaderStackSize("CardLightingRayGen");
             void* pointer;
             _table.Map(0, null, &pointer).CheckError();
-            NativeMemory.Clear(pointer, 256);
+            NativeMemory.Clear(pointer, 320);
             NativeMemory.Copy((void*)properties.GetShaderIdentifier("RasterLightingRayGen"), pointer, 32);
             NativeMemory.Copy((void*)properties.GetShaderIdentifier("Miss"), (byte*)pointer + 64, 32);
             NativeMemory.Copy((void*)properties.GetShaderIdentifier("RasterHitGroup"), (byte*)pointer + 128, 32);
             NativeMemory.Copy((void*)properties.GetShaderIdentifier("WorldProbeRayGen"), (byte*)pointer + 192, 32);
+            if(_cachedGi&&_cardsEnabled)NativeMemory.Copy((void*)properties.GetShaderIdentifier("CardLightingRayGen"), (byte*)pointer + 256, 32);
             _table.Unmap(0);
             _constants = Keep(DxrResources.CreateUploadBuffer(_device, 512));
             _stride = (int)_device.GetDescriptorHandleIncrementSize(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
             _heap = Keep(_device.CreateDescriptorHeap<ID3D12DescriptorHeap>(new(DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView,
-                GpuSceneCache.MaxTextures + 6, DescriptorHeapFlags.ShaderVisible)));
+                GpuSceneCache.MaxTextures + 6 + RasterCardAtlas.DescriptorCount*2, DescriptorHeapFlags.ShaderVisible)));
             _heaps[0] = _heap;
+            WriteCardDescriptors(null);
             _sample = Keep(new ComputePass(_device, "RasterHardwareSampling.hlsl", "SampleGuides", 4, 4));
             _upscale = Keep(new ComputePass(_device, File.Exists(Path.Combine(AppContext.BaseDirectory,"Shaders","DXR","NRD","NRD.hlsli")) ? "RasterHardwareUpscale.hlsl" : "RasterHardwareUpscaleFallback.hlsl", "Composite", 11, 1));
             _resolve = Keep(new ComputePass(_device, "RasterHardwareResolve.hlsl", "Composite", 7, 1));
@@ -188,7 +214,8 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         uint frame, float environment, SunLightSettings sun, in CameraFrame previous, Vector2 previousJitter, double seconds)
     {
         var scene = lease.Scene;
-        if (!ReferenceEquals(_scene, scene))
+        bool sceneChanged=!ReferenceEquals(_scene,scene);
+        if (sceneChanged)
         {
             _device.CopyDescriptorsSimple(GpuSceneCache.MaxTextures, _heap.GetCPUDescriptorHandleForHeapStart(), scene.TextureViews.GetCPUDescriptorHandleForHeapStart(), DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView);
             _scene = scene;
@@ -211,7 +238,9 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         data[14] = new(_traceWidth, _traceHeight, _divisor, _denoiser != null ? 1 : 0);
         data[19] = scene.Asset.EnvironmentMap is { } map ? new(map.Width, map.Height, map.Rotation, 0) : default;
         if (_cachedGi) _world.Frame(data, scene, camera, environment, sun);
+        _cards.Frame(data,scene,_cachedGi&&_cardsEnabled);
         _constants.Unmap(0);
+        if(sceneChanged||_cards.DescriptorsDirty)WriteCardDescriptors(scene);
         if (_divisor > 1)
         {
             SampleState(commands, ResourceStates.NonPixelShaderResource, ResourceStates.UnorderedAccess);
@@ -223,19 +252,32 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         _traceTimer.Begin(commands);
         if (_cachedGi)
         {
+            _worldTimer.Begin(commands);
             _world.Begin(commands, _constants);
+            if(_cards.Active)_cards.Begin(commands,_constants,_heap,scene);
             BindRays(commands, lease);
             _world.BindTrace(commands);
+            if(_cards.Active)
+            {
+                if(_cards.LightSlot>=0)commands.DispatchRays(new(new(_table.GPUVirtualAddress+256,64),new(_table.GPUVirtualAddress+64,64,64),
+                    new(_table.GPUVirtualAddress+128,64,64),default,RasterCardAtlas.Size,RasterCardAtlas.Size,1));
+                _cards.EndLighting(commands,_constants);
+                BindRays(commands,lease);_world.BindTrace(commands);
+            }
             commands.DispatchRays(new(new(_table.GPUVirtualAddress + 192, 64), new(_table.GPUVirtualAddress + 64, 64, 64),
                 new(_table.GPUVirtualAddress + 128, 64, 64), default, RasterWorldCache.Rays + 1, RasterWorldCache.Budget, 1));
             _world.Publish(commands, _constants);
+            if(_cards.Active)_cards.PublishFeedback(commands);
+            _worldTimer.End(commands);
         }
+        _reflectionTimer.Begin(commands);
         BindRays(commands, lease);
         commands.SetComputeRootShaderResourceView(13, _world.Data.GPUVirtualAddress);
         commands.DispatchRays(new(new(_table.GPUVirtualAddress, 64), new(_table.GPUVirtualAddress + 64, 64, 64),
             new(_table.GPUVirtualAddress + 128, 64, 64), default, (uint)_traceWidth, (uint)_traceHeight, 1));
         commands.ResourceBarrierTransition(_diffuse, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
         commands.ResourceBarrierTransition(_specular, ResourceStates.UnorderedAccess, ResourceStates.NonPixelShaderResource);
+        _reflectionTimer.End(commands);
         _traceTimer.End(commands);
         _denoiseTimer.Begin(commands);
         if (_denoiser != null)
@@ -244,6 +286,53 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
             _resolve.Dispatch(commands, _constants, _width, _height);
         if (_divisor > 1) _upscale.Dispatch(commands, _constants, _width, _height);
         _denoiseTimer.End(commands);
+        if(_cards.CaptureCount>0)
+        {
+            commands.RSSetViewport(0,0,_width,_height);commands.RSSetScissorRect(_width,_height);
+        }
+    }
+
+    private void WriteCardDescriptors(GpuScene? scene)
+    {
+        if(!_cachedGi||!_cardsEnabled)
+        {
+            // 参考/能力回退不初始化 Card 管线或图集；所有保留根槽位仍绑定合法的 typed null 描述符。
+            for(int version=0;version<2;version++)
+            {
+                var start=_heap.GetCPUDescriptorHandleForHeapStart()+(GpuSceneCache.MaxTextures+6+version*RasterCardAtlas.DescriptorCount)*_stride;
+                for(int index=0;index<10;index++)
+                {
+                    bool texture=index is >=2 and <=7;uint size=index==1?80u:index==8?8u:index==9?32u:4u;
+                    ShaderResourceViewDescription view=texture?new()
+                    {
+                        Format=index==5?Format.R32G32B32A32_Float:Format.R16G16B16A16_Float,
+                        ViewDimension=ShaderResourceViewDimension.Texture2D,Shader4ComponentMapping=ShaderComponentMapping.Default,
+                        Texture2D=new() {MipLevels=1}
+                    }:new()
+                    {
+                        Format=Format.Unknown,ViewDimension=ShaderResourceViewDimension.Buffer,
+                        Shader4ComponentMapping=ShaderComponentMapping.Default,Buffer=new() {NumElements=1,StructureByteStride=size}
+                    };
+                    _device.CreateShaderResourceView(null,view,start+index*_stride);
+                }
+                for(int index=0;index<4;index++)
+                {
+                    UnorderedAccessViewDescription view=index==2?new()
+                    {
+                        Format=Format.R16G16B16A16_Float,ViewDimension=UnorderedAccessViewDimension.Texture2D,Texture2D=new() {MipSlice=0}
+                    }:new()
+                    {
+                        Format=Format.Unknown,ViewDimension=UnorderedAccessViewDimension.Buffer,
+                        Buffer=new() {NumElements=1,StructureByteStride=index is 1 or 3?8u:4u}
+                    };
+                    _device.CreateUnorderedAccessView(null,null,view,start+(10+index)*_stride);
+                }
+            }
+            _cards.DescriptorsWritten();return;
+        }
+        for(int version=0;version<2;version++)_cards.WriteDescriptors(_heap.GetCPUDescriptorHandleForHeapStart()+
+            (GpuSceneCache.MaxTextures+6+version*RasterCardAtlas.DescriptorCount)*_stride,_stride,version,scene);
+        _cards.DescriptorsWritten();
     }
 
     private void BindRays(ID3D12GraphicsCommandList4 commands, GpuSceneLease lease)
@@ -264,6 +353,8 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
         commands.SetComputeRootDescriptorTable(10, scene.Samplers.GetGPUDescriptorHandleForHeapStart());
         commands.SetComputeRootDescriptorTable(11, _heap.GetGPUDescriptorHandleForHeapStart() + GpuSceneCache.MaxTextures * _stride);
         commands.SetComputeRootShaderResourceView(12, scene.EmitterGroups.GPUVirtualAddress);
+        commands.SetComputeRootDescriptorTable(18,_heap.GetGPUDescriptorHandleForHeapStart()+
+            (GpuSceneCache.MaxTextures+6+_cards.ReadIndex*RasterCardAtlas.DescriptorCount)*_stride);
         commands.SetPipelineState1(_pipeline);
     }
 

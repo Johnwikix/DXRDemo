@@ -80,6 +80,7 @@ float3 CachedSurfaceLighting(Surface s,Payload hit,inout uint rng,bool eligible)
     if(Materials[s.material].flags.w!=0)return s.base;
     float3 factor=s.base*(1-s.metallic)*(1-s.transmission)*.96;
     if(!any(factor>0))return 0;
+    float3 cardLighting;if(TryCardLighting(s,hit,cardLighting))return cardLighting;
     uint3 key=uint3(hit.instance,hit.primitive,min((uint)(hit.bary.x*16),15u)|(min((uint)(hit.bary.y*16),15u)<<8)|(s.front<<16));
     uint hash=key.x*73856093u^key.y*19349663u^key.z*83492791u;hash^=hash>>16;
     uint slot=hash&((uint)Lighting.z-1),epoch=(uint)Lighting.y,frame=(uint)PreviousRight.w+1;
@@ -151,4 +152,21 @@ void WorldProbeRayGen() {
         output.radiance=float4(min(max(radiance*transmission,0),65000),0);output.directionDistance=float4(l,distance);
     }
     WorldRays[id.y*((uint)PreviousRight.z+1)+id.x]=output;
+}
+
+// 每帧一个 16×16 Card 的视角无关漫反射着色；只读上一版世界缓存，写下一版 atlas。
+[shader("raygeneration")]
+void CardLightingRayGen() {
+    uint2 pixel=DispatchRaysIndex().xy;uint slot=(uint)CausticSettings.y;
+    CardData card=Cards[slot];uint2 p=CardTile(slot)+CARD_PAD+pixel;
+    float4 position=CardPosition[p];uint address=CardAddress(p);
+    if(position.w==0) {CardNextRadiance[p]=0;CardNextStamp[address]=0;return;}
+    Surface surface=(Surface)0;surface.p=position.xyz;
+    float4 a=CardBase[p],n=CardNormal[p],e=CardEmission[p],g=CardGeometry[p];
+    surface.base=a.rgb;surface.metallic=a.w;surface.n=n.xyz;surface.g=g.xyz;surface.roughness=n.w;
+    surface.material=Instances[card.key.x].mesh.z;surface.front=position.w>0;surface.transmission=g.w;surface.ior=1.5;
+    uint rng=PathSeed(uint2(slot,pixel.y*CARD_SIZE+pixel.x),(uint)CausticBounds.w,71);
+    float3 factor=surface.base*(1-surface.metallic)*(1-surface.transmission)*.96;
+    float3 value=e.w<0?surface.base:ProbeDiffuseLighting(surface,rng)+factor*ValidatedCacheIrradiance(surface,rng);
+    CardNextRadiance[p]=float4(min(max(value,0),65000),1);CardNextStamp[address]=uint2(card.key.w,(uint)CausticBounds.w);
 }

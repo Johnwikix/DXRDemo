@@ -61,6 +61,10 @@ public sealed unsafe partial class GpuSceneCache
                 asset.Meshes[i].Vertices.CopyTo(vertices, offsets[i].Vertex);
                 asset.Meshes[i].Indices.CopyTo(indices, offsets[i].Index);
             }
+            scene.CardBounds = RasterCardBounds.Build(asset, cancellation);
+            var cardInstances = new RasterCardBounds[asset.Instances.Length];
+            for (int i = 0; i < cardInstances.Length; i++) cardInstances[i] = scene.CardBounds[asset.Instances[i].Mesh];
+            scene.CardInstanceBounds = Upload(scene, MemoryMarshal.AsBytes(cardInstances.AsSpan()));
             scene.MeshOffsets = offsets;
             scene.Vertices = Upload(scene, MemoryMarshal.AsBytes(vertices.AsSpan()), ResourceStates.VertexAndConstantBuffer | ResourceStates.NonPixelShaderResource | ResourceStates.PixelShaderResource);
             scene.Indices = Upload(scene, MemoryMarshal.AsBytes(indices.AsSpan()), ResourceStates.IndexBuffer | ResourceStates.NonPixelShaderResource | ResourceStates.PixelShaderResource);

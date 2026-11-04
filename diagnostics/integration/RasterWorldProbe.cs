@@ -65,8 +65,8 @@ internal static class RasterWorldProbe
         // 恢复有光场景，随后检查移动和缩放不会清空世界缓存。
         Mean(room with {Materials=[material,red],Lights=[point]},0);
         var statistics=ReadStatistics(device,backend.WorldStatistics!);
-        RasterProbe.Require(statistics[2]<=RasterWorldCache.SurfaceBudget&&statistics[0]>0,"Surface lighting cache did not reuse results or exceeded shading budget");
-        Console.WriteLine($"Surface cache: hits={statistics[0]}, shading={statistics[2]}, fallback={statistics[3]}");
+        RasterProbe.Require(statistics[2]<=RasterWorldCache.SurfaceBudget&&(statistics[0]>0||(backend.CardAtlas?.TotalHits??0)>0),"Surface lighting cache did not reuse results or exceeded shading budget");
+        Console.WriteLine($"Surface cache: hash hits={statistics[0]}, card hits={backend.CardAtlas?.Hits}, total scene card hits={backend.CardAtlas?.TotalHits}, shading={statistics[2]}, fallback={statistics[3]}");
         uint updates=backend.WorldUpdates;
         var moved=camera with {Origin=camera.Origin+new Vector3(RasterWorldCache.Grid(backend.SharedScene!.Asset,camera).W*1.25f,0,0)};
         backend.Render(moved,camera,default,default,width,height,1.0/60,true,0,default);

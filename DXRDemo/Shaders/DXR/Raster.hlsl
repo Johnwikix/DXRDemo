@@ -58,7 +58,7 @@ struct Varyings {
     float4 uv : TEXCOORD3;
     float4 color : COLOR0;
 };
-Varyings VertexMain(uint id : SV_VertexID)
+Varyings LoadVertex(uint id)
 {
     Instance node = Instances[NodeIndex];
     // SV_VertexID 不包含 draw 的 BaseVertexLocation；手动 pulling 必须显式加 mesh base。
@@ -68,6 +68,11 @@ Varyings VertexMain(uint id : SV_VertexID)
     result.tangent = float4(mul(float4(vertex.tangent.xyz, 0), node.world).xyz,
         vertex.tangent.w * (determinant((float3x3)node.world) < 0 ? -1 : 1));
     result.uv = vertex.uv; result.color = vertex.color;
+    result.position=0;return result;
+}
+Varyings VertexMain(uint id : SV_VertexID)
+{
+    Varyings result=LoadVertex(id);
     result.position = mul(float4(result.world, 1), ViewProjection);
     result.position.xy += float2(-2 * Size.z / Size.x, 2 * Size.w / Size.y) * result.position.w;
     return result;
@@ -83,7 +88,14 @@ float4 Texture(Binding binding, float4 uv)
     uint index = NonUniformResourceIndex((uint)binding.info.x);
     return Textures[index].SampleBias(Samplers[index], UV(binding, uv), EnvironmentMap.w);
 }
-bool ObjectFront(bool rasterFront) { return rasterFront != (determinant((float3x3)Instances[NodeIndex].world) < 0); }
+bool ObjectFront(bool rasterFront) {
+#ifdef RASTER_LOCAL_CAPTURE
+    // Card 在局部坐标投影，负缩放已由捕获/查询的同一变换处理。
+    return rasterFront;
+#else
+    return rasterFront != (determinant((float3x3)Instances[NodeIndex].world) < 0);
+#endif
+}
 void AlphaTest(Varyings input, bool front)
 {
     Material m = Materials[Instances[NodeIndex].mesh.z];

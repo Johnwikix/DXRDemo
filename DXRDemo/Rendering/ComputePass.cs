@@ -60,6 +60,14 @@ internal sealed class ComputePass : GpuResourceOwner
             } : null;
         _device.CreateShaderResourceView(resource, view, _heap.GetCPUDescriptorHandleForHeapStart() + index * _stride);
     }
+    /// <summary>绑定单个受控 mip，避免 atlas 各 tile 在全局 mip 生成时相互污染。</summary>
+    internal void SrvMip(int index, ID3D12Resource resource, uint mip) => _device.CreateShaderResourceView(resource,
+        new ShaderResourceViewDescription { Format=resource.Description.Format, ViewDimension=ShaderResourceViewDimension.Texture2D,
+            Shader4ComponentMapping=ShaderComponentMapping.Default, Texture2D=new() { MostDetailedMip=mip,MipLevels=1 } },
+        _heap.GetCPUDescriptorHandleForHeapStart()+index*_stride);
+    internal void UavMip(int index, ID3D12Resource resource, uint mip) => _device.CreateUnorderedAccessView(resource,null,
+        new UnorderedAccessViewDescription { Format=resource.Description.Format,ViewDimension=UnorderedAccessViewDimension.Texture2D,Texture2D=new() { MipSlice=mip } },
+        _heap.GetCPUDescriptorHandleForHeapStart()+(_srvCount+index)*_stride);
     internal void BufferSrv(int index, ID3D12Resource resource, uint stride, uint count) => _device.CreateShaderResourceView(resource,
         new ShaderResourceViewDescription { Format = Format.Unknown, ViewDimension = ShaderResourceViewDimension.Buffer,
             Shader4ComponentMapping = ShaderComponentMapping.Default, Buffer = new() { NumElements = count, StructureByteStride = stride } },
