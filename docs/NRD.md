@@ -15,6 +15,16 @@ in the UI: REBLUR, SIGMA and other variants require their corresponding signals
 and integration. The PBR adapter supplies real diffuse/specular transport,
 first-bounce directional moments and matching material factors to the SH variant.
 
+## 低粗糙闭合玻璃与运动（2026-11-19）
+
+NRD 和 DLSS Ray Reconstruction 对近镜面玻璃显式分别抽样首层反射、透射，部分透射时还取漫反射。闭合玻璃背面需要分层时，仅在透射分支增配样本。NRD 的虚表面深度考虑折射造成的视深缩放，RR 使用主要光路的虚表面深度与运动。仅精确 delta 光路上的当前帧发光/稳定直射可以绕过 NRD；粗糙玻璃仍采用 GGX 散射并过滤随机间接光。RainyCorner 的 0.06 粗糙玻璃启用分层采样，NRD 保留其实际界面主层引导。
+
+新增 `IntegrationProbe.exe --native-glass-noise --volume`，在合成闭合玻璃和条纹背景上检查原生 NRD，以及受支持硬件上的实际 RR。RTX 5070 Ti 的 384×240、1 SPP 固定用例中，NRD 条纹对比由 0.01467 恢复至 0.99895，移动误差由 0.15969 降至 0.000294。RR 移动误差由 0.03392 降至 0.002674，采样点的光学运动向量误差由 0.54653 降至 0.000344 输入像素。
+
+首命中必须与引导的实例、材质及透射类别一致才进行分层。子像素或 Alpha 命中相邻表面时抽样完整 BSDF。边界探针 `--glass-edge` 中，分层时误套玻璃权重的亮度为普通抽样的 48.75%，修正后为 100.42%。
+
+同一设备的 RainyCorner 640×400、2 SPP、10 次反弹序列中，排除玻璃轮廓并用同一组虚面运动向量配准后的静止/移动线性亮度 RMS，NRD 从 0.009422/0.213693 降至 0.008720/0.164634，RR 从 0.019119/0.117960 降至 0.014840/0.092791。采样 16 个静止帧和 8 个移动帧。路径追踪与重建合计的 GPU 时间戳中位数，NRD 从 1.58 ms 增至 1.91 ms，RR 从 1.79 ms 增至 2.46 ms。此口径覆盖离屏计算，运动残差仍包含真实的反射变化。
+
 ## Camera-motion history (2026-10-24)
 
 The native ABI now carries both current and previous unjittered projection matrices.

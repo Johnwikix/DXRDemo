@@ -25,15 +25,16 @@ internal static unsafe class GlassTemporalProbe
         const int width=384,height=240,frames=48,measured=16;
         var view=CameraFrame.Look(new(0,0,3),-Vector3.UnitZ,.7f,.01f,100);
         var original=GlassReconstructionProbe.Fixture();
+        bool nativeGlass = args.Contains("--native-glass-noise");
         bool volume=args.Contains("--volume"),partial=args.Contains("--partial"),reflective=args.Contains("--reflective"),rough=args.Contains("--rough"),layered=args.Contains("--layered"),hdrDetail=args.Contains("--hdr-detail");
         float radianceGain=hdrDetail?101:1;
         float transmission=partial?.6f:1,ior=reflective?9:1.5f;
         string variant=volume?"-volume":partial?"-partial":reflective?"-reflective":rough?"-rough":layered?"-layered":"";
         if(hdrDetail)variant+="-hdr";
-        int scaleIndex=Array.IndexOf(args,"--scale");int scale=scaleIndex>=0?int.Parse(args[scaleIndex+1]):50;
+        int scaleIndex=Array.IndexOf(args,"--scale");int scale=scaleIndex>=0?int.Parse(args[scaleIndex+1]):nativeGlass?100:50;
         Require(scale is >=33 and <=100,"Glass quality scale must be 33..100");
         if(scale!=50)variant+=$"-{scale}";
-        string output="output/glass-temporal"+variant;
+        string output=(nativeGlass?"output/native-glass-noise":"output/glass-temporal")+variant;
         var materials=(SceneMaterial[])original.Materials.Clone();
         if(hdrDetail)
         {
@@ -79,13 +80,20 @@ internal static unsafe class GlassTemporalProbe
         using var sr=new PathTracingResolve(device);
         using var target=device.CreateTexture2D<Rgba64>(width,height);
         var results=new List<Result>();Directory.CreateDirectory(output);
-        foreach(var mode in new[] { ReconstructionMode.Fsr,ReconstructionMode.XeSS,ReconstructionMode.Dlss })
+        ReconstructionMode[] modes = nativeGlass
+            ? [ReconstructionMode.Off, ReconstructionMode.DlssRayReconstruction]
+            : [ReconstructionMode.Fsr, ReconstructionMode.XeSS, ReconstructionMode.Dlss];
+        foreach(var mode in modes)
         {
-            if(!sr.Status.Supports(mode) || args.Contains("--fsr-only") && mode!=ReconstructionMode.Fsr)continue;
-            foreach(var denoiser in new[] { RayTraceDenoiserMode.TemporalOnly,RayTraceDenoiserMode.Optix })
+            bool nrd = nativeGlass && mode == ReconstructionMode.Off;
+            bool rr = mode == ReconstructionMode.DlssRayReconstruction;
+            if((!nrd && !sr.Status.Supports(mode)) || (!nativeGlass && args.Contains("--fsr-only") && mode!=ReconstructionMode.Fsr))continue;
+            foreach(var denoiser in nativeGlass
+                ? new[]{nrd?RayTraceDenoiserMode.NrdRelax:RayTraceDenoiserMode.None}
+                : new[]{RayTraceDenoiserMode.TemporalOnly,RayTraceDenoiserMode.Optix})
             {
                 if(denoiser==RayTraceDenoiserMode.Optix && !sr.Status.OptixAvailable)continue;
-                sr.Configure(mode,scale,width,height,false,true,denoiser==RayTraceDenoiserMode.Optix);sr.Reset();
+                sr.Configure(mode,scale,width,height,nrd,true,denoiser==RayTraceDenoiserMode.Optix);sr.Reset();
                 Require(sr.Active==mode,sr.Status.Message);
                 int w=sr.InputWidth,h=sr.InputHeight;
                 using var raw=device.CreateTexture2D<Float4>(w,h);
@@ -97,16 +105,19 @@ internal static unsafe class GlassTemporalProbe
                 {
                     Float2 jitter=sr.Jitter();
                     backend.Trace(camera,frame,1,6,jitter,0,raw,normal,surface,guide,signals,
-                        optixGuides:denoiser==RayTraceDenoiserMode.Optix,textureLodBias:sr.TextureLodBias,stabilizeGlass:true);
+                        rayReconstruction:rr, opaqueForNrd:nrd, optixGuides:denoiser==RayTraceDenoiserMode.Optix,
+                        textureLodBias:sr.TextureLodBias,stabilizeGlass:!nativeGlass);
                     Require(sr.Execute(raw,normal,surface,target,default,3,jitter,denoiser,
-                        HdrRenderParameters.Default,1.0/60,guide,camera,signals),sr.Status.Message);
+                        HdrRenderParameters.Default,1.0/60,guide,camera,signals,transparentBackend:nrd?backend:null),sr.Status.Message);
+                    Require(!nrd || sr.Status.NrdActive && sr.StableMotion != null,"NRD optical planes did not execute");
+                    Require(!rr || sr.Active==ReconstructionMode.DlssRayReconstruction,"DLSS RR fell back");
                 }
                 var sum=new double[width*height];var square=new double[width*height];
                 for(int frame=0;frame<frames;frame++)
                 {
                     Frame(frame,view);
                     if(frame<frames-measured)continue;
-                    float[] pixels=ReconstructionProbe.ReadTexture(native,sr.LinearOutput,true,ResourceStates.UnorderedAccess);
+                    float[] pixels=ReconstructionProbe.ReadTexture(native,nrd?sr.DenoisedColor:sr.LinearOutput,true,nrd?ResourceStates.NonPixelShaderResource:ResourceStates.UnorderedAccess);
                     for(int p=0;p<sum.Length;p++) { double a=pixels[p*4];Require(double.IsFinite(a),"Nonfinite glass output");sum[p]+=a;square[p]+=a*a; }
                 }
                 Require(denoiser!=RayTraceDenoiserMode.Optix || sr.Status.OptixActive && sr.OptixDispatchCount>=frames,"OptiX silently fell back");
@@ -125,9 +136,9 @@ internal static unsafe class GlassTemporalProbe
                 double contrast=(bright/brightN-dark/darkN)/(.35*expectedTrans*radianceGain);
                 double rms=Math.Sqrt(variance/(brightN+darkN))/radianceGain;
                 SceneProbe.Save(target,$"{output}/{mode}-{denoiser}.png");
-                var optical=surface.ToArray();float guideZ=optical[h/2,w/2].Z;
+                var optical=(nrd?signals.StableTransmissionSurface:surface).ToArray();float guideZ=optical[h/2,w/2].Z;
                 Frame(frames,view with { Origin=view.Origin+new Vector3(.01f,0,0) });
-                float[] motion=ReconstructionProbe.ReadTexture(native,sr.Motion,true);
+                float[] motion=ReconstructionProbe.ReadTexture(native,nrd?sr.StableMotion!:sr.Motion,true, ResourceStates.NonPixelShaderResource);
                 // A thin pane has no lateral refraction: the visible plane is at Z=0, not Z=1.
                 double expectedZ=reflective?-3:volume?.01*(1-1/ior):0;
                 double expectedMotion=.01*h/(2*(3-expectedZ)*Math.Tan(view.VerticalFov*.5));
@@ -159,7 +170,7 @@ internal static unsafe class GlassTemporalProbe
                 {
                     float offset=(step+1)*.01f;
                     if(step>0)Frame(frames+step,view with { Origin=view.Origin+new Vector3(offset,0,0) });
-                    float[] pixels=ReconstructionProbe.ReadTexture(native,sr.LinearOutput,true,ResourceStates.UnorderedAccess);
+                    float[] pixels=ReconstructionProbe.ReadTexture(native,nrd?sr.DenoisedColor:sr.LinearOutput,true,nrd?ResourceStates.NonPixelShaderResource:ResourceStates.UnorderedAccess);
                     double error=0,error2=0;int count=0;
                     for(int y=height/3;y<height*2/3;y++)for(int x=width/4;x<width*3/4;x++)
                     {
@@ -178,7 +189,7 @@ internal static unsafe class GlassTemporalProbe
         File.WriteAllText($"{output}/metrics.json",JsonSerializer.Serialize(results,new JsonSerializerOptions { WriteIndented=true }));
         for(ulong i=0;i<messages.NumStoredMessagesAllowedByRetrievalFilter;i++)
         { var message=messages.GetMessage(i);Require(message.Severity is not (MessageSeverity.Error or MessageSeverity.Corruption),message.Description); }
-        Require(results.Count>=2,"No glass/SR combinations executed");
+        Require(nativeGlass ? results.Count>=1 : results.Count>=2,"No required glass reconstruction combinations executed");
         foreach(var r in results)
         {
             Require(r.Contrast is >.8 and <1.15,$"{r.Provider}+{r.Denoiser} blurred glass detail: {r.Contrast}");
@@ -189,6 +200,55 @@ internal static unsafe class GlassTemporalProbe
         }
         Console.WriteLine("PASS glass/SR detail, stationary stability and visible-surface motion.");
     }
+    internal static void Edge()
+    {
+        DxrDevice.TryActivateAgilityRuntime();
+        using var device=DxrDevice.CreateDefault();
+        using var backend=new DxrSceneBackend { ReferenceMode=true, CausticsEnabled=false };
+        backend.Initialize(device);
+        const int width=128,height=96,x=63;
+        var camera=CameraFrame.Look(new(0,0,3),-Vector3.UnitZ,.7f,.01f,100);
+        using var raw=device.CreateTexture2D<Float4>(width,height);
+        using var normal=device.CreateTexture2D<Rgba32>(width,height);
+        using var surface=device.CreateTexture2D<Float4>(width,height);
+        using var guide=device.CreateTexture2D<Float4>(width,height);
+        using var pbr=new PbrSignals(device,width,height);
+        var fixture=GlassReconstructionProbe.Fixture();
+        var materials=fixture.Materials;
+        materials[0].Flags.W=0;
+        materials[0].Factors.Y=.65f;
+        materials[2].Factors.Y=0;
+        materials[2].BaseColor=Vector4.One;
+        materials[2].Transmission=new(1,1,0,0);
+        materials[2].Flags.Z=1;
+        var opaque=fixture.Meshes[0];
+        var pane=fixture.Meshes[48];
+        float paneEdge=(2*(x+.5f)/width-1)*(width/(float)height)*MathF.Tan(.35f)*2+.0001f;
+        for(int i=0;i<4;i++)
+        {
+            opaque.Vertices[i].Position.X=i is 0 or 3?-10:10;
+            opaque.Vertices[i].Position.Y=i<2?-10:10;
+            pane.Vertices[i].Position.X=i is 0 or 3?-4:paneEdge;
+            pane.Vertices[i].Position.Y=i<2?-10:10;
+        }
+        backend.SetScene(fixture with {
+            Meshes=[opaque,pane],
+            Instances=[new("matte",0,Matrix4x4.Identity),new("pane",1,Matrix4x4.Identity)],
+            EnvironmentMap=new SceneEnvironment(4,2,Enumerable.Repeat(Vector4.One,8).ToArray()) });
+        double Render(bool rr)
+        {
+            backend.Trace(camera,0,256,3,default,1,raw,normal,surface,guide,pbr,rayReconstruction:rr);
+            var samples=raw.ToArray();
+            double sum=0;
+            for(int y=8;y<height-8;y++)sum+=samples[y,x].X;
+            return sum/(height-16);
+        }
+        double reference=Render(false);
+        double tested=Render(true);
+        Console.WriteLine($"Subpixel junction: unstratified={reference:F6}, with optical modes={tested:F6}, ratio={tested/reference:F6}");
+        Require(reference>.5 && Math.Abs(tested/reference-1)<.04,"Neighboring opaque pixels lost diffuse energy during glass branch stratification");
+    }
+
     private sealed record Result(string Provider,string Denoiser,double Contrast,double FrameRms,double GuideZ,double MotionError,double GuideError,double MovingError,double EnergyRatio);
     private static void Require(bool condition,string message) { if(!condition)throw new InvalidOperationException(message); }
 }

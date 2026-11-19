@@ -116,7 +116,7 @@ void AccumulatePath(float3 value,int lobe,float3 direction,float3 factorD,float3
 
 // Unlit OptiX features and conventional SR optical geometry. Follow the dominant
 // ideal glass/mirror path; NRD/RR keep their separate feature conventions.
-void OptixGuide(Surface s,float3 direction,uint instance,out float3 albedo,out float3 normal,out float4 opticalSurface,out uint interfaces) {
+void OpticalGuide(Surface s,float3 direction,uint instance,out float3 albedo,out float3 normal,out float4 opticalSurface,out uint interfaces) {
     PathState path=BeginPath(CameraOrigin.xyz,direction,CameraForward.w*2/Size.y);
     interfaces=0;
     float3 tint=1,translation=0; float3x3 rotation=float3x3(1,0,0,0,1,0,0,0,1),image=rotation; uint rng=0x4c1539u;
@@ -133,15 +133,7 @@ void OptixGuide(Surface s,float3 direction,uint instance,out float3 albedo,out f
         float3 outgoing=transmitted?(s.thickness>0?refract(path.direction,s.n,eta):path.direction):reflect(path.direction,s.n);
         if(dot(outgoing,outgoing)<1e-8) { transmitted=false; outgoing=reflect(path.direction,s.n); }
         float3x3 local=InterfaceTransform(s,path.direction,outgoing,transmitted);
-        float3x3 positionTransform=local;
-        if(transmitted && s.thickness>0) {
-            // Preserve tangential coordinates and map the refracted ray back to
-            // its incident ray. At normal incidence a slab's apparent thickness
-            // is thickness/IOR; pure rotation incorrectly leaves its depth intact.
-            float scale=clamp(eta*abs(dot(path.direction,s.n))/max(abs(dot(outgoing,s.n)),1e-6),.001,1000);
-            float3 n=s.n;
-            positionTransform=float3x3(1,0,0,0,1,0,0,0,1)+(scale-1)*float3x3(n.x*n,n.y*n,n.z*n);
-        }
+        float3x3 positionTransform=InterfacePositionTransform(s,path.direction,outgoing,transmitted,eta,local);
         translation+=mul(image,s.p-mul(positionTransform,s.p)); image=mul(image,positionTransform);
         rotation=mul(rotation,local);
         tint*=transmitted?s.transmission*(s.thickness>0?float3(1,1,1):s.base):F0(s);
@@ -184,13 +176,19 @@ void RenderPixel(bool transparentPass) {
         Surface g=Evaluate(guide.instance,guide.primitive,guide.bary,guide.t*CameraForward.w*2/Size.y,-primary);
         feedback.position=g.p; feedback.normal=g.n; feedback.material=g.material; feedback.roughness=g.roughness;
         glass=g.transmission>0;
-        stableSplit=PathSettings.w!=0 && !coverage && SplitSurface(g);
-        srGlass=((uint)Environment.w&2)!=0 && !coverage && glass && g.roughness<=.05;
-        splitGlass=glass && (stableSplit || srGlass);
-        if(srGlass && g.transmission<1) glassBranches=3;
+        // 接近镜面的粗糙玻璃仍分层采样，但主 SH 降噪保留其实际界面引导。
+        stableSplit=PathSettings.w!=0 && !coverage && g.roughness<=.05 && SplitSurface(g);
+        srGlass=(((uint)Environment.w&2)!=0 || Limits.z!=0) && !coverage && glass && SplitSurface(g);
+        splitGlass=glass && (stableSplit || srGlass || (PathSettings.w!=0 && !coverage && SplitSurface(g)));
+        if(splitGlass && g.transmission<1) glassBranches=3;
         if(stableSplit) {
-            StableGuide(g,primary,guide.instance,false,reflectionSurface,reflectionNormal);
-            if(glass) StableGuide(g,primary,guide.instance,true,transmissionSurface,transmissionNormal);
+            uint reflectionInterfaces;
+            StableGuide(g,primary,guide.instance,false,reflectionSurface,reflectionNormal,reflectionInterfaces);
+            if(glass) {
+                uint interfaces;
+                StableGuide(g,primary,guide.instance,true,transmissionSurface,transmissionNormal,interfaces);
+                if(g.thickness>0 || interfaces>1) glassStrata=2;
+            }
         }
         if(!coverage) GatherCaustics(g,-primary,primaryCausticD,primaryCausticS,causticMomentD,causticMomentS);
         primarySurface=float4(g.p,guide.t); primaryNormal=g.n; primaryAlbedo=DiffuseAlbedo(g);
@@ -198,7 +196,7 @@ void RenderPixel(bool transparentPass) {
         if(((uint)Environment.w&1)!=0 || srGlass) {
             float4 opticalSurface;
             uint opticalInterfaces;
-            OptixGuide(g,primary,guide.instance,optixAlbedo,optixNormal,opticalSurface,opticalInterfaces);
+            OpticalGuide(g,primary,guide.instance,optixAlbedo,optixNormal,opticalSurface,opticalInterfaces);
             if(srGlass) {
                 // Bound splitting to two interfaces, including a slab's exit or
                 // a second window pane. Single sheets retain only two paths.
@@ -227,9 +225,12 @@ void RenderPixel(bool transparentPass) {
     }
     float3 cachedSum=0;
     float hitD=0,hitS=NRD_FrontEnd_SpecHitDistAveraging_Begin(),countD=0;
-    uint pathCount=(uint)Control.x*(transparentPass || splitGlass?glassBranches*glassStrata:1u);
+    uint pathsPerSample=transparentPass || splitGlass?glassBranches+glassStrata-1:1u;
+    uint pathCount=(uint)Control.x*pathsPerSample;
     for(uint sample=0;sample<pathCount;sample++) {
         uint sampleIndex=(uint)Control.z*pathCount+sample;
+        uint glassBranch=sample%pathsPerSample;
+        bool primaryTransmission=glassBranch>0 && glassBranch<=glassStrata;
         float3 rayDirection=primary;
         if(PathSettings.x!=0) {
             float2 sampleNdc=(float2(pixel)+.5+CameraSample(pixel,sampleIndex))/Size.xy*2-1;
@@ -237,7 +238,7 @@ void RenderPixel(bool transparentPass) {
         }
         PathState path=BeginPath(CameraOrigin.xyz,rayDirection,CameraForward.w*2/Size.y);
         float secondaryDistance=0; int firstLobe=-1; float3 firstDirection=0;
-        bool hitDistanceRecorded=false,deterministicPath=false;
+        bool hitDistanceRecorded=false,deterministicPath=false,primaryGlassMatch=false;
         uint plane=0;
         uint bounce=0;
         for(uint step=0;step<(uint)Control.y+16 && bounce<(uint)Control.y;step++) {
@@ -316,24 +317,24 @@ void RenderPixel(bool transparentPass) {
             float3 u=ScatterSamples(pixel,sampleIndex,bounce);
             // Stratify first-event glass closures for NRD and conventional SR.
             float splitWeight=1; bool splitSecondary=false;
-            if((transparentPass || splitGlass) && bounce==0) {
-                if(srGlass && glassBranches==3) {
+            bool matchesGuide=hit.instance==guide.instance && s.material==primaryMaterial && (hit.transparency&1)==0;
+            if(bounce==0) {
+                // 子像素射线及 Alpha 覆盖可能命中相邻材质。与引导不一致时仍抽样完整 BSDF。
+                primaryGlassMatch=matchesGuide && s.transmission>0 &&
+                    (!splitGlass || (SplitSurface(s) && ((glassBranches==3)==(s.transmission<1))));
+            }
+            if((transparentPass || splitGlass) && bounce==0 && primaryGlassMatch) {
+                if(splitGlass || s.transmission==1) {
                     float p=SpecProbability(s,-path.direction),t=TransmissionProbability(s);
                     float pt=(1-p)*t,pd=(1-p)*(1-t);
-                    uint branch=sample%3;
-                    u.z=branch==0?p*.5:branch==1?p+pt*.5:p+pt+pd*.5;
-                    splitWeight=3*(branch==0?p:branch==1?pt:pd);
-                } else if(s.transmission==1) {
-                    float p=SpecProbability(s,-path.direction);
-                    bool reflection=(sample&1u)==0;
-                    float pTrans=(1-p)*TransmissionProbability(s);
-                    u.z=reflection?p*.5:p+pTrans*.5;
-                    splitWeight=2*(reflection?p:pTrans);
+                    u.z=glassBranch==0?p*.5:primaryTransmission?p+pt*.5:p+pt+pd*.5;
+                    // 只为透射分支增配玻璃背面的样本，避免重复追踪前表面反射。
+                    splitWeight=pathsPerSample*(glassBranch==0?p:primaryTransmission?pt/glassStrata:pd);
                 } else u.z=(u.z+(sample&1u))*.5;
             }
-            if(srGlass && glassStrata==2 && bounce==1 && s.transmission==1 && s.roughness<.001) {
+            if(splitGlass && glassStrata==2 && primaryGlassMatch && primaryTransmission && path.transmitted && bounce==1 && s.transmission==1 && SplitSurface(s)) {
                 float p=SpecProbability(s,-path.direction),pt=(1-p)*TransmissionProbability(s);
-                bool reflection=((sample/glassBranches)&1u)==0;
+                bool reflection=glassBranch==1;
                 u.z=reflection?p*.5:p+pt*.5; splitWeight=2*(reflection?p:pt); splitSecondary=true;
             }
             ScatterResult scatter=Scatter(s,-path.direction,u);
@@ -341,8 +342,9 @@ void RenderPixel(bool transparentPass) {
             scatter.weight*=splitWeight;
             if(bounce==0) {
                 firstLobe=(int)scatter.lobe; firstDirection=scatter.direction;
-                deterministicPath=srGlass && scatter.delta && hit.instance==guide.instance;
-                if(stableSplit && hit.instance==guide.instance && scatter.lobe==1) plane=scatter.transmitted?2:1;
+                deterministicPath=splitGlass && primaryGlassMatch && scatter.delta;
+                if(stableSplit && matchesGuide && (glass?primaryGlassMatch:s.transmission==0 && SplitSurface(s)) && scatter.lobe==1)
+                    plane=scatter.transmitted?2:1;
             } else deterministicPath=deterministicPath && splitSecondary && scatter.delta && (hit.transparency&1)==0;
             if(!AdvancePath(path,s,hit.instance,scatter)) break;
             if(Control.y==1 && bounce==0) {

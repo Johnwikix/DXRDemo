@@ -131,6 +131,13 @@ captures actual Bistro checkpoints at 1/4/8/16/32/64/... frames and reports CUDA
 inference time separately from the complete reconstruction GPU stage.
 Use `--output <directory>` to avoid overwriting other ablation captures.
 
+`IntegrationProbe.exe --native-glass-noise --volume` checks offscreen native-resolution
+NRD and, when supported, actual DLSS Ray Reconstruction on a closed glass slab.
+It checks stationary contrast and variation, analytic optical depth and motion,
+moving stripe detail, energy and D3D12 Error/Corruption messages.
+`IntegrationProbe.exe --glass-edge` checks unconstrained BSDF energy on a subpixel
+boundary where the guide sees glass and some samples hit an opaque surface.
+
 Known baseline failures on the current renderer: `--glass-sr` fails the rough
 glass detail contrast assertion (0.02541), and `--lighting` fails the old ReSTIR
 convergence assertion. Both reproduce with the pre-OptiX production shader files.

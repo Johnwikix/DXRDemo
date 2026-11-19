@@ -12,7 +12,7 @@
 - **轨道 / 自由** 两种相机、轨道 + 拖动 glTF/GLB 打开
 - **实体玻璃**（Snell 折射 / 全反射 / Beer-Lambert 吸收）
 
-启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），并提供 Bistro 街角、Convergence Test 和 Rainy Corner。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
+启动默认加载 **RTXPT Kitchen**（1,474,751 个三角形），并提供 Bistro 街角、Convergence Test 和 Rainy Corner。路径采样、BSDF、路径状态与选光已参考 NVIDIA RTXPT 重写，详见 [RTXPT 重写与单帧校验](docs/RTXPT_REWRITE.md)。[闭合玻璃离屏回归](docs/NRD.md#低粗糙闭合玻璃与运动2026-11-19)覆盖实际 NRD 和 DLSS RR 的静止与运镜。详细操作与支持项见 [场景渲染器说明](docs/SCENE_RENDERER.md)，降噪见 [NRD](docs/NRD.md)，超分/光线重建见 [超分说明](docs/SUPER_RESOLUTION.md)，玻璃与便利店验证见 [GLASS_RR_VALIDATION](docs/GLASS_RR_VALIDATION.md)。
 
 新配置默认 **1 SPP、10 次反弹、DLSS 光线重建、50% 输入比例**；已有保存设置仍优先恢复。RTX 5070 Ti 上，Bistro 的 4K 单帧离线 GPU 总耗时为 30.7–32.0 ms，进入 30 FPS 的 GPU 预算；已加入原生 4K NRD 与 1080p→4K NRD+DLSS 的离线相机运动序列验证，连续呈现帧率仍未验证。
 
