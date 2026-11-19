@@ -1,0 +1,36 @@
+Model=dragon_vrip_res4, triangles=11102, nodes=3871, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.470368,"mean_ms":0.4726277333333336,"p10_ms":0.469344,"p90_ms":0.471712,"n":60},"wall":{"median_ms":0.5207,"mean_ms":0.5342299999999999,"p10_ms":0.5138,"p90_ms":0.5777,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":3.873664,"mean_ms":4.187885866666667,"p10_ms":3.779584,"p90_ms":4.902592,"n":60},"wall":{"median_ms":4.0077,"mean_ms":4.325930000000001,"p10_ms":3.8726,"p90_ms":5.0952,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.466176,"mean_ms":0.4722992,"p10_ms":0.465216,"p90_ms":0.467936,"n":60},"wall":{"median_ms":0.5267,"mean_ms":0.5478283333333334,"p10_ms":0.5134,"p90_ms":0.6258,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":3.6764,"mean_ms":3.9311999999999996,"p10_ms":3.5937,"p90_ms":4.9949,"n":60}}
+Model=dragon_vrip_res3, triangles=47794, nodes=16729, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.499136,"mean_ms":0.5094437333333334,"p10_ms":0.497568,"p90_ms":0.502208,"n":60},"wall":{"median_ms":0.5611,"mean_ms":0.5918150000000001,"p10_ms":0.5453,"p90_ms":0.7373,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":5.193984,"mean_ms":5.885876266666666,"p10_ms":5.064128,"p90_ms":7.501696,"n":60},"wall":{"median_ms":5.3423,"mean_ms":6.05644,"p10_ms":5.1968,"p90_ms":7.7452,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.498944,"mean_ms":0.5021711999999999,"p10_ms":0.49712,"p90_ms":0.501408,"n":60},"wall":{"median_ms":0.5628,"mean_ms":0.5784483333333333,"p10_ms":0.5452,"p90_ms":0.6405,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":5.671,"mean_ms":5.884613333333336,"p10_ms":4.9373,"p90_ms":7.0365,"n":60}}
+Model=bun_zipper, triangles=69451, nodes=23075, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.544992,"mean_ms":0.551096,"p10_ms":0.542592,"p90_ms":0.547264,"n":60},"wall":{"median_ms":0.6023,"mean_ms":0.6236766666666667,"p10_ms":0.5887,"p90_ms":0.7009,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":6.163328,"mean_ms":6.994421866666669,"p10_ms":5.973984,"p90_ms":8.802752,"n":60},"wall":{"median_ms":6.3937,"mean_ms":7.197701666666665,"p10_ms":6.0992,"p90_ms":9.1008,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.542688,"mean_ms":0.5502047999999998,"p10_ms":0.540896,"p90_ms":0.544576,"n":60},"wall":{"median_ms":0.6019,"mean_ms":0.6233166666666669,"p10_ms":0.5871,"p90_ms":0.7008,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":5.7749,"mean_ms":6.4967700000000015,"p10_ms":5.6009,"p90_ms":8.5731,"n":60}}
+Model=dragon_vrip_res2, triangles=202520, nodes=70685, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.552,"mean_ms":0.5549957333333335,"p10_ms":0.549856,"p90_ms":0.555552,"n":60},"wall":{"median_ms":0.603,"mean_ms":0.6223033333333334,"p10_ms":0.5952,"p90_ms":0.6705,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":7.006752,"mean_ms":7.9193023999999985,"p10_ms":6.825024,"p90_ms":9.962016,"n":60},"wall":{"median_ms":7.2363,"mean_ms":8.113381666666667,"p10_ms":6.965,"p90_ms":10.2525,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.551808,"mean_ms":0.5589594666666665,"p10_ms":0.549856,"p90_ms":0.556096,"n":60},"wall":{"median_ms":0.6039,"mean_ms":0.6254483333333332,"p10_ms":0.5954,"p90_ms":0.6956,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":6.6531,"mean_ms":7.6698699999999995,"p10_ms":6.4676,"p90_ms":9.8854,"n":60}}
+Model=Armadillo, triangles=345944, nodes=114181, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.503552,"mean_ms":0.5095152,"p10_ms":0.502656,"p90_ms":0.50576,"n":60},"wall":{"median_ms":0.5555,"mean_ms":0.5792466666666666,"p10_ms":0.5471,"p90_ms":0.6727,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":4.492352,"mean_ms":5.0638912000000005,"p10_ms":4.408576,"p90_ms":6.131456,"n":60},"wall":{"median_ms":4.6827,"mean_ms":5.2536466666666675,"p10_ms":4.522,"p90_ms":6.3885,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.50592,"mean_ms":0.5135146666666667,"p10_ms":0.504864,"p90_ms":0.508448,"n":60},"wall":{"median_ms":0.5833,"mean_ms":0.6091333333333332,"p10_ms":0.5551,"p90_ms":0.701,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":7.7639,"mean_ms":7.421485,"p10_ms":5.918,"p90_ms":8.6018,"n":60}}
+Model=dragon_vrip, triangles=871414, nodes=306649, 1280x720, spp=4, maxBounces=10
+GPU=NVIDIA GeForce RTX 5070 Ti
+{"backend":"dxr-a","gpu":{"median_ms":0.628736,"mean_ms":0.7267840000000001,"p10_ms":0.621888,"p90_ms":0.973024,"n":60},"wall":{"median_ms":1.1859,"mean_ms":1.6240666666666668,"p10_ms":0.7909,"p90_ms":2.8644,"n":60}}
+{"backend":"sm-bytecode","gpu":{"median_ms":14.925728,"mean_ms":15.18167466666666,"p10_ms":12.958912,"p90_ms":17.160448,"n":60},"wall":{"median_ms":16.1576,"mean_ms":16.52428,"p10_ms":14.6425,"p90_ms":19.3709,"n":60}}
+{"backend":"dxr-b","gpu":{"median_ms":0.615872,"mean_ms":0.6205301333333337,"p10_ms":0.61136,"p90_ms":0.62112,"n":60},"wall":{"median_ms":0.6772,"mean_ms":0.6986900000000001,"p10_ms":0.6664,"p90_ms":0.7838,"n":60}}
+{"backend":"ComputeSharp.For","wall":{"median_ms":13.0585,"mean_ms":13.32110833333333,"p10_ms":12.5666,"p90_ms":14.8601,"n":60}}

@@ -1,0 +1,72 @@
+{
+  "model": "bun_zipper",
+  "triangleCount": 69451,
+  "nodeCount": 23075,
+  "width": 1280,
+  "height": 720,
+  "samples": 4,
+  "bounces": 10,
+  "results": [
+    {
+      "backend": "dxr-a",
+      "gpu": {
+        "median_ms": 0.544992,
+        "mean_ms": 0.551096,
+        "p10_ms": 0.542592,
+        "p90_ms": 0.547264,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 0.6023,
+        "mean_ms": 0.6236766666666667,
+        "p10_ms": 0.5887,
+        "p90_ms": 0.7009,
+        "n": 60
+      }
+    },
+    {
+      "backend": "sm-bytecode",
+      "gpu": {
+        "median_ms": 6.163328,
+        "mean_ms": 6.994421866666669,
+        "p10_ms": 5.973984,
+        "p90_ms": 8.802752,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 6.3937,
+        "mean_ms": 7.197701666666665,
+        "p10_ms": 6.0992,
+        "p90_ms": 9.1008,
+        "n": 60
+      }
+    },
+    {
+      "backend": "dxr-b",
+      "gpu": {
+        "median_ms": 0.542688,
+        "mean_ms": 0.5502047999999998,
+        "p10_ms": 0.540896,
+        "p90_ms": 0.544576,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 0.6019,
+        "mean_ms": 0.6233166666666669,
+        "p10_ms": 0.5871,
+        "p90_ms": 0.7008,
+        "n": 60
+      }
+    },
+    {
+      "backend": "ComputeSharp.For",
+      "wall": {
+        "median_ms": 5.7749,
+        "mean_ms": 6.4967700000000015,
+        "p10_ms": 5.6009,
+        "p90_ms": 8.5731,
+        "n": 60
+      }
+    }
+  ]
+}

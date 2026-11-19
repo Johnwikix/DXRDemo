@@ -1,0 +1,72 @@
+{
+  "model": "dragon_vrip_res4",
+  "triangleCount": 11102,
+  "nodeCount": 3871,
+  "width": 1280,
+  "height": 720,
+  "samples": 4,
+  "bounces": 10,
+  "results": [
+    {
+      "backend": "dxr-a",
+      "gpu": {
+        "median_ms": 0.470368,
+        "mean_ms": 0.4726277333333336,
+        "p10_ms": 0.469344,
+        "p90_ms": 0.471712,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 0.5207,
+        "mean_ms": 0.5342299999999999,
+        "p10_ms": 0.5138,
+        "p90_ms": 0.5777,
+        "n": 60
+      }
+    },
+    {
+      "backend": "sm-bytecode",
+      "gpu": {
+        "median_ms": 3.873664,
+        "mean_ms": 4.187885866666667,
+        "p10_ms": 3.779584,
+        "p90_ms": 4.902592,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 4.0077,
+        "mean_ms": 4.325930000000001,
+        "p10_ms": 3.8726,
+        "p90_ms": 5.0952,
+        "n": 60
+      }
+    },
+    {
+      "backend": "dxr-b",
+      "gpu": {
+        "median_ms": 0.466176,
+        "mean_ms": 0.4722992,
+        "p10_ms": 0.465216,
+        "p90_ms": 0.467936,
+        "n": 60
+      },
+      "wall": {
+        "median_ms": 0.5267,
+        "mean_ms": 0.5478283333333334,
+        "p10_ms": 0.5134,
+        "p90_ms": 0.6258,
+        "n": 60
+      }
+    },
+    {
+      "backend": "ComputeSharp.For",
+      "wall": {
+        "median_ms": 3.6764,
+        "mean_ms": 3.9311999999999996,
+        "p10_ms": 3.5937,
+        "p90_ms": 4.9949,
+        "n": 60
+      }
+    }
+  ]
+}
