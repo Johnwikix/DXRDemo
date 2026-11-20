@@ -30,6 +30,8 @@ internal static unsafe class GlassTemporalProbe
         float radianceGain=hdrDetail?101:1;
         float transmission=partial?.6f:1,ior=reflective?9:1.5f;
         string variant=volume?"-volume":partial?"-partial":reflective?"-reflective":rough?"-rough":layered?"-layered":"";
+        bool stacked=args.Contains("--stacked") && !volume;
+        if(stacked)variant+="-stacked";
         if(hdrDetail)variant+="-hdr";
         int scaleIndex=Array.IndexOf(args,"--scale");int scale=scaleIndex>=0?int.Parse(args[scaleIndex+1]):nativeGlass?100:50;
         Require(scale is >=33 and <=100,"Glass quality scale must be 33..100");
@@ -42,7 +44,11 @@ internal static unsafe class GlassTemporalProbe
             backend.FireflyThreshold=64;
         }
         materials[2].Factors.Y=rough?.02f:0;materials[2].Transmission=new(transmission,ior,volume?.01f:0,0);materials[2].Flags.Z=1;
-        var scene=original with { Materials=materials,Instances=volume || layered?original.Instances:original.Instances[..^1] };
+        var scene=original with { Materials=materials,Instances=volume || layered || stacked?original.Instances:original.Instances[..^1] };
+        if(stacked)
+            scene=scene with { Instances=[..scene.Instances,
+                new("Glass third",48,Matrix4x4.CreateTranslation(0,0,-.19f)),
+                new("Glass fourth",49,Matrix4x4.CreateTranslation(0,0,-.29f))] };
         if(volume)
         {
             // Entry and exit must share an instance/medium identity. Two separate
@@ -132,7 +138,7 @@ internal static unsafe class GlassTemporalProbe
                 }
                 Require(brightN>100 && darkN>100,"The glass detail fixture is empty");
                 double f=Math.Pow((ior-1)/(ior+1),2);
-                double expectedTrans=(volume || layered?(1-f)/(1+f):1-f)*transmission;
+                double expectedTrans=(stacked?(1-f)/(1+3*f):volume || layered?(1-f)/(1+f):1-f)*transmission;
                 double contrast=(bright/brightN-dark/darkN)/(.35*expectedTrans*radianceGain);
                 double rms=Math.Sqrt(variance/(brightN+darkN))/radianceGain;
                 SceneProbe.Save(target,$"{output}/{mode}-{denoiser}.png");
@@ -153,7 +159,7 @@ internal static unsafe class GlassTemporalProbe
                     double bx=offset+ray.X*3/(-ray.Z);
                     if(volume)bx=offset+ray.X*2.99/(-ray.Z)+eta*ray.X*.01/ct;
                     int stripe=(int)Math.Floor((bx+1.5)*16);double pattern=(stripe&1)==0?1:.65;
-                    return (volume || layered?(1-fresnel)/(1+fresnel):1-fresnel)*transmission*pattern*radianceGain+
+                    return (stacked?(1-fresnel)/(1+3*fresnel):volume || layered?(1-fresnel)/(1+fresnel):1-fresnel)*transmission*pattern*radianceGain+
                         (partial || reflective?fresnel*.15:0);
                 }
                 double movingError=0;
