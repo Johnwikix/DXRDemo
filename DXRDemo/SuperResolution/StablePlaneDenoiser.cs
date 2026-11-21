@@ -57,12 +57,10 @@ internal sealed unsafe class StablePlaneDenoiser : IDisposable
             ID3D12Resource Texture(Format format) => Keep(DxrResources.CreateUnorderedAccessTexture2D(device, (uint)width, (uint)height, format, ResourceStates.NonPixelShaderResource));
             _packed = Texture(Format.R16G16B16A16_Float); _normal = Texture(Format.R16G16B16A16_Float);
             _viewZ = Texture(Format.R32_Float); _motion = Texture(Format.R16G16_Float);
-            for (int i = 0; i < 2; i++)
-            {
+            for (int i = 0; i < _denoised.Length; i++)
                 _denoised[i] = Texture(Format.R16G16B16A16_Float);
-                if (NativeNrd.Create(device.NativePointer, (uint)width, (uint)height, out _contexts[i]) != 0)
-                    throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()));
-            }
+            if (NativeNrd.CreateOpticalPair(device.NativePointer, (uint)width, (uint)height, out _contexts[0], out _contexts[1]) != 0)
+                throw new InvalidOperationException(Marshal.PtrToStringUTF8(NativeNrd.Diagnostic()));
             var nullSrv = new ShaderResourceViewDescription { Format = Format.R32G32B32A32_Float,
                 ViewDimension = ShaderResourceViewDimension.Texture2D, Shader4ComponentMapping = ShaderComponentMapping.Default, Texture2D = new() { MipLevels = 1 } };
             var nullUav = new UnorderedAccessViewDescription { Format = Format.R32G32B32A32_Float, ViewDimension = UnorderedAccessViewDimension.Texture2D };

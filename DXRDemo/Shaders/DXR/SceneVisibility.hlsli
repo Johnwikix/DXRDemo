@@ -3,10 +3,10 @@
 Payload TraceGlass(float3 origin,float3 direction,float maximum,inout uint rng) {
     RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=maximum;
     Payload hit=(Payload)0; hit.t=maximum; hit.instance=0xffffffff; hit.random=rng; hit.transparency=8;
-#if DXR_USE_SER
+#if DXR_INLINE_TRAVERSAL
     TraceClosestInline(ray,2,hit);
 #else
-    TraceRay(Scene,RAY_FLAG_NONE,2,0,0,0,ray,hit);
+    TraceRay(Scene,RAY_FLAG_CULL_BACK_FACING_TRIANGLES,2,0,0,0,ray,hit);
 #endif
     rng=hit.random; return hit;
 }

@@ -15,6 +15,12 @@ in the UI: REBLUR, SIGMA and other variants require their corresponding signals
 and integration. The PBR adapter supplies real diffuse/specular transport,
 first-bounce directional moments and matching material factors to the SH variant.
 
+## 2026-11-22 NRD 提交与临时池
+
+原生 NRD 桥复用固定 SRV/UAV 描述符，并在每次 dispatch 前批量提交资源屏障。平滑反射与透射两路在同一队列按顺序执行，共用临时纹理池和 PSO，各自保留历史、常量和描述符。托管端在绑定同一组输入期间复用重建所需的固定 PBR 描述符。
+
+RTX 5070 Ti 上以 320×192 合成相机交错测量旧、新原生桥。4 轮各 40 帧，排除暖机后每版 128 帧，NRD 命令录制 CPU 耗时 p50 为 39.7 → 27.1 µs，p90 为 42.6 → 28.8 µs。40 帧完整浮点读回的 SHA-256 逐帧一致。1920×1080 的双光学上下文显存从 181.750 降至 145.8125 MiB，销毁后两版都回到测量前基线；已暖机的创建耗时 p50 为 15.53 → 13.74 ms。
+
 ## 低粗糙闭合玻璃与运动（2026-11-19）
 
 NRD 和 DLSS Ray Reconstruction 对近镜面玻璃显式分别抽样首层反射、透射，部分透射时还取漫反射。闭合玻璃背面需要分层时，仅在透射分支增配样本。NRD 的虚表面深度考虑折射造成的视深缩放，RR 使用主要光路的虚表面深度与运动。仅精确 delta 光路上的当前帧发光/稳定直射可以绕过 NRD；粗糙玻璃仍采用 GGX 散射并过滤随机间接光。RainyCorner 的 0.06 粗糙玻璃启用分层采样，NRD 保留其实际界面主层引导。

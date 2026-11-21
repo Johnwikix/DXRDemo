@@ -171,6 +171,8 @@ void RenderPixel(bool transparentPass) {
     // A separate deterministic guide ray prevents alpha coverage from changing the G-buffer every frame.
     uint guideRng=pixel.x*73856093+pixel.y*19349663+12345;
     bool opaqueForNrd=!transparentPass && CameraUp.w!=0;
+    bool writeNrdGuides=transparentPass || ((uint)Environment.w&4)==0;
+    bool writeOpticalGuides=Limits.z!=0 || ((uint)Environment.w&1)!=0;
     Payload guide=Trace(CameraOrigin.xyz,primary,CameraRight.w,false,guideRng,true,opaqueForNrd);
     bool coverage=(guide.transparency&1)!=0;
     bool glass=false;
@@ -236,12 +238,14 @@ void RenderPixel(bool transparentPass) {
             }
         }
         NRD_MaterialFactors(g.n,-primary,primaryAlbedo,F0(g),roughness,factorD,factorS);
-        // Split-sum environment BRDF approximation (linear material reflectance, never lit radiance).
-        float4 c0=float4(-1,-.0275,-.572,.022),c1=float4(1,.0425,1.04,-.04);
-        float4 r=reconstructionSurface.roughness*c0+c1;
-        float a004=min(r.x*r.x,exp2(-9.28*saturate(dot(reconstructionSurface.n,reconstructionView))))*r.x+r.y;
-        float2 ab=float2(-1.04,1.04)*a004+r.zw;
-        specularAlbedo=opticalSky?0:reconstructionTint*max(F0(reconstructionSurface)*ab.x+ab.y,0);
+        if(writeNrdGuides || writeOpticalGuides) {
+            // 用 split-sum BRDF 近似线性材质反射率。
+            float4 c0=float4(-1,-.0275,-.572,.022),c1=float4(1,.0425,1.04,-.04);
+            float4 r=reconstructionSurface.roughness*c0+c1;
+            float a004=min(r.x*r.x,exp2(-9.28*saturate(dot(reconstructionSurface.n,reconstructionView))))*r.x+r.y;
+            float2 ab=float2(-1.04,1.04)*a004+r.zw;
+            specularAlbedo=opticalSky?0:reconstructionTint*max(F0(reconstructionSurface)*ab.x+ab.y,0);
+        }
         if(Limits.z!=0 && !opticalSky) {
             float3 mirror=reflect(-reconstructionView,reconstructionSurface.n);
             Payload reflected=Trace(Offset(reconstructionSurface,mirror),mirror,CameraRight.w,false,guideRng,srGlass);
@@ -384,7 +388,7 @@ void RenderPixel(bool transparentPass) {
             } else deterministicPath=deterministicPath && splitSecondary && SharpGlassDetail(s,scatter);
             stratifiedTransmission=scatter.transmitted && (bounce==0?splitGlass && primaryGlassMatch && primaryTransmission:splitSecondary);
             if(!AdvancePath(path,s,hit.instance,scatter)) break;
-            if(Control.y==1 && bounce==0) {
+            if(writeNrdGuides && Control.y==1 && bounce==0) {
                 Payload secondary=Trace(path.origin,path.direction,CameraRight.w,false,rng);
                 float distance=secondary.instance==0xffffffff?65504:min(secondary.t,65504);
                 if(firstLobe==0) { hitD+=distance; countD++; } else NRD_FrontEnd_SpecHitDistAveraging_Add(hitS,distance);
@@ -414,21 +418,25 @@ void RenderPixel(bool transparentPass) {
         GlassFallback[pixel]=float4(all(isfinite(fallback))?fallback:0,1);
         return;
     }
-    StableReflection[pixel]=float4(stableReflection,max(reflectionSurface.w,0));
-    StableTransmission[pixel]=float4(stableTransmission,max(transmissionSurface.w,0));
-    Diffuse[pixel]=float4(sumD/factorD,countD>0?hitD/countD:0);
-    NRD_FrontEnd_SpecHitDistAveraging_End(hitS);
-    Specular[pixel]=float4(sumS/factorS,hitS);
-    DiffuseSh[pixel]=float4(coverage?0:momentD,0); SpecularSh[pixel]=float4(coverage?0:momentS,0);
-    StableReflectionSurface[pixel]=reflectionSurface; StableTransmissionSurface[pixel]=transmissionSurface;
-    StableReflectionNormal[pixel]=reflectionNormal; StableTransmissionNormal[pixel]=transmissionNormal;
+    if(writeNrdGuides) {
+        StableReflection[pixel]=float4(stableReflection,max(reflectionSurface.w,0));
+        StableTransmission[pixel]=float4(stableTransmission,max(transmissionSurface.w,0));
+        Diffuse[pixel]=float4(sumD/factorD,countD>0?hitD/countD:0);
+        NRD_FrontEnd_SpecHitDistAveraging_End(hitS);
+        Specular[pixel]=float4(sumS/factorS,hitS);
+        DiffuseSh[pixel]=float4(coverage?0:momentD,0); SpecularSh[pixel]=float4(coverage?0:momentS,0);
+        StableReflectionSurface[pixel]=reflectionSurface; StableTransmissionSurface[pixel]=transmissionSurface;
+        StableReflectionNormal[pixel]=reflectionNormal; StableTransmissionNormal[pixel]=transmissionNormal;
+        DiffuseFactor[pixel]=float4(factorD,1); SpecularFactor[pixel]=float4(factorS,1);
+        GlassSurface[pixel]=srGlass?closestGlassSurface:primarySurface;
+        GlassFallback[pixel]=0; GlassNormal[pixel]=srGlass?closestGlassNormal:0;
+    }
     Normals[pixel]=float4(primaryNormal*.5+.5,min(primaryMaterial,254)/255.0);
     Surfaces[pixel]=primarySurface;
-    NormalRoughness[pixel]=((uint)Environment.w&1)!=0?float4(optixNormal,roughness):float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
-    DiffuseFactor[pixel]=float4(factorD,1); SpecularFactor[pixel]=float4(factorS,1);
-    GlassSurface[pixel]=srGlass?closestGlassSurface:primarySurface;
-    GlassFallback[pixel]=0; GlassNormal[pixel]=srGlass?closestGlassNormal:0;
-    SpecularGuide[pixel]=float4(specularAlbedo,mirrorDistance);
+    if(writeNrdGuides || writeOpticalGuides) {
+        NormalRoughness[pixel]=((uint)Environment.w&1)!=0?float4(optixNormal,roughness):float4(primaryNormal/max(max(abs(primaryNormal.x),abs(primaryNormal.y)),abs(primaryNormal.z)),roughness);
+        SpecularGuide[pixel]=float4(specularAlbedo,mirrorDistance);
+    }
     Albedo[pixel]=float4(((uint)Environment.w&1)!=0?optixAlbedo:primaryAlbedo,reactive); Unfiltered[pixel]=float4(sumE,1);
 }
 #ifdef DXR_VALIDATE_CONTRACTS

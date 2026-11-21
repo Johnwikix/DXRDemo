@@ -111,9 +111,9 @@ internal sealed unsafe class RasterHardwareLighting : GpuResourceOwner
             _root = Keep(_device.CreateRootSignature(new RootSignatureDescription1(RootSignatureFlags.None, parameters.ToArray())));
             using var compiler = new DxrShaderCompiler();
             // 支持 SM 6.9 时复用 PT 的内联遍历，减少 Hit Lighting 多次 TraceRay 的状态保存；旧设备仍走 6.5。
-            bool inline = device.SupportsShaderModel69 && device.Device.CheckFeatureSupport<FeatureDataD3D12Options5>(Vortice.Direct3D12.Feature.Options5).RaytracingTier >= RaytracingTier.Tier1_1;
+            bool inline = device.SupportsShaderModel69 && device.SupportsInlineRayTracing;
             compiler.CompileLibrary(Path.Combine(AppContext.BaseDirectory, "Shaders", "DXR", "RasterHardware.hlsl"),
-                useShaderModel69: inline, useSer: inline, reorderThreads: false);
+                useShaderModel69: inline, inlineTraversal: inline);
             _pipeline = Keep(_device.CreateStateObject<ID3D12StateObject>(new StateObjectDescription(StateObjectType.RaytracingPipeline,
             [new(new DxilLibraryDescription(compiler.DxilBytes, _cachedGi&&_cardsEnabled
                 ? [new("RasterLightingRayGen"),new("WorldProbeRayGen"),new("CardLightingRayGen"),new("ClosestHit"),new("AnyHit"),new("Miss")]

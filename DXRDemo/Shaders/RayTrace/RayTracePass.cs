@@ -179,7 +179,8 @@ public sealed class RayTracePass : ISceneShaderPass, IRenderDiagnostics
             optixGuides: s.Denoiser == RayTraceDenoiserMode.Optix && _reconstruction.Active != ReconstructionMode.DlssRayReconstruction,
             textureLodBias: _reconstruction.TextureLodBias,
             stabilizeGlass: (_reconstruction.Active is ReconstructionMode.Dlss or ReconstructionMode.XeSS or ReconstructionMode.Fsr) &&
-                (denoiserMode is RayTraceDenoiserMode.TemporalOnly or RayTraceDenoiserMode.Optix));
+                (denoiserMode is RayTraceDenoiserMode.TemporalOnly or RayTraceDenoiserMode.Optix),
+            reconstructionGuidesOnly: true);
         bool produced = _reconstruction.Execute(_raw!, _normal!, _surfaces!, texture, default, 2.7f, jitter, denoiserMode, hdr, elapsed,
             _normalRoughness, camera, _pbrSignals, scene.Exposure, directLight: null, nrd ? _sceneBackend : null,
             revisions: new(scene.SceneRevision, scene.Revision, cameraCut, _renderer.PipelineRevision));

@@ -47,8 +47,9 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - **光照**：RTXPT GGX VNDF 与 correlated Smith、理想反射/折射、Owen-Sobol 采样、按发光功率与历史贡献反馈选光、HDR 环境 alias 采样及匹配的 MIS、带优先级的实例介质列表、累计 ray cone、带 eta 补偿的 Russian roulette
 - **路径空间分层**：NRD 使用主表面、平滑反射与透射三层，分别保存虚拟几何引导和历史后合成；参考模式关闭 firefly 过滤与历史选光。范围及限制见 [RTXPT 核心实现](docs/RTXPT_REWRITE.md)。
 - **轨迹后端**：唯一生产路径为 `SceneAsset + DxrSceneBackend`，共享 glTF/GLB 与打包场景的几何、材质、灯光和 BLAS/TLAS。
-- **SM 6.9 / DXR 1.2**：正确查询 `D3D12_FEATURE_SHADER_MODEL`；支持时使用 `lib_6_9` 和 inline RayQuery，旧运行时回退 `lib_6_5` 的 TraceRay。保留可选的材质 SER（`HitObject::FromRayQuery` + `MaybeReorderThread`）；实测开销较大，默认关闭。阴影查询提前终止并使用独立实例掩码，减少无关求交与着色。
+- **DXR 遍历**：DXR Tier 1.1 与 SM 6.5 起使用 inline RayQuery，支持 SM 6.9 时优先编译 `lib_6_9`。Tier 1.0 使用 TraceRay，内联库被编译器或驱动拒绝时也可回退到 `lib_6_5` TraceRay。保留可选的 SM 6.9 材质 SER（`HitObject::FromRayQuery` + `MaybeReorderThread`），默认关闭。内联与回退阴影均提前终止并用实例掩码区分不透明遮挡和玻璃透射。
 - **神经 DXR 评估**：SM 6.9 零售特性没有通用的神经辐射缓存或 Cooperative Vector。项目已有 DLSS Ray Reconstruction（DLSSD）作为神经降噪/重建路径；没有引入未经训练和画质验证的 NRC 网络，避免把训练、缓存更新和额外推理开销叠加到实时路径追踪上。
+- **重建引导**：路径追踪按当前降噪与重建方式写入对应引导，共用相同的着色入口。离屏时间戳和同帧回读见 [验证记录](docs/RTXPT_REWRITE.md#2026-11-22-路径追踪帧耗)。
 
 ### 降噪 / 超分
 
@@ -95,7 +96,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 ## 环境要求 Requirements
 
 - Windows 10 1809+（最低平台版本 10.0.17763.0）
-- 基础光栅需要 D3D12、Shader Model 6.0、Resource Binding Tier 2；路径追踪额外需要 DXR Tier 1.0。启动时分别查询能力；无 DXR 时选择光栅入口，路径 SM 6.9 不可用时回退 `lib_6_5`
+- 基础光栅需要 D3D12、Shader Model 6.0、Resource Binding Tier 2；路径追踪额外需要 DXR Tier 1.0。启动时分别查询能力，无 DXR 时选择光栅入口。SM 6.9 不可用时使用 `lib_6_5`，是否内联由 DXR Tier 决定。
 - HDR10（可选）：需要 Windows HDR 开启的显示器
 - 构建：Visual Studio 2022 + .NET 10 SDK；x64 还需 PowerShell 7 与 C++ v145 工具集
 

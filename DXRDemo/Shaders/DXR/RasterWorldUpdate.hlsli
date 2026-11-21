@@ -7,7 +7,7 @@ RWStructuredBuffer<uint> SurfaceStatistics : register(u2,space4);
 Payload ProbeTrace(float3 origin,float3 direction,float maximum,inout uint rng) {
     RayDesc ray;ray.Origin=origin;ray.Direction=direction;ray.TMin=Limits.x;ray.TMax=maximum;
     Payload hit=(Payload)0;hit.t=maximum;hit.instance=0xffffffff;hit.random=rng;hit.transparency=16;
-#if DXR_USE_SER
+#if DXR_INLINE_TRAVERSAL
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(Scene,RAY_FLAG_NONE,255,ray);
     while(query.Proceed())

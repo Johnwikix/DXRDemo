@@ -68,6 +68,8 @@ internal sealed unsafe class PathTracingResolve : IDisposable
     private ID3D12Resource? _raw, _normals, _surfaces;
     private ID3D12Resource? _nrdNormals;
     private GpuTexture<Float4>? _boundRaw;
+    private PbrSignals? _boundPbr;
+    private GpuTexture<Float4>? _boundDirectLight;
     private (ReconstructionMode Mode, int Scale, int Width, int Height, bool Nrd, bool Pbr, bool Optix) _configuration;
     private bool _linearReady;
     private bool _glassComposed;
@@ -377,7 +379,9 @@ internal sealed unsafe class PathTracingResolve : IDisposable
     private void BindInputs(GpuTexture<Float4> raw, GpuTexture<Rgba32> normals,
         GpuTexture<Float4> surfaces, GpuTexture<Float4>? nrdNormals, PbrSignals? pbr, GpuTexture<Float4>? directLight)
     {
-        if (ReferenceEquals(raw, _boundRaw))
+        if (ReferenceEquals(raw, _boundRaw) && ReferenceEquals(normals.Resource, _normals) &&
+            ReferenceEquals(surfaces.Resource, _surfaces) && ReferenceEquals(nrdNormals?.Resource, _nrdNormals) &&
+            ReferenceEquals(pbr, _boundPbr) && ReferenceEquals(directLight, _boundDirectLight))
             return;
         // Static ranges include unused entries. A different scene/configuration may
         // release the old PBR/OptiX resources, so remove every stale descriptor.
@@ -401,10 +405,20 @@ internal sealed unsafe class PathTracingResolve : IDisposable
             _pbrInputs[9] = pbr.SpecularFactor.Resource;
             _pbrInputs[10] = pbr.GlassFallback.Resource;
             _pbrInputs[11] = pbr.GlassNormal.Resource;
+            // 同一套追踪纹理跨帧复用；只在尺寸或绑定改变时写入各 pass 的固定 SRV。
+            for (int set = 0; set < SetCount; set++)
+                for (int i = 0; i < _pbrInputs.Length; i++)
+                    Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
         }
         else if (directLight != null)
+        {
             _pbrInputs[3] = directLight.Resource;
+            for (int set = 0; set < SetCount; set++)
+                Srv(set, 9, _pbrInputs[3]!);
+        }
         _boundRaw = raw;
+        _boundPbr = pbr;
+        _boundDirectLight = directLight;
     }
 
     private void Srv(int set, int index, ID3D12Resource resource)
@@ -487,13 +501,6 @@ internal sealed unsafe class PathTracingResolve : IDisposable
         Srv(0, 2, _surfaces!);
         Srv(0, 3, _history[1 - historySlot]);
         Srv(0, 26, previousHistorySampleCounts);
-        if (pbr != null)
-            for (int set = 0; set < SetCount; set++)
-                for (int i = 0; i < _pbrInputs.Length; i++)
-                    Srv(set, i < 4 ? 6 + i : i == 4 ? 11 : i < 10 ? 8 + i : 10 + i, _pbrInputs[i]!);
-        else if (directLight != null)
-            for (int set = 0; set < SetCount; set++)
-                Srv(set, 9, _pbrInputs[3]!);
         Uav(0, 0, _color);
         Uav(0, 1, _depth);
         Uav(0, 2, _motion);
@@ -835,6 +842,8 @@ internal sealed unsafe class PathTracingResolve : IDisposable
         _nrdNormals = null;
         _raw = _normals = _surfaces = null;
         _boundRaw = null;
+        _boundPbr = null;
+        _boundDirectLight = null;
         Array.Clear(_pbrInputs);
         for (int i = _sizeResources.Count - 1; i >= 0; i--)
             cleanup.Release(_sizeResources[i]);

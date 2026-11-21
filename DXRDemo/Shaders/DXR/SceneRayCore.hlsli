@@ -161,7 +161,7 @@ void Miss(inout Payload payload) { payload.instance=0xffffffff; }
 // Inline visibility avoids saving the entire path/shading state for a shader
 // table call. TLAS mask 4 excludes transmission; those interfaces are evaluated
 // in distance order by TraceGlass after the opaque test succeeds.
-#if DXR_USE_SER
+#if DXR_INLINE_TRAVERSAL
 void TraceOcclusion(RayDesc ray,inout Payload hit) {
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH|RAY_FLAG_CULL_BACK_FACING_TRIANGLES|RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(Scene,RAY_FLAG_NONE,4,ray);
@@ -203,14 +203,17 @@ void TraceClosestInline(RayDesc ray,uint mask,inout Payload hit) {
 Payload Trace(float3 origin,float3 direction,float maximum,bool shadow,inout uint rng,bool guide=false,bool ignoreGlass=false) {
     RayDesc ray; ray.Origin=origin; ray.Direction=direction; ray.TMin=Limits.x; ray.TMax=max(maximum,Limits.x*2);
     Payload hit; hit.t=ray.TMax; hit.instance=0xffffffff; hit.primitive=0; hit.bary=0; hit.random=rng; hit.transparency=(guide?2:0)|(shadow?4:0)|(ignoreGlass?16:0);
-#if DXR_USE_SER
+#if DXR_INLINE_TRAVERSAL
     if(shadow) { TraceOcclusion(ray,hit); rng=hit.random; return hit; }
-#endif
-    uint rayFlags=RAY_FLAG_CULL_BACK_FACING_TRIANGLES|(shadow?RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH:0);
-#if DXR_USE_SER
     TraceClosestInline(ray,255,hit);
 #else
-    TraceRay(Scene,rayFlags,255,0,0,0,ray,hit);
+    if(shadow) {
+        // 命中时跳过 closest-hit，只有 miss 会改写实例 ID。掩码与内联查询一致，AHS 仍处理 Alpha。
+        hit.instance=0;
+        TraceRay(Scene,RAY_FLAG_CULL_BACK_FACING_TRIANGLES|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH|RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,4,0,0,0,ray,hit);
+    } else {
+        TraceRay(Scene,RAY_FLAG_CULL_BACK_FACING_TRIANGLES,255,0,0,0,ray,hit);
+    }
 #endif
     rng=hit.random; return hit;
 }

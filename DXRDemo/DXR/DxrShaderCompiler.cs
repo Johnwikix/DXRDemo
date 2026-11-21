@@ -128,12 +128,10 @@ public sealed class DxrShaderCompiler : IDisposable
     }
 
     /// <summary>
-    /// Compiles a DXR library for the highest runtime shader model supported by
-    /// the active device. SM 6.9 enables DXR 1.2/SER when <paramref name="useSer"/>
-    /// is true; callers must still provide a 6.5 fallback for older runtimes.
+    /// 编译 DXR 库。内联遍历要求 DXR Tier 1.1，材质重排另要求 SM 6.9。
     /// </summary>
-    public void CompileLibrary(string entryHlsl, bool useShaderModel69 = false, bool useSer = false, bool reorderThreads = true)
-        => Compile(entryHlsl, useShaderModel69 ? "lib_6_9" : "lib_6_5", null, useSer, useShaderModel69, reorderThreads);
+    public void CompileLibrary(string entryHlsl, bool useShaderModel69 = false, bool inlineTraversal = false, bool reorderThreads = false)
+        => Compile(entryHlsl, useShaderModel69 ? "lib_6_9" : "lib_6_5", null, inlineTraversal, useShaderModel69, reorderThreads);
 
     /// <summary>Compiles a compute entry point for reconstruction preparation or output encoding.</summary>
     /// <param name="entryHlsl">The HLSL source path.</param>
@@ -145,7 +143,7 @@ public sealed class DxrShaderCompiler : IDisposable
     public void CompileGraphics(string entryHlsl, string entryPoint, bool pixelShader = false)
         => Compile(entryHlsl, pixelShader ? "ps_6_0" : "vs_6_0", entryPoint);
 
-    private void Compile(string entryHlsl, string profile, string? entryPoint, bool useSer = false, bool useShaderModel69 = false, bool reorderThreads = true)
+    private void Compile(string entryHlsl, string profile, string? entryPoint, bool inlineTraversal = false, bool useShaderModel69 = false, bool reorderThreads = false)
     {
         if (!File.Exists(entryHlsl))
             throw new FileNotFoundException("HLSL not found.", entryHlsl);
@@ -168,8 +166,8 @@ public sealed class DxrShaderCompiler : IDisposable
             psi.ArgumentList.Add("-Fo"); psi.ArgumentList.Add(outFile);
             psi.ArgumentList.Add("-I"); psi.ArgumentList.Add(dir);
             psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_SHADER_MODEL_69={(useShaderModel69 ? 1 : 0)}");
-            psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_USE_SER={(useSer ? 1 : 0)}");
-            psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_REORDER_THREADS={(useSer && reorderThreads ? 1 : 0)}");
+            psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_INLINE_TRAVERSAL={(inlineTraversal ? 1 : 0)}");
+            psi.ArgumentList.Add("-D"); psi.ArgumentList.Add($"DXR_REORDER_THREADS={(inlineTraversal && useShaderModel69 && reorderThreads ? 1 : 0)}");
             if (entryPoint != null) { psi.ArgumentList.Add("-E"); psi.ArgumentList.Add(entryPoint); }
             psi.ArgumentList.Add(entryHlsl);
 

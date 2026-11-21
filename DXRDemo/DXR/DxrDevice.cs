@@ -20,6 +20,7 @@ public sealed partial class DxrDevice : IDisposable
     /// <summary>True when DXR 1.2 / SM 6.9 shader features are available.</summary>
     public bool SupportsShaderModel69 => (int)HighestShaderModel >= (int)ShaderModel.Model6_9;
     public bool SupportsRayTracing { get; private set; }
+    internal bool SupportsInlineRayTracing { get; private set; }
 
     /// <summary>Selects the app-local Agility runtime before any D3D12 device exists.</summary>
     public static bool TryActivateAgilityRuntime()
@@ -103,6 +104,7 @@ public sealed partial class DxrDevice : IDisposable
         // Check DXR support via FeatureDataD3D12Options5.RaytracingTier
         var options = Device.CheckFeatureSupport<FeatureDataD3D12Options5>(Vortice.Direct3D12.Feature.Options5);
         SupportsRayTracing = options.RaytracingTier >= RaytracingTier.Tier1_0;
+        SupportsInlineRayTracing = options.RaytracingTier >= RaytracingTier.Tier1_1;
         if (requireRayTracing && !SupportsRayTracing)
             throw new NotSupportedException(
                 $"GPU does not support DXR. Reported tier: {options.RaytracingTier}");
