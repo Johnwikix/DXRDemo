@@ -77,7 +77,8 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 
 | 组件 Component | 版本 / 说明 |
 |---|---|
-| .NET | `net10.0-windows10.0.22621.0` |
+| .NET | `net11.0-windows10.0.22621.0`（.NET 11 SDK 11.0.100） |
+| 发布运行时 | `PublishWithSatoriGC` `11.0.1-satori.44643583273.1`（Satori GC，仅 `publish` 生效） |
 | WinUI 3 / Windows App SDK | 2.3.1（SelfContained） |
 | Vortice.Direct3D12 / DXGI / Dxc | 3.8.3 |
 | Vortice.Mathematics | 2.1.1 |
@@ -98,7 +99,7 @@ A real-time DirectX 12 raytracing demo built on WinUI 3. The full DXR pipeline i
 - Windows 10 1809+（最低平台版本 10.0.17763.0）
 - 基础光栅需要 D3D12、Shader Model 6.0、Resource Binding Tier 2；路径追踪额外需要 DXR Tier 1.0。启动时分别查询能力，无 DXR 时选择光栅入口。SM 6.9 不可用时使用 `lib_6_5`，是否内联由 DXR Tier 决定。
 - HDR10（可选）：需要 Windows HDR 开启的显示器
-- 构建：Visual Studio 2022 + .NET 10 SDK；x64 还需 PowerShell 7 与 C++ v145 工具集
+- 构建：.NET 11 SDK + Visual Studio 2026（C++ v145 工具集）；x64 还需 PowerShell 7
 
 ---
 
@@ -112,9 +113,9 @@ dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Debug
 dotnet build DXRDemo/DXRDemo.csproj -p:Platform=x64 -p:Configuration=Release
 ```
 
-生成产物：`bin\x64\{Debug|Release}\net10.0-windows10.0.22621.0\DXRDemo.exe`，同级还有 `dxc.exe / dxcompiler.dll / dxil.dll` 和打包的 `Assets\Models\` 场景资源。
+生成产物：`bin\x64\{Debug|Release}\net11.0-windows10.0.22621.0\DXRDemo.exe`，同级还有 `dxc.exe / dxcompiler.dll / dxil.dll` 和打包的 `Assets\Models\` 场景资源。
 
-仓库的 `global.json` 选择已安装的 .NET 10 稳定 SDK。Debug 和 Release 必须分别构建；确认构建成功后再运行对应目录的程序，避免运行残留的旧产物。
+仓库的 `global.json` 选择已安装的 .NET 11 稳定 SDK。Debug 和 Release 必须分别构建；确认构建成功后再运行对应目录的程序，避免运行残留的旧产物。
 
 > **Publish 提示**：csproj 已包含 `CopyAppPriAndXbfToPublish` 目标，把 `*.pri / *.xbf` 复制到 publish 目录。部署时保留整个输出目录；`0xc000027b` 也可能由托管异常触发，例如恢复已经失效的场景索引。
 
@@ -285,13 +286,13 @@ dotnet run --project diagnostics/settings/SettingsProbe.csproj -c Release --no-b
 # 集成探针（含场景、玻璃、SR、NRD、模型回归）
 dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --configfile diagnostics/NuGet.Config
 cd diagnostics/integration
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene-preview ../../Samples/RainyCorner/RainyCorner.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-convergence
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-scene --bistro --width 1920 --height 1080 --frames 256 --reference-frames 16 --reference-spp 32 --spp 1 --bounces 8
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene-preview ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --sr
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-convergence
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --temporal-scene --bistro --width 1920 --height 1080 --frames 256 --reference-frames 16 --reference-spp 32 --spp 1 --bounces 8
 ```
 
 `SceneProbe` 用 `SceneProbe` 自动生成可重现的 glTF / GLB、3×3 贴图、重复实例样例；检查相机帧率独立性、模式连续性、重置、导入取消 / 失败、材质参数、灯光、alpha、纯金属信号、lobe 能量重组、模型尺度与 mip、真实 NRD dispatch、可用 SR。太阳测试验证开关 / 角度 / 强度线性关系以及双面遮挡片的 225 个可见阴影像素。`--glass` 对 2,888 个可见玻璃像素比较 512 SPP 参考与 2 SPP 输出：`x/(1+x)` 压缩后 RGB RMSE 从 **0.351406 → 0.131150（约 −63%）**。`--sr` 跑 80 组 FSR/XeSS × 比例 × 降噪 × SDR/HDR 组合；包含静止相机引导稳定性的 96 帧回归（最大输入像素误差 **0.000477**）和运动矢量正确性。D3D12 Error / Corruption 消息使测试失败。日志与截图写入 ignored `diagnostics/integration/output/`。

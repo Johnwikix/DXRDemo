@@ -207,8 +207,8 @@ Reproduce from `diagnostics/integration`:
 
 ```powershell
 dotnet build IntegrationProbe.csproj -c Release --configfile ../NuGet.Config
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --sr
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe
 ```
 
 Use the EXE: FidelityFX provider discovery follows the native process executable

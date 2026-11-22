@@ -78,12 +78,12 @@ dotnet build diagnostics/integration/IntegrationProbe.csproj -c Release --config
 在 `diagnostics/integration` 目录运行实际 EXE（厂商 SDK provider discovery 依赖进程目录）：
 
 ```powershell
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --lighting
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --sr
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --lighting
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene C:/Models/example.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --sr
 ```
 
 `SceneProbe` 生成可重现的 glTF/GLB、3×3 贴图和重复实例样例。检查相机帧率独立性、模式连续性、重置、导入取消/失败、材质参数、灯光、alpha、纯金属信号、lobe 能量重组、模型尺度与 mip、真实 NRD dispatch 及可用 SR。太阳测试验证开关、角度、强度线性关系，以及双面遮挡片的 225 个可见阴影像素；隔离直接光时，NRD 与关闭降噪的输出最大误差为 0。D3D12 Error/Corruption 消息会使测试失败。截图和日志写入忽略的 `output/`。

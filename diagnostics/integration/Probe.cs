@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 
 if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DXR_DXC_PATH")))
-    Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net10.0-windows10.0.22621.0/dxc.exe"));
+    Environment.SetEnvironmentVariable("DXR_DXC_PATH", Path.GetFullPath("../../DXRDemo/bin/x64/Release/net11.0-windows10.0.22621.0/dxc.exe"));
 Directory.CreateDirectory("output");
 DxrDevice.TryActivateAgilityRuntime();
 if (args.Contains("--hud")) { HudProbe.Run(); return; }

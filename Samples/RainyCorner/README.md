@@ -36,9 +36,9 @@
 从 `diagnostics/integration` 执行：
 
 ```powershell
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene ../../Samples/RainyCorner/RainyCorner.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --scene-preview ../../Samples/RainyCorner/RainyCorner.glb
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --scene-preview ../../Samples/RainyCorner/RainyCorner.glb
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --glass ../../Samples/RainyCorner/RainyCorner.glb
 ```
 
 完整集成测试包括 glTF/GLB、灯光、透明度、纹理、NRD/SR、模型光照开关和内置兔子的阴影回归；D3D12 Error/Corruption 会使测试失败。

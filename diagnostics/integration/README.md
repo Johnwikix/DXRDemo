@@ -70,10 +70,10 @@ sequence to no fewer than 57 frames so every phase is still covered, and
 
 ```powershell
 # Native 4K input/output, primary NRD plus reflected/transmitted histories.
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --bistro --production --nrd --width 3840 --height 2160 --spp 1 --bounces 10 --texture-size 1024
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --bistro --production --nrd --width 3840 --height 2160 --spp 1 --bounces 10 --texture-size 1024
 
 # 1920x1080 input -> 3840x2160 output, NRD plus DLSS SR and nonzero jitter.
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --motion-name dlss-4k --bistro --production --dlss-4k --spp 1 --bounces 10
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe --offline --motion --motion-name dlss-4k --bistro --production --dlss-4k --spp 1 --bounces 10
 ```
 
 `--nrd-motion` is a separate noise-free 4K regression. It feeds a world-anchored
@@ -257,7 +257,7 @@ From this directory:
 
 ```powershell
 dotnet build IntegrationProbe.csproj -c Release --configfile ../NuGet.Config
-./bin/Release/net10.0-windows10.0.22621.0/IntegrationProbe.exe
+./bin/Release/net11.0-windows10.0.22621.0/IntegrationProbe.exe
 ```
 
 Build DXR first so its bundled DXC exists. Model assets are copied into the probe's
